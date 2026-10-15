@@ -1,0 +1,145 @@
+{
+  "captured": {
+    "engine": "opencode v2.0.29 (ACP: `opencode acp`)",
+    "date": "2026-10-16",
+    "sources": [".pluton-tmp/acp-probe.log (probe #1)", ".pluton-tmp/acp-probe2.log (probe #2)"],
+    "edits": [
+      "session ids replaced with stable placeholders (ses_recorded_*)",
+      "available_commands_update trimmed to 3 entries (the real frame carried 90+)",
+      "whitespace-normalized, field order preserved"
+    ]
+  },
+  "initializeResult": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "mcpCapabilities": { "http": true, "sse": false },
+      "promptCapabilities": { "embeddedContext": true, "image": true },
+      "sessionCapabilities": {
+        "additionalDirectories": {},
+        "close": {},
+        "delete": {},
+        "fork": {},
+        "list": {},
+        "resume": {}
+      },
+      "_meta": { "opencode/child-session-updates": true }
+    },
+    "authMethods": [
+      {
+        "description": "Run `opencode auth login` in the terminal",
+        "name": "Login with opencode",
+        "id": "opencode-login"
+      }
+    ],
+    "agentInfo": { "name": "OpenCode", "version": "2.0.29" }
+  },
+  "sessionNew": {
+    "configOptions": [
+      {
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "opencode/nemotron-3.5-super-vl-free",
+        "options": [
+          { "value": "opencode/big-pickle", "name": "opencode/Big Pickle" },
+          { "value": "opencode/cat-jam-free", "name": "opencode/Cat Jam Free" },
+          { "value": "opencode/deepseek-v4.1-flash-free", "name": "opencode/DeepSeek V4.1 Flash Free" },
+          { "value": "opencode/longcat-2.5-preview-free", "name": "opencode/LongCat 2.5 Preview Free" },
+          { "value": "opencode/mimo-v2.6-flash-free", "name": "opencode/MiMo-V2.6-Flash Free" },
+          { "value": "opencode/muse-spark-1.3-contributor-free", "name": "opencode/Muse Spark 1.3 Free" },
+          { "value": "opencode/nemotron-3-ultra-free", "name": "opencode/Nemotron 3 Ultra Free" },
+          { "value": "opencode/nemotron-3.5-lightning-free", "name": "opencode/Nemotron 3.5 Lightning Free" },
+          { "value": "opencode/nemotron-3.5-super-vl-free", "name": "opencode/Nemotron 3.5 Super VL Free" },
+          { "value": "opencode/space-bunny-free", "name": "opencode/Space Bunny Free" },
+          { "value": "opencode/step-5-preview-free", "name": "opencode/Step 5 Preview Free" }
+        ]
+      },
+      {
+        "id": "effort",
+        "name": "Effort",
+        "description": "Available effort levels for this model",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": "default",
+        "options": [
+          { "value": "none", "name": "None" },
+          { "value": "minimal", "name": "Minimal" },
+          { "value": "low", "name": "Low" },
+          { "value": "medium", "name": "Medium" },
+          { "value": "high", "name": "High" },
+          { "value": "xhigh", "name": "Xhigh" },
+          { "value": "default", "name": "Default" }
+        ]
+      },
+      {
+        "id": "mode",
+        "name": "Session Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "build",
+        "options": [
+          { "value": "build", "name": "Build", "description": "Primary coding agent for development work" },
+          { "value": "plan", "name": "Plan", "description": "Read-only agent for exploring the codebase and planning work before implementation." }
+        ]
+      }
+    ]
+  },
+  "promptUpdates": [
+    {
+      "sessionUpdate": "available_commands_update",
+      "availableCommands": [
+        { "name": "init", "description": "guided AGENTS.md setup" },
+        { "name": "review", "description": "review changes [commit|branch|pr], defaults to uncommitted" },
+        { "name": "plan", "description": "Create implementation plan with risk assessment" }
+      ]
+    },
+    {
+      "sessionUpdate": "agent_thought_chunk",
+      "messageId": "msg_recorded_thought",
+      "content": {
+        "type": "text",
+        "text": "The user is asking me to reply with exactly \"PLUTON_ACP_OK\" and nothing else."
+      }
+    },
+    {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_recorded_message",
+      "content": { "type": "text", "text": "PLUTON_ACP_OK" }
+    },
+    {
+      "sessionUpdate": "usage_update",
+      "used": 16554,
+      "size": 1048576,
+      "cost": { "amount": 0, "currency": "USD" }
+    }
+  ],
+  "promptResult": {
+    "stopReason": "end_turn",
+    "usage": { "inputTokens": 16525, "outputTokens": 8, "totalTokens": 16554, "thoughtTokens": 21 }
+  },
+  "toolCallPair": [
+    {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call_recorded_1",
+      "name": "write",
+      "title": "write",
+      "kind": "edit",
+      "status": "pending",
+      "locations": [],
+      "rawInput": {}
+    },
+    {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call_recorded_1",
+      "status": "completed",
+      "kind": "edit",
+      "title": "write",
+      "locations": [{ "path": "probe2-write.txt" }],
+      "content": [{ "type": "content", "content": { "type": "text", "text": "Created file successfully: probe2-write.txt" } }]
+    }
+  ],
+  "cancelResult": { "stopReason": "cancelled" },
+  "loadResult": { "configOptionsNote": "session/load returns { configOptions } (verified probe #2)" }
+}

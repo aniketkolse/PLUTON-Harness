@@ -105,6 +105,27 @@ export class EngineMissingError extends PlutonError {
   }
 }
 
+export class EngineAuthMissingError extends PlutonError {
+  constructor(engineKind: string, hint: string) {
+    super('engine_auth_missing', `engine '${engineKind}' is not authenticated. ${hint}`, {
+      details: { engineKind, hint },
+    })
+    this.name = 'EngineAuthMissingError'
+  }
+}
+
+/**
+ * The engine's structured protocol misbehaved: malformed frames, timeouts,
+ * unexpected responses, or a transport that died mid-request. Distinct from
+ * `engine_missing` (not installed) and `capability_unsupported` (declared gap).
+ */
+export class EngineProtocolError extends PlutonError {
+  constructor(message: string, options: PlutonErrorOptions = {}) {
+    super('engine_protocol_error', message, options)
+    this.name = 'EngineProtocolError'
+  }
+}
+
 export class NotImplementedError extends PlutonError {
   constructor(what: string) {
     super('not_implemented', `${what} is not implemented in this build`, { details: { what } })

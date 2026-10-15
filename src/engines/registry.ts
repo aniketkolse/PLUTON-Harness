@@ -1,6 +1,7 @@
 import { ValidationError } from '../domain/errors.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { MockEngineAdapter } from './mock/adapter.ts'
+import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
 
 export interface EngineFactory {
   kind: string
@@ -36,5 +37,11 @@ export function registerBuiltinEngines(): void {
     description: 'deterministic mock engine (tests/dev only; no model inference)',
     devOnly: true,
     create: () => new MockEngineAdapter(),
+  })
+  registerEngine({
+    kind: 'opencode',
+    description: 'OpenCode CLI over ACP (stdio JSON-RPC; verified against v2.0.29)',
+    devOnly: false,
+    create: () => new OpenCodeEngineAdapter(),
   })
 }
