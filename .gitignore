@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+
+# Pluton private runtime state (never committed)
+.pluton/state/
+.pluton/engine-homes/
+.pluton/worktrees/
+.pluton/logs/
+.pluton/workspaces/
+.pluton/cache/
+
+# Local scratch (agent session artifacts)
+.pluton-tmp/
+
+# Reference checkouts for reverse engineering (reproducible via documented SHAs)
+references/
+
+# Secrets and local environment — only .env.example is committed
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*.log
