@@ -99,7 +99,7 @@ References (read-only, recorded commits):
   OpenAI-compatible gateway (no new external credentials); `PLUTON_QWEN_BIN` /
   `npm i -g @qwen-code/qwen-code` documented in the adapter and live-test header
 
-## Phase 5 — Sandboxes, workspace, tmux `[~]`
+## Phase 5 — Sandboxes, workspace, tmux `[x]`
 
 - [x] Worker image (`docker/worker/Dockerfile`: tmux, git, node, non-root uid 10001) + `src/sandbox/image.ts`
       build/probe module recording the built image ID for drift detection (`pluton sandbox build-image`)
@@ -111,8 +111,9 @@ References (read-only, recorded commits):
 - [x] Isolated checkouts: per-task `git clone --local`, branch `pluton/<run>/<slug>`, hardlink fallback,
       Pluton-owned removal guards (`src/workspace/manager.ts`) + tests; workspace/sandbox/terminal registry
       rows in the store
-- [ ] Cross-Muse isolation tests (Docker-dependent → gated `tests/e2e/` suite; NOT RUN until the daemon is
-      available on this host — reproducible via `npm run test:e2e` after `pluton sandbox build-image`)
+- [x] Cross-Muse isolation tests: gated E2E suite (`tests/e2e/docker-sandbox.e2e.test.ts`) is 5/5
+      green on this host with `PLUTON_E2E_DOCKER=1` after `pluton sandbox build-image`; skips cleanly
+      (0 run, exit 0) where no daemon/image is available — never silently passes
 
 ## Phase 6 — Manager and team execution `[ ]`
 
@@ -140,13 +141,16 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phases 0–4 complete (commits `1bd251e` … `8808b1b`). Live status: 14 test files / 169 tests green
+_Phases 0–5 complete (commits `1bd251e` … `13b3859`). Live status: 231 tests / 18 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
 `muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
-errors), `engine list`, `status`, `task list/show`, `graph`, `version` — all with clean `--json`.
-Planned commands (`run`, `attach`, `verify`, `integrate`) fail with a stable `not_implemented`
-code. Live engine suites are opt-in (`npm run test:live`; OpenCode 3/3, Qwen 4/4 green on this
-host). Docker-dependent suites: NOT RUN (daemon stopped at build time) — reproducible commands
-live in the test configs. Next: Phase 5 sandboxes/workspaces/tmux, then Phases 6–8._
+errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task list/show`, `graph`,
+`version` — all with clean `--json`. Planned commands (`run`, `attach`, `verify`, `integrate`) fail
+with a stable `not_implemented` code. Live engine suites are opt-in (`npm run test:live`; OpenCode
+3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
+(`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
+Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`) 5/5 green — container lifecycle + tmux roundtrip;
+`pluton doctor` fully green with tmux verified inside the image. Next: Phase 6 (manager flow +
+restricted Pluton tool bridge over MCP stdio), then Phases 7–8._

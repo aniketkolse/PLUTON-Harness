@@ -1,7 +1,6 @@
 # ADR-0005 — Per-Muse vs per-task checkout and terminal lifecycle
 
-- Status: **Proposed** (2026-10-16) — finalized in Phase 5 after reference-repo findings and
-  workspace tests on this host
+- Status: **Accepted** (2026-10-16) — implemented and tested in Phase 5 (evidence below)
 
 ## Context
 
@@ -45,5 +44,17 @@ managed engine process.
 
 ## Evidence
 
-- Pending: Phase 1 reverse-engineering reports; Phase 5 workspace tests (`git clone --local`
-  behavior on this host, container mount visibility tests if Docker available).
+- `tests/unit/workspace.test.ts` (8 green): `git clone --local` exercised against a real local
+  repository on this host (hardlink path), fallback to a full local clone when hardlinks are
+  unavailable, branch naming `pluton/<run>/<slug>`, and removal guards that refuse any path without
+  the Pluton ownership marker (the user's repository is never touched).
+- `tests/unit/terminal.test.ts` (26 green): exact tmux argv conformance including `=`-exact session
+  and window targets, CRLF-tolerant window list parsing, typed failure reasons, and naming
+  sanitization with hash-capped uniqueness.
+- Real-container E2E (2026-10-16, `PLUTON_E2E_DOCKER=1 npm run test:e2e`, 5/5 green): tmux session
+  and task window created idempotently inside the worker container, a marker typed into the pane and
+  read back through `capture-pane`, window kill → `killed` then `absent`.
+- Naming decision (as implemented): session `pluton_<project-slug>_<muse-id tail>`, window
+  `task-<task-id tail>` plus the constant `shell` window. Deterministic for recomputation, but the
+  registry row (`terminals.tmux_session_name`) is the authority the runtime resolves against — names
+  are never re-derived for targeting by display name (which could collide).

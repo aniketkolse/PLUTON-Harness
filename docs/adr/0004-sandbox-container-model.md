@@ -56,3 +56,15 @@ be running (observed: Docker Desktop installed, daemon stopped at recon time).
 - Recon: `docker --version` → 29.7.2; daemon probe failed (`npipe ... daemon is not running`);
   WSL2 present (`docker-desktop` distro stopped).
 - Threat model: docs/SECURITY.md.
+- Phase 5 (2026-10-16, daemon started on this host; Docker Desktop install is per-user under
+  `%LOCALAPPDATA%\Programs\DockerDesktop`):
+  - `pluton sandbox build-image` → `pluton-worker:local` = `sha256:a6c8367674f0d794d00e6985138ebc3650cfb3c320a9a93824d67ef5983a8c36`;
+    `tmux 3.3a` and `node v24.22.0` verified by running them inside the image before the record was written.
+  - Gated E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`): 5/5 green — container create/start with the
+    hardening argv (non-root `10001:10001`, cap-drop, limits, `--network none`, noexec tmpfs), bounded
+    argv execs, tmux session/window idempotency, `send-keys` → `capture-pane` marker roundtrip, kill
+    lifecycle. File: `tests/e2e/docker-sandbox.e2e.test.ts`.
+  - `pluton doctor` on the provisioned project: docker-daemon pass (server 29.7.2), sandbox pass,
+    worker-image pass (recorded-ID match), tmux pass verified inside the image — not a claim.
+  - Unit conformance: `tests/unit/sandbox.test.ts` (12) asserts the exact `docker create` argv and the
+    label-guarded stop/remove; `tests/unit/sandbox-image.test.ts` (10) covers build/probe/drift.
