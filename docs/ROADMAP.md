@@ -34,7 +34,7 @@ Environment (verified 2026-10-16, Windows 11 build 26300, `Y:` fixed drive, 160 
 - [x] Write docs/ROADMAP.md and checklist
 - [x] Record environment facts above
 
-## Phase 1 — Reference reverse engineering `[~]`
+## Phase 1 — Reference reverse engineering `[x]`
 
 References (read-only, recorded commits):
 
@@ -44,35 +44,40 @@ References (read-only, recorded commits):
 | [OpenMausBot](https://github.com/milind-soni/OpenMausBot) | main | `7d008053cbdb255c2078fbf772630e634000dce5` | 2026-10-15 | Apache-2.0 except `enterprise/` (source-available carve-out); trademark restrictions |
 
 - [x] Clone references into `references/` (read-only usage), record SHA/branch/date/license
-- [~] Three bounded read-only research subagents (SCRATCH: report files only; OpenCode child
+- [x] Three bounded read-only research subagents (SCRATCH: report files only; OpenCode child
       sessions provide context isolation; tmux not applicable to subagent execution on this
       host — documented limitation, no false sandbox claims):
-  - [~] `cloudroom-core` full analysis → `docs/reverse-engineering/cloudroom-core.md`
-  - [~] OpenMausBot runtime/engines → `docs/reverse-engineering/openmausbot-runtime.md`
-  - [~] OpenMausBot MCP/tools/licensing → `docs/reverse-engineering/openmausbot-mcp-workspaces-tests-licensing.md`
-- [ ] `docs/reverse-engineering/comparison-matrix.md`
-- [ ] `docs/reverse-engineering/architecture-map.md`
-- [ ] `docs/reverse-engineering/reuse-and-license-audit.md`
-- [ ] `docs/reverse-engineering/implementation-decisions.md`
+  - [x] `cloudroom-core` full analysis → `docs/reverse-engineering/cloudroom-core.md`
+  - [x] OpenMausBot runtime/engines → `docs/reverse-engineering/openmausbot-runtime.md`
+  - [x] OpenMausBot MCP/tools/licensing → `docs/reverse-engineering/openmausbot-mcp-workspaces-tests-licensing.md`
+- [x] `docs/reverse-engineering/comparison-matrix.md`
+- [x] `docs/reverse-engineering/architecture-map.md`
+- [x] `docs/reverse-engineering/reuse-and-license-audit.md` (reuse register: empty; grep-verified)
+- [x] `docs/reverse-engineering/implementation-decisions.md` (status lines reconciled after Phase 3)
 
-## Phase 2 — Design and skeleton `[ ]`
+## Phase 2 — Design and skeleton `[x]`
 
-- [ ] ADRs 0001–0010 (language/runtime, SQLite driver, engine protocol + first two engines,
-      sandbox model, checkout/terminal lifecycle, task persistence/idempotency, delegation
-      policy, secret storage, Git integration, Windows/WSL2 boundary)
-- [ ] Monorepo scaffold (npm workspaces, strict TS, ESM, vitest), lint/typecheck/test scripts
-- [ ] Typed domain IDs/models + explicit tested state machine
-- [ ] Validated versioned `pluton.yaml` config (Zod)
-- [ ] Port interfaces: engine, sandbox, terminal, persistence, workspace
-- [ ] Working `pluton --help`, `pluton version`, `pluton doctor` scaffold
-- [ ] Clean build/typecheck/test proof
+- [x] ADRs 0001–0010 + 0011 (license/reuse policy). Numbers chosen: language/runtime, SQLite driver,
+      engine protocol (Proposed; addendum in Phase 4), sandbox, checkout/terminal lifecycle
+      (Proposed), task persistence/idempotency, delegation, secrets, Git strategy, Windows/WSL2,
+      independence/licensing. Single private package (no npm workspaces) — ADR-0001.
+- [x] Monorepo scaffold (strict TS, ESM, vitest), typecheck/test/check scripts
+- [x] Typed domain IDs/models + explicit tested state machine (`src/domain/`, 60+ cases incl. run transitions)
+- [x] Validated versioned `pluton.yaml` config (Zod; argv-only commands; path-escape rejection)
+- [~] Port interfaces: engine contract done (`src/engines/contract/types.ts`); sandbox/terminal/
+      workspace interfaces land with their Phase 5 managers (persistence port = `src/store/`)
+- [x] Working `pluton --help`, `pluton version`, `pluton doctor`, `pluton init`, `pluton muse …`,
+      `pluton engine list` (smoke-tested; JSON envelopes clean)
+- [x] Clean typecheck/test proof (`npm run check`; failures honestly reported — exit code 1 on doctor FAIL)
 
-## Phase 3 — Persistence and runtime `[ ]`
+## Phase 3 — Persistence and runtime `[x]`
 
-- [ ] SQLite migrations (node:sqlite) + transactional run/task/receipt/event store
-- [ ] Task graph validation, dependency admission, budgets, scheduler
-- [ ] Idempotency (request receipts), crash reload, lifecycle transitions — mock-engine tests first
-- [ ] `pluton status`, `task list/show`, `tasks graph`, JSON output modes
+- [x] SQLite migrations (node:sqlite) + transactional run/task/receipt/event store (`src/store/`)
+- [x] Task graph validation, dependency admission, budgets, scheduler readiness (`src/orchestrator/`)
+- [x] Idempotency (request receipts), crash reload, lifecycle transitions — 24 store/graph tests incl.
+      duplicate→same receipt, changed payload→conflict, rollback, reopen; per-Muse KeyedMutex tested
+      (executor-level runs arrive with engine adapters in Phase 4)
+- [x] `pluton status`, `task list/show`, `graph` with `--json` (integration tests spawn the real CLI)
 
 ## Phase 4 — Engine adapters `[ ]`
 
@@ -119,4 +124,9 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Nothing shipped yet; Phase 0 complete, Phase 1 in progress._
+_Phase 0–3 complete. Live status as of commit `c53d9c8`: 8 test files / 68 tests green
+(`npm run check`). Working CLI: `init`, `doctor`, `muse list/show/create/edit`, `muse model list`,
+`engine list`, `status`, `task list/show`, `graph`, `version` — all with `--json`. Planned commands
+(`run`, `attach`, `verify`, `integrate`) fail with a stable `not_implemented` code. Docker-dependent
+suites: NOT RUN (daemon stopped at recon time) — reproducible commands live in `docs/` test configs
+(`npm run test:e2e`). Next: Phase 4 engine adapters (OpenCode first)._
