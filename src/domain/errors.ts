@@ -112,6 +112,13 @@ export class NotImplementedError extends PlutonError {
   }
 }
 
+export class InternalError extends PlutonError {
+  constructor(message: string, options: PlutonErrorOptions = {}) {
+    super('internal_error', message, options)
+    this.name = 'InternalError'
+  }
+}
+
 export class ExternalToolError extends PlutonError {
   constructor(tool: string, message: string, details?: unknown) {
     super('external_tool_error', `${tool}: ${message}`, { details })

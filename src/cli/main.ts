@@ -12,10 +12,21 @@ import { Command } from 'commander'
 import { NotImplementedError, ValidationError } from '../domain/errors.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
 import { PLUTON_VERSION } from '../version.ts'
+import { bootstrapStore } from '../bootstrap.ts'
 import { requireProject } from './context.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
+import {
+  graphHuman,
+  graphView,
+  runByRef,
+  runDetail,
+  runLine,
+  statusRuns,
+  taskById,
+  taskListHuman,
+} from './commands/status.ts'
 import { emitOk, renderChecks, runCommand, stdIo, summarizeChecks, table } from './output.ts'
 
 const TEAM_TEMPLATES: readonly TeamTemplate[] = ['full-stack', 'bugfix', 'repository-analysis']
@@ -317,15 +328,154 @@ engineCmd
   })
 
 // ---------------------------------------------------------------------------
+// status / task / graph — read durable state (Phase 3)
+// ---------------------------------------------------------------------------
+
+program
+  .command('status')
+  .description('show recent runs and their task-state counts from durable state')
+  .option('--run <id>', 'show one run in detail (full id or unique suffix)')
+  .option('--limit <n>', 'how many runs to list (default 10)', '10')
+  .action(async (opts: { run?: string; limit: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const limit = Number.parseInt(opts.limit, 10)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+        throw new ValidationError('--limit must be an integer between 1 and 500')
+      }
+      const { store } = bootstrapStore(ctx.loaded)
+      try {
+        if (opts.run !== undefined) {
+          const run = runByRef(store, opts.run)
+          const detail = runDetail(store, run.id)
+          const counts = Object.entries(detail.summary.taskCounts)
+            .map(([state, n]) => `${state}:${n}`)
+            .join('  ')
+          const human = [
+            `run      ${detail.summary.run.id}`,
+            `goal     ${detail.summary.run.goal}`,
+            `state    ${detail.summary.run.state}`,
+            `manager  ${detail.summary.run.managerMuseId}`,
+            `budget   max_tasks=${detail.summary.run.budget.maxTasks} depth=${detail.summary.run.budget.maxDelegationDepth} workers=${detail.summary.run.budget.maxConcurrentWorkers}`,
+            `tasks    ${detail.summary.totalTasks}${counts ? ` (${counts})` : ''}`,
+            `events   ${detail.recentEvents.length} most recent`,
+            ...detail.recentEvents.map((e) => `  #${e.seq} ${e.type}${e.taskId ? ` task=${e.taskId.slice(-8)}` : ''}`),
+          ].join('\n')
+          emitOk(io, json, human, detail)
+        } else {
+          const runs = statusRuns(store, limit)
+          const human =
+            runs.length === 0
+              ? 'no runs recorded yet (runs are created by `pluton run`, which is still planned)'
+              : runs
+                  .map((s) => {
+                    const counts = Object.entries(s.taskCounts)
+                      .map(([state, n]) => `${state}:${n}`)
+                      .join(' ')
+                    return `${runLine(s.run)}${counts ? `  [${counts}]` : ''}`
+                  })
+                  .join('\n')
+          emitOk(io, json, human, { runs })
+        }
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+const taskCmd = program.command('task').description('inspect tasks recorded in durable state')
+
+taskCmd
+  .command('list <run>')
+  .description('list tasks of a run (full run id or unique suffix)')
+  .action(async (runRef: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { store } = bootstrapStore(ctx.loaded)
+      try {
+        const run = runByRef(store, runRef)
+        const tasks = store.listTasks(run.id)
+        emitOk(io, json, taskListHuman(tasks), { runId: run.id, count: tasks.length, tasks })
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+taskCmd
+  .command('show <task>')
+  .description('show one task with its dependencies (full id or unique suffix)')
+  .action(async (taskRef: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { store } = bootstrapStore(ctx.loaded)
+      try {
+        const task = taskById(store, taskRef)
+        const edges = store.listEdges(task.runId).filter(
+          (e) => e.fromTaskId === task.id || e.toTaskId === task.id,
+        )
+        const human = [
+          `task      ${task.id}`,
+          `title     ${task.title}`,
+          `state     ${task.state} (attempt ${task.attempt})`,
+          `run       ${task.runId}`,
+          `parent    ${task.parentTaskId ?? '(root)'}   depth ${task.depth}`,
+          `assignee  ${task.assigneeMuseId ?? '(unassigned)'}`,
+          `workspace ${task.workspaceId ?? '(none)'}`,
+          `engine    session ${task.engineSessionId ?? '(none)'}`,
+          `created   ${task.createdAt}`,
+          task.startedAt ? `started   ${task.startedAt}` : '',
+          task.completedAt ? `completed ${task.completedAt}` : '',
+          task.acceptanceCriteria.length > 0
+            ? `acceptance:\n${task.acceptanceCriteria.map((c) => `  - ${c}`).join('\n')}`
+            : '',
+          edges.length > 0
+            ? `edges:\n${edges
+                .map((e) => `  ${e.fromTaskId.slice(-8)} --${e.kind}--> ${e.toTaskId.slice(-8)}`)
+                .join('\n')}`
+            : '',
+          task.result !== null ? `result: ${JSON.stringify(task.result)}` : '',
+          task.failure !== null ? `failure: ${JSON.stringify(task.failure)}` : '',
+          '',
+          `brief:\n${task.brief}`,
+        ]
+          .filter((s) => s.length > 0)
+          .join('\n')
+        emitOk(io, json, human, { task, edges })
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+program
+  .command('graph <run>')
+  .description('show the delegation + dependency graph of a run (full run id or unique suffix)')
+  .action(async (runRef: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { store } = bootstrapStore(ctx.loaded)
+      try {
+        const run = runByRef(store, runRef)
+        const view = graphView(store, run.id)
+        emitOk(io, json, graphHuman(view), view)
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+// ---------------------------------------------------------------------------
 // Planned commands — explicit, stable `not_implemented` failures.
 // ---------------------------------------------------------------------------
 
 for (const [name, planned] of [
   ['run', 'start an orchestration run (Manager-driven team execution)'],
-  ['status', 'show run/task status from durable state'],
-  ['task', 'inspect and control tasks inside a run'],
   ['attach', 'attach to a Muse terminal (tmux in its container)'],
-  ['graph', 'show the task dependency graph of a run'],
   ['verify', 'run verification checks for a run'],
   ['integrate', 'integrate verified task branches through the integration checkout'],
 ] as const) {

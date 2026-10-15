@@ -96,6 +96,30 @@ export const RUN_STATES = [
 
 export type RunState = (typeof RUN_STATES)[number]
 
+const RUN_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
+  created: ['active', 'cancelled', 'failed'],
+  active: ['awaiting_approval', 'awaiting_input', 'verifying', 'completed', 'failed', 'cancelled', 'uncertain'],
+  awaiting_approval: ['active', 'cancelled', 'failed'],
+  awaiting_input: ['active', 'cancelled', 'failed'],
+  verifying: ['completed', 'failed', 'cancelled', 'uncertain', 'active'],
+  completed: [],
+  failed: [],
+  cancelled: [],
+  uncertain: [],
+}
+
+export function isRunState(value: string): value is RunState {
+  return (RUN_STATES as readonly string[]).includes(value)
+}
+
+export function canRunTransition(from: RunState, to: RunState): boolean {
+  return RUN_TRANSITIONS[from].includes(to)
+}
+
+export function assertRunTransition(from: RunState, to: RunState): void {
+  if (!canRunTransition(from, to)) throw new StateTransitionError(from, to, 'run')
+}
+
 /**
  * Engine *process* state — distinct from task state and run state.
  */
