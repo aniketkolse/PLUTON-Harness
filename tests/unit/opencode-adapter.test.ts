@@ -430,7 +430,8 @@ describe('opencode adapter: pure helpers', () => {
     const flat = readModelOption([
       { id: 'model', currentValue: 'a', options: [{ value: 'a' }, { value: 'b' }] },
     ])
-    expect(flat).toEqual({ id: 'model', currentValue: 'a', values: ['a', 'b'] })
+    expect(flat).toMatchObject({ id: 'model', currentValue: 'a', values: ['a', 'b'] })
+    expect(flat?.choices.map((c) => c.value)).toEqual(['a', 'b'])
     const grouped = readModelOption([
       {
         id: 'model',

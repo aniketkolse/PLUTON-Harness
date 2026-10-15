@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { delimiter, posix, win32 } from 'node:path'
-import { ValidationError } from '../../domain/errors.ts'
 
 /**
  * Locating the `opencode` executable without a shell.
@@ -143,8 +142,6 @@ export function describeLooked(looked: string[]): string {
   return looked.length === 0 ? '(PATH is empty)' : looked.slice(0, 8).join(delimiter)
 }
 
-export function assertNonEmptyModel(model: string): void {
-  if (typeof model !== 'string' || model.trim() === '') {
-    throw new ValidationError("muse.model must be a non-empty provider-qualified model id (e.g. 'opencode/deepseek-v4.1-flash-free')")
-  }
-}
+import { assertNonEmptyModel } from '../acp/options.ts'
+
+export { assertNonEmptyModel }

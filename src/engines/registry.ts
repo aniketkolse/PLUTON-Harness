@@ -2,6 +2,7 @@ import { ValidationError } from '../domain/errors.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { MockEngineAdapter } from './mock/adapter.ts'
 import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
+import { QwenEngineAdapter } from './qwen/adapter.ts'
 
 export interface EngineFactory {
   kind: string
@@ -43,5 +44,11 @@ export function registerBuiltinEngines(): void {
     description: 'OpenCode CLI over ACP (stdio JSON-RPC; verified against v2.0.29)',
     devOnly: false,
     create: () => new OpenCodeEngineAdapter(),
+  })
+  registerEngine({
+    kind: 'qwen',
+    description: 'Qwen Code CLI over ACP (stdio JSON-RPC; verified against v0.25.2; needs OPENAI_*/DASHSCOPE_* env or a per-Muse login)',
+    devOnly: false,
+    create: () => new QwenEngineAdapter(),
   })
 }

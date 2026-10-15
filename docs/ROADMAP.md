@@ -79,15 +79,25 @@ References (read-only, recorded commits):
       (executor-level runs arrive with engine adapters in Phase 4)
 - [x] `pluton status`, `task list/show`, `graph` with `--json` (integration tests spawn the real CLI)
 
-## Phase 4 — Engine adapters `[ ]`
+## Phase 4 — Engine adapters `[x]`
 
-- [ ] Engine contract + capability schema + conformance suite
-- [ ] OpenCode adapter over its structured protocol (ACP stdio primary; verify live)
-- [ ] Second real engine adapter (selection via ADR after protocol comparison; fixtures +
-      opt-in live tests)
-- [ ] Deterministic mock engine (tests only)
-- [ ] Per-Muse engine/model validation, model discovery, auth-readiness checks, event
+- [x] Engine contract + capability schema + conformance suite (`src/engines/contract/`; capability
+      records cross-checked per adapter; unsupported features raise `capability_unsupported`)
+- [x] ACP client over stdio (in-repo, no dependency): framing, message-size cap, bounded
+      stdout/stderr diagnostics, request timeouts, server→client request handling, kill/reap
+- [x] OpenCode adapter over `opencode acp` (live-verified v2.0.29): model pinning via
+      `session/set_config_option`, resume via `session/load` (codeword recall), cancel, approvals,
+      usage; offline conformance suite replays recorded frames
+- [x] Second real engine: **Qwen Code** (`qwen --acp`, v0.25.2), selected and verified per the
+      ADR-0003 Phase-4 addendum: explicit mode pinning (`auto`→`default`), composite model values,
+      documented absence of `session/close`, qwen-specific notifications ignored, unknown server
+      requests refused with -32601, auth mapping (-32000), live suite including resume recall
+- [x] Deterministic mock engine (tests only)
+- [x] Per-Muse engine/model validation, model discovery, auth-readiness checks, event
       normalization, interrupt/cancel, resume handling
+- Note: the live Qwen path on this host is backed by the operator's local 9router
+  OpenAI-compatible gateway (no new external credentials); `PLUTON_QWEN_BIN` /
+  `npm i -g @qwen-code/qwen-code` documented in the adapter and live-test header
 
 ## Phase 5 — Sandboxes, workspace, tmux `[ ]`
 
