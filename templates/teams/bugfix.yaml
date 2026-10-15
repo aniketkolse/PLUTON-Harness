@@ -14,10 +14,10 @@ runtime:
   max_tasks_per_run: 8
   max_run_minutes: 45
   default_task_minutes: 20
+  network_policy: restricted
 
 sandbox:
   kind: docker
-  network_policy: restricted
 
 git:
   require_approval_for_main_branch_integration: true
@@ -43,7 +43,8 @@ muses:
   qa:
     display_name: QA
     role: tester
-    engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    # Mixed engines (prompt §4): every Muse owns its engine+model; QA runs on Qwen Code here.
+    engine: qwen
+    model: cbai/glm-5.2
     instructions_file: .pluton/roles/qa.md
     permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run]

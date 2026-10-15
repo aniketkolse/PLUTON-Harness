@@ -63,8 +63,10 @@ muses:
   worker-b:
     display_name: Worker B
     role: coder
-    engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    # Mixed engines (prompt §4): Worker A and Worker B deliberately differ —
+    # replace model ids with ones from `pluton muse model list worker-b`.
+    engine: qwen
+    model: cbai/glm-5.2
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
     permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
