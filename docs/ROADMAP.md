@@ -58,9 +58,9 @@ References (read-only, recorded commits):
 ## Phase 2 — Design and skeleton `[x]`
 
 - [x] ADRs 0001–0010 + 0011 (license/reuse policy). Numbers chosen: language/runtime, SQLite driver,
-      engine protocol (Proposed; addendum in Phase 4), sandbox, checkout/terminal lifecycle
-      (Proposed), task persistence/idempotency, delegation, secrets, Git strategy, Windows/WSL2,
-      independence/licensing. Single private package (no npm workspaces) — ADR-0001.
+      engine protocol (accepted; Phase-4 addendum in ADR-0003), sandbox, checkout/terminal
+      lifecycle (Proposed), task persistence/idempotency, delegation, secrets, Git strategy,
+      Windows/WSL2, independence/licensing. Single private package (no npm workspaces) — ADR-0001.
 - [x] Monorepo scaffold (strict TS, ESM, vitest), typecheck/test/check scripts
 - [x] Typed domain IDs/models + explicit tested state machine (`src/domain/`, 60+ cases incl. run transitions)
 - [x] Validated versioned `pluton.yaml` config (Zod; argv-only commands; path-escape rejection)
@@ -134,9 +134,13 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phase 0–3 complete. Live status as of commit `c53d9c8`: 8 test files / 68 tests green
-(`npm run check`). Working CLI: `init`, `doctor`, `muse list/show/create/edit`, `muse model list`,
-`engine list`, `status`, `task list/show`, `graph`, `version` — all with `--json`. Planned commands
-(`run`, `attach`, `verify`, `integrate`) fail with a stable `not_implemented` code. Docker-dependent
-suites: NOT RUN (daemon stopped at recon time) — reproducible commands live in `docs/` test configs
-(`npm run test:e2e`). Next: Phase 4 engine adapters (OpenCode first)._
+_Phases 0–4 complete (commits `1bd251e` … `8808b1b`). Live status: 14 test files / 169 tests green
+(`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
+(live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
+operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
+`muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
+errors), `engine list`, `status`, `task list/show`, `graph`, `version` — all with clean `--json`.
+Planned commands (`run`, `attach`, `verify`, `integrate`) fail with a stable `not_implemented`
+code. Live engine suites are opt-in (`npm run test:live`; OpenCode 3/3, Qwen 4/4 green on this
+host). Docker-dependent suites: NOT RUN (daemon stopped at build time) — reproducible commands
+live in the test configs. Next: Phase 5 sandboxes/workspaces/tmux, then Phases 6–8._
