@@ -1,0 +1,49 @@
+# Pluton bugfix team template — a minimal team for one focused fix + verification.
+version: 1
+
+project:
+  name: __PROJECT_NAME__
+  repository: .
+  default_branch: __DEFAULT_BRANCH__
+  verification: []
+
+runtime:
+  max_concurrent_workers: 2
+  max_team_size: 4
+  max_delegation_depth: 2
+  max_tasks_per_run: 8
+  max_run_minutes: 45
+  default_task_minutes: 20
+
+sandbox:
+  kind: docker
+  network_policy: restricted
+
+git:
+  require_approval_for_main_branch_integration: true
+
+muses:
+  manager:
+    display_name: Manager
+    role: supervisor
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/manager.md
+    workspace_policy: coordinator-read-only
+    permissions: [task.create, task.delegate, task.inspect, result.collect, verification.run, approval.request]
+
+  worker-a:
+    display_name: Worker A
+    role: coder
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/worker.md
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+
+  qa:
+    display_name: QA
+    role: tester
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/qa.md
+    permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run]

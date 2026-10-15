@@ -1,0 +1,89 @@
+# Pluton full-stack team template — copy into your project with `pluton init`
+# or adapt freely: every Muse may use a different engine and model.
+# Replace model ids with ones from `pluton muse model list <muse>`.
+version: 1
+
+project:
+  name: __PROJECT_NAME__
+  repository: .
+  default_branch: __DEFAULT_BRANCH__
+  verification: []
+  # Add safe, argv-array checks, e.g.:
+  #  - name: tests
+  #    command: ["npm", "test"]
+  #  - name: typecheck
+  #    command: ["npm", "run", "typecheck"]
+
+runtime:
+  max_concurrent_workers: 3
+  max_team_size: 8
+  max_delegation_depth: 3
+  max_tasks_per_run: 20
+  max_run_minutes: 90
+  default_task_minutes: 30
+  network_policy: restricted
+
+sandbox:
+  kind: docker
+
+git:
+  require_approval_for_main_branch_integration: true
+  protected_paths: []
+
+muses:
+  manager:
+    display_name: Manager
+    role: supervisor
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/manager.md
+    workspace_policy: coordinator-read-only
+    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, muse.propose_create]
+    approval_mode: ask-for-sensitive-actions
+
+  researcher:
+    display_name: Researcher
+    role: researcher
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/researcher.md
+    workspace_policy: read-only
+    permissions: [project.read, research.report, diff.inspect]
+    approval_mode: ask-for-sensitive-actions
+
+  worker-a:
+    display_name: Worker A
+    role: coder
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/worker.md
+    workspace_policy: isolated-task-checkout
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+
+  worker-b:
+    display_name: Worker B
+    role: coder
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/worker.md
+    workspace_policy: isolated-task-checkout
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+
+  qa:
+    display_name: QA
+    role: tester
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/qa.md
+    workspace_policy: isolated-task-checkout
+    permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run]
+
+  reviewer:
+    display_name: Reviewer
+    role: reviewer
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/reviewer.md
+    workspace_policy: read-only
+    permissions: [project.read, diff.inspect, tests.run, review.report]
+    approval_mode: ask-for-sensitive-actions

@@ -1,0 +1,38 @@
+# Pluton repository-analysis team template — research-only, read-only access.
+version: 1
+
+project:
+  name: __PROJECT_NAME__
+  repository: .
+  default_branch: __DEFAULT_BRANCH__
+  verification: []
+
+runtime:
+  max_concurrent_workers: 2
+  max_team_size: 3
+  max_delegation_depth: 1
+  max_tasks_per_run: 6
+  max_run_minutes: 30
+  network_policy: none
+
+sandbox:
+  kind: docker
+
+muses:
+  manager:
+    display_name: Manager
+    role: supervisor
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/manager.md
+    workspace_policy: coordinator-read-only
+    permissions: [task.create, task.delegate, task.inspect, result.collect, approval.request]
+
+  researcher:
+    display_name: Researcher
+    role: researcher
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/researcher.md
+    workspace_policy: read-only
+    permissions: [project.read, research.report, diff.inspect]
