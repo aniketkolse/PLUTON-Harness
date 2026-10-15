@@ -392,3 +392,197 @@ describe('receipts (idempotency)', () => {
     expect(() => store2.getTask('task_nope')).toThrow(NotFoundError)
   })
 })
+
+describe('workspace / sandbox / terminal registry (Phase 5)', () => {
+  function seedRunAndTask(store: Store, projectId: string): { runId: string; taskId: string } {
+    const run = store.createRun({
+      projectId,
+      goal: 'g',
+      origin: 'cli',
+      requestedBy: 'tester',
+      acceptanceCriteria: [],
+      managerMuseId: 'worker-a',
+      budget: BUDGET,
+    })
+    const task = store.createTask({
+      runId: run.id,
+      parentTaskId: null,
+      title: 't',
+      brief: 'b',
+      acceptanceCriteria: ['a'],
+      assigneeMuseId: 'worker-a',
+    })
+    return { runId: run.id, taskId: task.id }
+  }
+
+  it('creates, resolves, updates, and filters workspace records', () => {
+    const { store } = freshStore('workspaces')
+    const projectId = seedProject(store)
+    const { runId, taskId } = seedRunAndTask(store, projectId)
+    const ws = store.createWorkspace({
+      projectId,
+      runId,
+      taskId,
+      museId: 'worker-a',
+      kind: 'task-checkout',
+      path: join(tmpdir(), 'pluton-ws', taskId),
+      branch: `pluton/${runId}/${taskId}`,
+      baseCommit: 'a'.repeat(40),
+    })
+    expect(ws.state).toBe('active')
+    expect(ws.headCommit).toBeNull()
+    expect(ws.baseCommit).toBe('a'.repeat(40))
+    expect(store.getWorkspaceOrNull(ws.id)?.id).toBe(ws.id)
+    expect(store.getWorkspaceByTask(taskId)?.id).toBe(ws.id)
+
+    const advanced = store.updateWorkspace(ws.id, { headCommit: 'b'.repeat(40) })
+    expect(advanced.headCommit).toBe('b'.repeat(40))
+    expect(advanced.state).toBe('active')
+
+    const archived = store.updateWorkspace(ws.id, { state: 'archived' })
+    expect(archived.state).toBe('archived')
+    // The per-task lookup only ever returns the active checkout.
+    expect(store.getWorkspaceByTask(taskId)).toBeNull()
+    expect(store.listWorkspaces(projectId).map((w) => w.id)).toEqual([ws.id])
+    expect(store.listWorkspaces(projectId, 'active')).toEqual([])
+    expect(store.listWorkspaces(projectId, 'archived').map((w) => w.id)).toEqual([ws.id])
+  })
+
+  it('stores a project-level workspace (integration checkout) with no task or muse', () => {
+    const { store } = freshStore('workspaces2')
+    const projectId = seedProject(store)
+    const ws = store.createWorkspace({
+      projectId,
+      runId: null,
+      taskId: null,
+      museId: null,
+      kind: 'integration-checkout',
+      path: join(tmpdir(), 'pluton-ws', 'integration'),
+      branch: 'pluton/integration/run-1',
+      baseCommit: 'c'.repeat(40),
+    })
+    expect(ws.taskId).toBeNull()
+    expect(ws.runId).toBeNull()
+    expect(ws.museId).toBeNull()
+    expect(ws.kind).toBe('integration-checkout')
+  })
+
+  it('upserts one sandbox row per (project, muse) and keeps the record id stable', () => {
+    const { store } = freshStore('sandboxes')
+    const projectId = seedProject(store)
+    const first = store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'pluton-test-worker-a',
+      containerId: 'cid_1',
+      image: 'pluton-worker:dev',
+      state: 'creating',
+      createdBy: 'tester',
+    })
+    expect(store.getSandboxForMuse(projectId, 'worker-a')?.id).toBe(first.id)
+
+    const second = store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'pluton-test-worker-a',
+      containerId: 'cid_2',
+      image: 'pluton-worker:dev',
+      state: 'running',
+      createdBy: 'tester',
+    })
+    expect(second.id).toBe(first.id)
+    expect(second.state).toBe('running')
+    expect(second.containerId).toBe('cid_2')
+    expect(store.listSandboxes(projectId).length).toBe(1)
+  })
+
+  it('addresses a project-level sandbox (muse_id NULL) without colliding with muse rows', () => {
+    const { store } = freshStore('sandboxes2')
+    const projectId = seedProject(store)
+    const projectLevel = store.upsertSandbox({
+      projectId,
+      museId: null,
+      kind: 'local-process',
+      containerName: null,
+      containerId: null,
+      image: null,
+      state: 'running',
+      createdBy: 'tester',
+    })
+    expect(store.getSandboxForMuse(projectId, null)?.id).toBe(projectLevel.id)
+    expect(store.getSandboxForMuse(projectId, 'worker-a')).toBeNull()
+    store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'pluton-test-worker-a',
+      containerId: 'cid_1',
+      image: 'pluton-worker:dev',
+      state: 'running',
+      createdBy: 'tester',
+    })
+    expect(store.listSandboxes(projectId).length).toBe(2)
+  })
+
+  it('updates sandbox state with field patches, and unknown ids throw not_found', () => {
+    const { store } = freshStore('sandboxes3')
+    const projectId = seedProject(store)
+    const sb = store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'pluton-test-worker-a',
+      containerId: 'cid_1',
+      image: 'pluton-worker:dev',
+      state: 'creating',
+      createdBy: 'tester',
+    })
+    const stopped = store.setSandboxState(sb.id, 'stopped', { containerId: null })
+    expect(stopped.state).toBe('stopped')
+    expect(stopped.containerId).toBeNull()
+    expect(stopped.containerName).toBe('pluton-test-worker-a')
+    expect(() => store.setSandboxState('sandbox_nope', 'running')).toThrow(NotFoundError)
+  })
+
+  it('upserts one terminal row per (project, muse) and records state changes', () => {
+    const { store } = freshStore('terminals')
+    const projectId = seedProject(store)
+    const sb = store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'pluton-test-worker-a',
+      containerId: 'cid_1',
+      image: 'pluton-worker:dev',
+      state: 'running',
+      createdBy: 'tester',
+    })
+    const first = store.upsertTerminal({
+      projectId,
+      museId: 'worker-a',
+      sandboxId: sb.id,
+      tmuxSessionName: 'pluton_test_4f2a19',
+      state: 'absent',
+    })
+    expect(first.state).toBe('absent')
+
+    const second = store.upsertTerminal({
+      projectId,
+      museId: 'worker-a',
+      sandboxId: sb.id,
+      tmuxSessionName: 'pluton_test_4f2a19',
+      state: 'recreated',
+    })
+    expect(second.id).toBe(first.id)
+    expect(second.state).toBe('recreated')
+    expect(store.getTerminalForMuse(projectId, 'worker-a')?.id).toBe(first.id)
+
+    const listed = store.listTerminals(projectId)
+    expect(listed.length).toBe(1)
+    const absent = store.setTerminalState(first.id, 'absent')
+    expect(absent.state).toBe('absent')
+    expect(() => store.getTerminal('terminal_nope')).toThrow(NotFoundError)
+  })
+})

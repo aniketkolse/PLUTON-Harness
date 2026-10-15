@@ -133,6 +133,34 @@ export class NotImplementedError extends PlutonError {
   }
 }
 
+export interface FixableErrorOptions extends PlutonErrorOptions {
+  /** Exact human remediation shown by CLI/doctor. */
+  fix?: string
+}
+
+export class WorkspaceError extends PlutonError {
+  constructor(message: string, options: PlutonErrorOptions = {}) {
+    super('workspace_error', message, options)
+    this.name = 'WorkspaceError'
+  }
+}
+
+/** The sandbox provider cannot run (e.g. Docker daemon down) — dispatch fails closed. */
+export class SandboxUnavailableError extends PlutonError {
+  constructor(message: string, options: FixableErrorOptions = {}) {
+    super('sandbox_unavailable', options.fix ? `${message} Fix: ${options.fix}` : message, options)
+    this.name = 'SandboxUnavailableError'
+  }
+}
+
+/** tmux (or the transport to the Muse container) is unavailable — terminals are an honest gap. */
+export class TerminalUnavailableError extends PlutonError {
+  constructor(message: string, options: FixableErrorOptions = {}) {
+    super('terminal_unavailable', options.fix ? `${message} Fix: ${options.fix}` : message, options)
+    this.name = 'TerminalUnavailableError'
+  }
+}
+
 export class InternalError extends PlutonError {
   constructor(message: string, options: PlutonErrorOptions = {}) {
     super('internal_error', message, options)

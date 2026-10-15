@@ -6,8 +6,10 @@ import {
   assertTransition,
   isRunState,
   isTaskState,
+  SANDBOX_STATES,
   TERMINAL_TASK_STATES,
   type RunState,
+  type SandboxState,
   type TaskState,
 } from '../domain/state.ts'
 import type {
@@ -19,8 +21,11 @@ import type {
   RequestTargetKind,
   RunBudget,
   RunRecord,
+  SandboxRecord,
   TaskEdgeRecord,
   TaskRecord,
+  TerminalRecord,
+  WorkspaceRecord,
 } from '../domain/models.ts'
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
 import { redactDeep } from '../util/redact.ts'
@@ -155,6 +160,36 @@ export interface AdmitResult {
   receipt: RequestReceiptRecord
   /** True when the same request id + identical payload was seen before. */
   duplicate: boolean
+}
+
+export interface NewWorkspaceSpec {
+  projectId: string
+  runId: string | null
+  taskId: string | null
+  museId: string | null
+  kind: WorkspaceRecord['kind']
+  path: string
+  branch: string
+  baseCommit: string
+}
+
+export interface UpsertSandboxSpec {
+  projectId: string
+  museId: string | null
+  kind: SandboxRecord['kind']
+  containerName: string | null
+  containerId: string | null
+  image: string | null
+  state: SandboxState
+  createdBy: string
+}
+
+export interface UpsertTerminalSpec {
+  projectId: string
+  museId: string
+  sandboxId: string | null
+  tmuxSessionName: string
+  state: TerminalRecord['state']
 }
 
 const DEFAULT_MAX_EVENT_CHARS = 8_000
@@ -461,6 +496,217 @@ export class Store {
     return rows.map(rowToTask)
   }
 
+  // -- workspaces (per-task / integration checkouts, ADR-0005) ---------------
+
+  createWorkspace(spec: NewWorkspaceSpec): WorkspaceRecord {
+    const id = newId('workspace')
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO workspaces (id, project_id, run_id, task_id, muse_id, kind, path, branch, base_commit,
+                                 head_commit, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`,
+      )
+      .run(
+        id,
+        spec.projectId,
+        spec.runId,
+        spec.taskId,
+        spec.museId,
+        spec.kind,
+        spec.path,
+        spec.branch,
+        spec.baseCommit,
+        now,
+        now,
+      )
+    return this.getWorkspace(id)
+  }
+
+  getWorkspace(id: string): WorkspaceRecord {
+    const ws = this.getWorkspaceOrNull(id)
+    if (!ws) throw new NotFoundError('workspace', id)
+    return ws
+  }
+
+  getWorkspaceOrNull(id: string): WorkspaceRecord | null {
+    const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToWorkspace(row) : null
+  }
+
+  getWorkspaceByTask(taskId: string): WorkspaceRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM workspaces WHERE task_id = ? AND state = 'active' ORDER BY created_at DESC LIMIT 1")
+      .get(taskId) as Row | undefined
+    return row ? rowToWorkspace(row) : null
+  }
+
+  listWorkspaces(projectId: string, state?: WorkspaceRecord['state']): WorkspaceRecord[] {
+    const rows = (
+      state
+        ? this.db
+            .prepare('SELECT * FROM workspaces WHERE project_id = ? AND state = ? ORDER BY created_at DESC, id DESC')
+            .all(projectId, state)
+        : this.db
+            .prepare('SELECT * FROM workspaces WHERE project_id = ? ORDER BY created_at DESC, id DESC')
+            .all(projectId)
+    ) as Row[]
+    return rows.map(rowToWorkspace)
+  }
+
+  updateWorkspace(
+    id: string,
+    patch: { headCommit?: string | null; state?: WorkspaceRecord['state'] } = {},
+  ): WorkspaceRecord {
+    const ws = this.getWorkspace(id)
+    const now = nowIso()
+    this.db
+      .prepare('UPDATE workspaces SET head_commit = ?, state = ?, updated_at = ? WHERE id = ?')
+      .run(
+        patch.headCommit !== undefined ? patch.headCommit : ws.headCommit,
+        patch.state ?? ws.state,
+        now,
+        id,
+      )
+    return this.getWorkspace(id)
+  }
+
+  // -- sandboxes (one long-lived container per Muse, ADR-0004) --------------
+
+  /** One sandbox row per (project, muse); re-upserting keeps the same record id. */
+  upsertSandbox(spec: UpsertSandboxSpec): SandboxRecord {
+    const existing = this.getSandboxForMuse(spec.projectId, spec.museId)
+    const now = nowIso()
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE sandboxes SET kind = ?, container_name = ?, container_id = ?, image = ?, state = ?,
+                               updated_at = ? WHERE id = ?`,
+        )
+        .run(spec.kind, spec.containerName, spec.containerId, spec.image, spec.state, now, existing.id)
+      return this.getSandboxOrNull(existing.id) as SandboxRecord
+    }
+    const id = newId('sandbox')
+    this.db
+      .prepare(
+        `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
+                                created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        spec.projectId,
+        spec.museId,
+        spec.kind,
+        spec.containerName,
+        spec.containerId,
+        spec.image,
+        spec.state,
+        spec.createdBy,
+        now,
+        now,
+      )
+    return this.getSandbox(id)
+  }
+
+  getSandbox(id: string): SandboxRecord {
+    const sb = this.getSandboxOrNull(id)
+    if (!sb) throw new NotFoundError('sandbox', id)
+    return sb
+  }
+
+  getSandboxOrNull(id: string): SandboxRecord | null {
+    const row = this.db.prepare('SELECT * FROM sandboxes WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToSandbox(row) : null
+  }
+
+  getSandboxForMuse(projectId: string, museId: string | null): SandboxRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM sandboxes WHERE project_id = ? AND muse_id IS ? ORDER BY created_at DESC LIMIT 1')
+      .get(projectId, museId) as Row | undefined
+    return row ? rowToSandbox(row) : null
+  }
+
+  listSandboxes(projectId: string): SandboxRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM sandboxes WHERE project_id = ? ORDER BY created_at DESC, id DESC')
+      .all(projectId) as Row[]
+    return rows.map(rowToSandbox)
+  }
+
+  setSandboxState(
+    id: string,
+    state: SandboxState,
+    patch: { containerId?: string | null; containerName?: string | null; image?: string | null } = {},
+  ): SandboxRecord {
+    const sb = this.getSandbox(id)
+    this.db
+      .prepare(
+        `UPDATE sandboxes SET state = ?, container_id = ?, container_name = ?, image = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        state,
+        patch.containerId !== undefined ? patch.containerId : sb.containerId,
+        patch.containerName !== undefined ? patch.containerName : sb.containerName,
+        patch.image !== undefined ? patch.image : sb.image,
+        nowIso(),
+        id,
+      )
+    return this.getSandbox(id)
+  }
+
+  // -- terminals (tmux per Muse, ADR-0005) -----------------------------------
+
+  /** One terminal row per (project, muse); re-upserting keeps the same record id. */
+  upsertTerminal(spec: UpsertTerminalSpec): TerminalRecord {
+    const existing = this.getTerminalForMuse(spec.projectId, spec.museId)
+    const now = nowIso()
+    if (existing) {
+      this.db
+        .prepare('UPDATE terminals SET sandbox_id = ?, tmux_session_name = ?, state = ?, updated_at = ? WHERE id = ?')
+        .run(spec.sandboxId, spec.tmuxSessionName, spec.state, now, existing.id)
+      return this.getTerminal(existing.id)
+    }
+    const id = newId('terminal')
+    this.db
+      .prepare(
+        `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, spec.projectId, spec.museId, spec.sandboxId, spec.tmuxSessionName, spec.state, now, now)
+    return this.getTerminal(id)
+  }
+
+  getTerminal(id: string): TerminalRecord {
+    const t = this.getTerminalForId(id)
+    if (!t) throw new NotFoundError('terminal', id)
+    return t
+  }
+
+  private getTerminalForId(id: string): TerminalRecord | null {
+    const row = this.db.prepare('SELECT * FROM terminals WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToTerminal(row) : null
+  }
+
+  getTerminalForMuse(projectId: string, museId: string): TerminalRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM terminals WHERE project_id = ? AND muse_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(projectId, museId) as Row | undefined
+    return row ? rowToTerminal(row) : null
+  }
+
+  listTerminals(projectId: string): TerminalRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM terminals WHERE project_id = ? ORDER BY created_at ASC, id ASC')
+      .all(projectId) as Row[]
+    return rows.map(rowToTerminal)
+  }
+
+  setTerminalState(id: string, state: TerminalRecord['state']): TerminalRecord {
+    this.db.prepare('UPDATE terminals SET state = ?, updated_at = ? WHERE id = ?').run(state, nowIso(), id)
+    return this.getTerminal(id)
+  }
+
   // -- events ----------------------------------------------------------------
 
   appendEvent(input: AppendEventInput): EventRecord {
@@ -679,6 +925,73 @@ function rowToTask(r: Row): TaskRecord {
     createdAt: str(r, 'created_at'),
     startedAt: nstr(r, 'started_at'),
     completedAt: nstr(r, 'completed_at'),
+  }
+}
+
+function rowToWorkspace(r: Row): WorkspaceRecord {
+  const kind = str(r, 'kind')
+  if (kind !== 'task-checkout' && kind !== 'integration-checkout') {
+    throw new InternalError(`db row: invalid workspace kind '${kind}'`)
+  }
+  const state = str(r, 'state')
+  if (state !== 'active' && state !== 'archived' && state !== 'removed') {
+    throw new InternalError(`db row: invalid workspace state '${state}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    runId: nstr(r, 'run_id'),
+    taskId: nstr(r, 'task_id'),
+    museId: nstr(r, 'muse_id'),
+    kind,
+    path: str(r, 'path'),
+    branch: str(r, 'branch'),
+    baseCommit: str(r, 'base_commit'),
+    headCommit: nstr(r, 'head_commit'),
+    state,
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
+  }
+}
+
+function rowToSandbox(r: Row): SandboxRecord {
+  const kind = str(r, 'kind')
+  if (kind !== 'docker' && kind !== 'local-process') {
+    throw new InternalError(`db row: invalid sandbox kind '${kind}'`)
+  }
+  const state = str(r, 'state')
+  if (!(SANDBOX_STATES as readonly string[]).includes(state)) {
+    throw new InternalError(`db row: invalid sandbox state '${state}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    museId: nstr(r, 'muse_id'),
+    kind,
+    containerName: nstr(r, 'container_name'),
+    containerId: nstr(r, 'container_id'),
+    image: nstr(r, 'image'),
+    state: state as SandboxState,
+    createdBy: str(r, 'created_by'),
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
+  }
+}
+
+function rowToTerminal(r: Row): TerminalRecord {
+  const state = str(r, 'state')
+  if (state !== 'present' && state !== 'absent' && state !== 'recreated' && state !== 'unknown') {
+    throw new InternalError(`db row: invalid terminal state '${state}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    museId: str(r, 'muse_id'),
+    sandboxId: nstr(r, 'sandbox_id'),
+    tmuxSessionName: str(r, 'tmux_session_name'),
+    state,
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
   }
 }
 
