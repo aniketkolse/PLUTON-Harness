@@ -17,6 +17,8 @@ import { requireProject } from './context.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
+import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
+import { DEFAULT_WORKER_IMAGE_TAG } from '../sandbox/image.ts'
 import {
   graphHuman,
   graphView,
@@ -324,6 +326,60 @@ engineCmd
         ])
       }
       emitOk(io, json, table(rows), { engines })
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// sandbox — substrate probe and worker image (Phase 5, ADR-0004)
+// ---------------------------------------------------------------------------
+
+const sandboxCmd = program
+  .command('sandbox')
+  .description('probe the sandbox substrate (Docker) and provision the worker image')
+
+sandboxCmd
+  .command('probe')
+  .description('report whether Muse containers can start here, and the worker image state')
+  .action(async (_opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await sandboxProbe(ctx)
+      const lines = [
+        `sandbox: ${report.sandbox.kind} — ${report.sandbox.available ? 'available' : 'UNAVAILABLE'}`,
+        `detail:  ${report.sandbox.detail}`,
+        report.image ? `image:   ${report.image.image} — ${report.image.detail}` : '',
+        ...report.warnings.map((w) => `warning: ${w}`),
+        report.dispatchReady ? 'dispatch: ready' : 'dispatch: NOT ready',
+      ].filter((s) => s.length > 0)
+      emitOk(io, json, lines.join('\n'), report)
+      return report.dispatchReady ? 0 : 1
+    })
+  })
+
+sandboxCmd
+  .command('build-image')
+  .description('build the worker image, verify tmux/node inside it, and record the image id')
+  .option('--tag <tag>', `image tag (default: sandbox.image from pluton.yaml, else ${DEFAULT_WORKER_IMAGE_TAG})`)
+  .option('--base <ref>', 'override the base image, e.g. an exact digest reference')
+  .action(async (opts: { tag?: string; base?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { record, configTagMismatch } = await sandboxBuildImage(ctx, {
+        ...(opts.tag !== undefined ? { tag: opts.tag } : {}),
+        ...(opts.base !== undefined ? { base: opts.base } : {}),
+      })
+      const human = [
+        `built ${record.image}`,
+        `image id: ${record.imageId}`,
+        `tmux: ${record.tmuxVersion}   node: ${record.nodeVersion}`,
+        'recorded in .pluton/state/worker-image.json',
+        configTagMismatch
+          ? `note: pluton.yaml pins a different tag — set sandbox.image: ${record.image} to use this build`
+          : '',
+      ].filter((s) => s.length > 0)
+      emitOk(io, json, human.join('\n'), record)
     })
   })
 

@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { findProjectRoot, loadConfig, stateDir } from '../../config/load.ts'
+import { findProjectRoot, loadConfig, stateDir, type LoadedConfig } from '../../config/load.ts'
 import { registerBuiltinEngines, listEngineKinds, getEngineAdapter } from '../../engines/registry.ts'
 import { firstLine, run } from '../../util/exec.ts'
 import { engineHomesDir } from '../../config/load.ts'
+import { createSandboxManager } from '../../sandbox/factory.ts'
+import { DEFAULT_WORKER_IMAGE_TAG, WorkerImageManager } from '../../sandbox/image.ts'
+import { LOCAL_PROCESS_WARNING } from '../../sandbox/local-process.ts'
 import type { CheckResult } from '../output.ts'
 
 const MIN_NODE_MAJOR = 24
@@ -99,6 +102,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
 
   // 5. Project config + storage
   const root = findProjectRoot(opts.cwd)
+  let loadedConfig: LoadedConfig | null = null
   if (!root) {
     checks.push({
       id: 'config',
@@ -110,6 +114,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
   } else {
     try {
       const loaded = loadConfig(root)
+      loadedConfig = loaded
       checks.push({
         id: 'config',
         title: 'Project config',
@@ -192,7 +197,85 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
     }
   }
 
-  // 6. Disk space
+  // 6. Sandbox substrate + worker image (ADR-0004): can a Muse container actually start here?
+  const pushTmuxInfo = (): void => {
+    checks.push({
+      id: 'tmux',
+      title: 'tmux',
+      status: 'info',
+      message:
+        'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010). ' +
+        'Container-side verification runs when the worker image is built.',
+    })
+  }
+  if (loadedConfig) {
+    try {
+      const sandbox = createSandboxManager(loadedConfig.config)
+      const probe = await sandbox.probe()
+      if (sandbox.kind === 'local-process') {
+        checks.push({ id: 'sandbox', title: 'Sandbox', status: 'warn', message: LOCAL_PROCESS_WARNING })
+        pushTmuxInfo()
+      } else if (probe.available) {
+        checks.push({ id: 'sandbox', title: 'Sandbox', status: 'pass', message: probe.detail })
+        const tag = loadedConfig.config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
+        const img = await new WorkerImageManager().probe(loadedConfig.rootDir, tag)
+        if (!img.present) {
+          checks.push({
+            id: 'worker-image',
+            title: 'Worker image',
+            status: 'fail',
+            message: `'${tag}' is not built — Muse containers cannot start`,
+            fix: 'run `pluton sandbox build-image`',
+          })
+          pushTmuxInfo()
+        } else {
+          checks.push({
+            id: 'worker-image',
+            title: 'Worker image',
+            status: img.matchesRecord ? 'pass' : 'warn',
+            message: img.detail,
+            ...(img.matchesRecord
+              ? {}
+              : { fix: 're-run `pluton sandbox build-image` to rebuild and re-record the image' }),
+          })
+          // Real verification, not a claim: run tmux inside the built image.
+          const tmux = await run(['docker', 'run', '--rm', '--entrypoint', 'tmux', tag, '-V'], { timeoutMs: 30_000 })
+          checks.push(
+            tmux.exitCode === 0 && firstLine(tmux.stdout) !== ''
+              ? {
+                  id: 'tmux',
+                  title: 'tmux (worker image)',
+                  status: 'pass',
+                  message: `${firstLine(tmux.stdout)} inside '${tag}'`,
+                }
+              : {
+                  id: 'tmux',
+                  title: 'tmux (worker image)',
+                  status: 'fail',
+                  message: `tmux is not usable inside '${tag}': ${firstLine(tmux.stderr, 200) || 'no output'}`,
+                  fix: 'rebuild the worker image (`pluton sandbox build-image`); it must contain tmux',
+                },
+          )
+        }
+      } else {
+        checks.push({ id: 'sandbox', title: 'Sandbox', status: 'fail', message: probe.detail, fix: probe.fix })
+        pushTmuxInfo()
+      }
+    } catch (e) {
+      checks.push({
+        id: 'sandbox',
+        title: 'Sandbox',
+        status: 'fail',
+        message: (e as Error).message,
+        fix: 'fix the sandbox section of pluton.yaml (local-process requires local_process_acknowledged: true)',
+      })
+      pushTmuxInfo()
+    }
+  } else {
+    pushTmuxInfo()
+  }
+
+  // 7. Disk space
   try {
     const fs = statfsSync(root ?? opts.cwd)
     const freeGb = (fs.bavail * fs.bsize) / 1024 ** 3
@@ -211,14 +294,18 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
     checks.push({ id: 'disk', title: 'Disk space', status: 'info', message: 'could not stat the filesystem' })
   }
 
-  // 7. tmux — honesty check
-  checks.push({
-    id: 'tmux',
-    title: 'tmux',
-    status: 'info',
-    message:
-      'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010). Container-side verification happens when the worker image is provisioned.',
-  })
+  // 8. tmux honesty check — the detailed result is produced in step 6 when the
+  //    worker image is available; anything left here is only reached when the
+  //    sandbox itself could not be assessed.
+  if (!checks.some((c) => c.id === 'tmux')) {
+    checks.push({
+      id: 'tmux',
+      title: 'tmux',
+      status: 'info',
+      message:
+        'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010).',
+    })
+  }
 
   return checks
 }

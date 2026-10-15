@@ -99,14 +99,20 @@ References (read-only, recorded commits):
   OpenAI-compatible gateway (no new external credentials); `PLUTON_QWEN_BIN` /
   `npm i -g @qwen-code/qwen-code` documented in the adapter and live-test header
 
-## Phase 5 — Sandboxes, workspace, tmux `[ ]`
+## Phase 5 — Sandboxes, workspace, tmux `[~]`
 
-- [ ] Worker image (tmux, git, node) with digest pinning
-- [ ] Container lifecycle: non-root, cap-drop, CPU/mem/PID limits, mount policy, env allowlist,
-      network policy, safe stop/recreate, Pluton-owned labels
-- [ ] Per-Muse tmux sessions + safe attach via argument arrays
-- [ ] Isolated checkouts (strategy per ADR), diff/commit capture
-- [ ] Cross-Muse isolation tests (Docker-dependent → attempt daemon start; else documented NOT RUN)
+- [x] Worker image (`docker/worker/Dockerfile`: tmux, git, node, non-root uid 10001) + `src/sandbox/image.ts`
+      build/probe module recording the built image ID for drift detection (`pluton sandbox build-image`)
+- [x] Container lifecycle: non-root, `--cap-drop ALL`, `no-new-privileges`, CPU/mem/PID limits, bounded
+      noexec tmpfs, mount policy, env allowlist, network policy, Pluton-owned labels, label-guarded
+      stop/remove — `src/sandbox/docker.ts` + conformance tests; `local-process` is acknowledgement-gated
+- [x] Per-Muse tmux sessions executed inside the container via argv-only sandbox exec, `=`-exact target
+      matching, typed failure reasons (`src/terminal/`) + tests; native-Windows tmux deliberately unsupported
+- [x] Isolated checkouts: per-task `git clone --local`, branch `pluton/<run>/<slug>`, hardlink fallback,
+      Pluton-owned removal guards (`src/workspace/manager.ts`) + tests; workspace/sandbox/terminal registry
+      rows in the store
+- [ ] Cross-Muse isolation tests (Docker-dependent → gated `tests/e2e/` suite; NOT RUN until the daemon is
+      available on this host — reproducible via `npm run test:e2e` after `pluton sandbox build-image`)
 
 ## Phase 6 — Manager and team execution `[ ]`
 
