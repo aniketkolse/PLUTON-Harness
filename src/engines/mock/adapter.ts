@@ -32,6 +32,11 @@ export interface MockScriptStep {
   outcome?: MockOutcome
   /** If true, the prompt stream ends with an error event and unknown outcome. */
   protocolCrash?: boolean
+  /**
+   * If set, `sendPrompt` THROWS with this message instead of yielding — the
+   * transport-failure path. Callers must still close the session.
+   */
+  throw?: string
 }
 
 export interface MockAdapterOptions {
@@ -44,6 +49,8 @@ export interface MockAdapterOptions {
   script?: MockScriptStep[]
   onPrompt?: (req: PromptRequest, session: EngineSessionInfo) => void
   onStartSession?: (req: StartSessionRequest) => void
+  /** Test hook: called when a session is closed (leak assertions). */
+  onSessionClose?: (session: EngineSessionInfo) => void
 }
 
 interface MockSessionState {
@@ -56,11 +63,18 @@ class MockEngineSession implements EngineSession {
   private readonly state: MockSessionState = { interrupted: false, wake: null }
   private readonly script: MockScriptStep[]
   private readonly onPrompt: MockAdapterOptions['onPrompt']
+  private readonly onSessionClose: MockAdapterOptions['onSessionClose']
 
-  constructor(info: EngineSessionInfo, script: MockScriptStep[], onPrompt: MockAdapterOptions['onPrompt']) {
+  constructor(
+    info: EngineSessionInfo,
+    script: MockScriptStep[],
+    onPrompt: MockAdapterOptions['onPrompt'],
+    onSessionClose: MockAdapterOptions['onSessionClose'],
+  ) {
     this.info = info
     this.script = script
     this.onPrompt = onPrompt
+    this.onSessionClose = onSessionClose
   }
 
   private sleep(ms: number): Promise<void> {
@@ -82,6 +96,7 @@ class MockEngineSession implements EngineSession {
     this.onPrompt?.(req, this.info)
     yield { kind: 'status', status: 'busy' }
     const step = this.script.shift() ?? {}
+    if (step.throw !== undefined) throw new Error(step.throw)
     for (const ev of step.events ?? []) {
       if (this.state.interrupted) break
       yield ev
@@ -107,6 +122,7 @@ class MockEngineSession implements EngineSession {
 
   async close(): Promise<void> {
     this.state.wake?.()
+    this.onSessionClose?.(this.info)
   }
 }
 
@@ -150,6 +166,6 @@ export class MockEngineAdapter implements EngineAdapter {
       resumeToken: req.resumeToken ?? `mock-resume-${newId('session')}`,
     }
     const script = [...(this.opts.script ?? [])]
-    return new MockEngineSession(info, script, this.opts.onPrompt)
+    return new MockEngineSession(info, script, this.opts.onPrompt, this.opts.onSessionClose)
   }
 }

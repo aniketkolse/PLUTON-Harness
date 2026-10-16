@@ -58,6 +58,8 @@ interface World {
   runId: string
   supervisor: RunSupervisor
   workerPrompts: { muse: string; at: number }[]
+  /** Sessions closed by the supervisor, in close order (leak assertions). */
+  closedSessions: { muse: string; sessionId: string }[]
   /** Await the manager's tool hook (already try/caught) and surface any failure. */
   settleTools: () => Promise<void>
 }
@@ -162,6 +164,7 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
 
   const ref: { supervisor: RunSupervisor | null; toolsError: unknown } = { supervisor: null, toolsError: null }
   const workerPrompts: { muse: string; at: number }[] = []
+  const closedSessions: { muse: string; sessionId: string }[] = []
   const adapters = new Map<string, MockEngineAdapter>()
   for (const id of ['worker-a', 'worker-b'] as const) {
     adapters.set(
@@ -170,6 +173,9 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
         script: opts.workerScripts?.[id] ?? [{ delayMs: 5, outcome: 'success' }],
         onPrompt: () => {
           workerPrompts.push({ muse: id, at: Date.now() })
+        },
+        onSessionClose: (s) => {
+          closedSessions.push({ muse: id, sessionId: s.id })
         },
       }),
     )
@@ -191,6 +197,9 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
             }
           })()
         }
+      },
+      onSessionClose: (s) => {
+        closedSessions.push({ muse: 'manager', sessionId: s.id })
       },
     }),
   )
@@ -229,6 +238,7 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
     runId: run.id,
     supervisor,
     workerPrompts,
+    closedSessions,
     settleTools: async () => {
       await toolsPromise
       if (ref.toolsError !== null) throw ref.toolsError
@@ -592,5 +602,44 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(task?.failure).toMatchObject({ outcome: 'unknown' })
     expect(JSON.stringify(task?.failure)).toContain('mock_protocol_crash')
     expect(eventCount(world.store, world.runId, 'task.unknown_outcome')).toBe(1)
+  })
+
+  it('closes the manager session when the run settles (container-smoke leak finding)', async () => {
+    const world = makeWorld({
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'work', assigneeMuseId: 'worker-a' })
+      },
+      workerScripts: { 'worker-a': [{ delayMs: 5, outcome: 'success' }] },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    const managerCloses = world.closedSessions.filter((s) => s.muse === 'manager')
+    expect(managerCloses).toHaveLength(1)
+    // Both task and manager sessions are closed exactly once each.
+    expect(world.closedSessions.filter((s) => s.muse === 'worker-a')).toHaveLength(1)
+  })
+
+  it('closes a task session even when the prompt throws (no leak on transport failure)', async () => {
+    const world = makeWorld({
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'throwing task', assigneeMuseId: 'worker-a' })
+      },
+      workerScripts: { 'worker-a': [{ throw: 'engine transport exploded' }] },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('failed')
+    const task = world.store.listTasks(world.runId)[0]
+    // A transport throw is `unknown` (never replayed, never claimed as failure)…
+    expect(task?.state).toBe('unknown_outcome')
+    expect(task?.failure).toMatchObject({ outcome: 'unknown' })
+    expect(JSON.stringify(task?.failure)).toContain('engine transport exploded')
+    // …and the session must still be closed on that path.
+    expect(world.closedSessions.filter((s) => s.muse === 'worker-a')).toHaveLength(1)
+    expect(world.closedSessions.filter((s) => s.muse === 'manager')).toHaveLength(1)
   })
 })

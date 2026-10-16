@@ -432,14 +432,21 @@ export class RunSupervisor {
       this.appendEvent('task.started', { museId: muse.id, engine: adapter.kind, workspaceId }, task.id)
 
       const promptText = buildTaskPrompt(task, muse, this.limits.maxBriefChars)
-      const out = await this.runPrompt(
-        session,
-        { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
-        { taskId: task.id, museId: muse.id },
-      )
-      await session.close().catch((e: unknown) => {
-        this.diagnostic(`task ${task.id}: session close failed: ${e instanceof Error ? e.message : String(e)}`)
-      })
+      let out: PromptOutcome
+      try {
+        out = await this.runPrompt(
+          session,
+          { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
+          { taskId: task.id, museId: muse.id },
+        )
+      } finally {
+        // Close on EVERY exit path: a throwing prompt previously skipped the
+        // close and leaked a live engine process in the container
+        // (container-mode smoke finding, 2026-10-17).
+        await session.close().catch((e: unknown) => {
+          this.diagnostic(`task ${task.id}: session close failed: ${e instanceof Error ? e.message : String(e)}`)
+        })
+      }
 
       const resultPayload: JsonValue = {
         summary: out.summary,
@@ -528,7 +535,17 @@ export class RunSupervisor {
       run.acceptanceCriteria,
       this.limits.maxBriefChars,
     )
-    return this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { museId: muse.id })
+    try {
+      return await this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { museId: muse.id })
+    } finally {
+      // The manager session owns a live engine process inside its container;
+      // leaving it open leaked one ACP process per run (container-mode smoke
+      // finding, 2026-10-17: two finished runs, two lingering
+      // `docker exec … opencode acp` processes). Close on every path.
+      await session.close().catch((e: unknown) => {
+        this.diagnostic(`manager session close failed: ${e instanceof Error ? e.message : String(e)}`)
+      })
+    }
   }
 
   /**
