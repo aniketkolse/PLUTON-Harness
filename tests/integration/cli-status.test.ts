@@ -75,7 +75,7 @@ function runCli(args: string[]): { stdout: string; stderr: string; exitCode: num
   }
 }
 
-function parseEnvelope(stdout: string): { ok: boolean; data?: Record<string, unknown>; error?: { code: string } } {
+function parseEnvelope(stdout: string): { ok: boolean; data?: Record<string, unknown>; error?: { code: string; message?: string } } {
   // JSON mode guarantees exactly one JSON document on stdout.
   return JSON.parse(stdout) as { ok: boolean; data?: Record<string, unknown>; error?: { code: string } }
 }
@@ -198,12 +198,13 @@ describe('pluton CLI read paths (integration)', () => {
     expect(env.error?.code).toBe('not_found')
   })
 
-  it('planned commands fail with a stable not_implemented code', () => {
-    const { stdout, exitCode } = runCli(['integrate', '--json'])
+  it('integrate is a real command now: it fails pre-flight (validation) instead of not_implemented', () => {
+    const { stdout, exitCode } = runCli(['integrate', '--run', runId, '--json'])
     expect(exitCode).toBe(1)
     const env = parseEnvelope(stdout)
     expect(env.ok).toBe(false)
-    expect(env.error?.code).toBe('not_implemented')
+    expect(env.error?.code).toBe('validation_failed')
+    expect(env.error?.message).toContain('no completed')
   })
 
   it('migrated database is reused, not recreated, across CLI invocations', () => {

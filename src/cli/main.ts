@@ -5,12 +5,10 @@
  * - `--json` (or PLUTON_JSON=1) switches a command to machine mode: stdout is
  *   exactly one JSON envelope ({ ok, data } | { ok, error }), diagnostics and
  *   human progress stay on stderr, exit code still reflects success/failure.
- * - Commands that are not implemented yet are registered as explicit stubs so
- *   scripts fail with a stable `not_implemented` code instead of a usage error.
  */
 import { join } from 'node:path'
 import { Command } from 'commander'
-import { ConfigError, InternalError, NotImplementedError, PlutonError, ValidationError } from '../domain/errors.ts'
+import { ConfigError, InternalError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { stateDir } from '../config/load.ts'
 import { TERMINAL_TASK_STATES } from '../domain/state.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
@@ -22,6 +20,7 @@ import { requireProject } from './context.ts'
 import { attachMuse } from './commands/attach.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
+import { integrateRun } from './commands/integrate.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { runRun } from './commands/run.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
@@ -778,24 +777,59 @@ program
   })
 
 // ---------------------------------------------------------------------------
-// Planned commands — explicit, stable `not_implemented` failures.
+// integrate
 // ---------------------------------------------------------------------------
 
-for (const [name, planned] of [
-  ['integrate', 'integrate verified task branches through the integration checkout'],
-] as const) {
-  program
-    .command(name)
-    .description(`(planned) ${planned}`)
-    .allowUnknownOption(true)
-    .allowExcessArguments(true)
-    .action(async (_opts: unknown, cmd: Command) => {
-      const json = jsonMode(cmd)
-      await runCommand(io, json, async () => {
-        throw new NotImplementedError(`pluton ${name}`)
+program
+  .command('integrate')
+  .description(
+    'merge verified task branches into pluton/integration/<run> and run the project checks there (never main)',
+  )
+  .requiredOption('--run <id>', 'run id (full id or unique suffix)')
+  .option('--task <id...>', 'integrate only these tasks (must be completed)')
+  .action(async (opts: { run: string; task?: string[] }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await integrateRun(ctx, {
+        runRef: opts.run,
+        ...(opts.task !== undefined && opts.task.length > 0 ? { taskRefs: opts.task } : {}),
       })
+      const lines: string[] = [`checkout ${report.checkout.path}  (branch ${report.checkout.branch})`]
+      for (const t of report.integrated) {
+        lines.push(
+          t.status === 'merged'
+            ? `task ${t.taskId}  ${t.title}  → merged ${t.commit?.slice(0, 12) ?? ''}`
+            : `task ${t.taskId}  ${t.title}  → already integrated`,
+        )
+      }
+      for (const c of report.conflicts) {
+        lines.push(`task ${c.taskId}  → conflict, conflicts: ${c.files.join(', ')}`)
+      }
+      for (const b of report.blockedProtected) {
+        lines.push(`task ${b.taskId}  → blocked: approval ${b.approvalId} created (${b.files.join(', ')})`)
+      }
+      for (const f of report.failed) {
+        lines.push(`task ${f.taskId}  → failed: ${f.detail}`)
+      }
+      for (const n of report.notAttempted) {
+        lines.push(`task ${n.taskId}  not attempted after conflict`)
+      }
+      if (report.checks.length > 0) {
+        lines.push('checks (in the integration checkout):')
+        for (const c of report.checks) {
+          lines.push(
+            `  [${c.status}] ${c.name}${c.exitCode !== null ? ` (exit ${String(c.exitCode)})` : ''}`,
+          )
+        }
+      }
+      if (report.artifactPath !== null) lines.push(`artifact ${report.artifactPath}`)
+      lines.push(
+        `review the branch at ${report.checkout.path}; main is never touched (git log ${report.checkout.branch})`,
+      )
+      emitOk(io, json, lines.join('\n'), report)
     })
-}
+  })
 
 // ---------------------------------------------------------------------------
 // Parse
