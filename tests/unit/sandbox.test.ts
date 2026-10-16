@@ -120,6 +120,22 @@ describe('DockerSandboxManager.create (argv conformance)', () => {
     expect(argv).toContain('type=bind,src=C:\\x,dst=/x,readonly')
   })
 
+  it('emits --add-host for extraHosts (host gateway) and nothing by default', () => {
+    const withHosts = DockerSandboxManager.buildCreateArgs({
+      ...spec,
+      extraHosts: ['host.docker.internal:host-gateway'],
+    })
+    expect(withHosts).toContain('--add-host')
+    expect(withHosts[withHosts.indexOf('--add-host') + 1]).toBe('host.docker.internal:host-gateway')
+    expect(DockerSandboxManager.buildCreateArgs(spec)).not.toContain('--add-host')
+  })
+
+  it('rejects extraHosts entries that cannot be a name:ip mapping', () => {
+    for (const bad of ['', 'a b', 'no-colon', 'x,y:1.2.3.4']) {
+      expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, extraHosts: [bad] })).toThrowError(ValidationError)
+    }
+  })
+
   it('fails closed with the exact fix when the daemon is not reachable', async () => {
     const calls: string[][] = []
     const manager = new DockerSandboxManager({

@@ -93,6 +93,9 @@ export class DockerSandboxManager implements SandboxManager {
       '--network',
       spec.network === 'none' ? 'none' : 'bridge',
     ]
+    for (const host of spec.extraHosts ?? []) {
+      args.push('--add-host', host)
+    }
     for (const mount of spec.mounts) {
       args.push('--mount', `type=bind,src=${mount.hostPath},dst=${mount.containerPath}${mount.readOnly ? ',readonly' : ''}`)
     }
@@ -139,6 +142,13 @@ export class DockerSandboxManager implements SandboxManager {
           `mount containerPath must be an absolute Linux path without ',' or '=', got '${mount.containerPath}'`,
           { details: { containerPath: mount.containerPath } },
         )
+      }
+    }
+    for (const host of spec.extraHosts ?? []) {
+      if (host === '' || !host.includes(':') || /[\s,=]/.test(host)) {
+        throw new ValidationError(`extraHosts entries must be a 'name:ip' mapping without whitespace/','/'=', got '${host}'`, {
+          details: { extraHost: host },
+        })
       }
     }
   }
