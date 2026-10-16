@@ -17,6 +17,7 @@ import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { requireProject } from './context.ts'
+import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachMuse } from './commands/attach.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
@@ -828,6 +829,115 @@ program
         `review the branch at ${report.checkout.path}; main is never touched (git log ${report.checkout.branch})`,
       )
       emitOk(io, json, lines.join('\n'), report)
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// approvals — the operator inbox: list, approve, deny (fail-closed expiry)
+// ---------------------------------------------------------------------------
+
+const approvalsCmd = program
+  .command('approvals')
+  .description('operator approval inbox: list, approve, deny (expiring approvals are fail-closed)')
+
+function approvalLine(a: ApprovalListView['approvals'][number]): string {
+  const by = a.requestedByMuseId ?? 'operator'
+  const expiry =
+    a.expiresInMinutes === null
+      ? 'never'
+      : a.expiresInMinutes < 0
+        ? `expired ${String(-a.expiresInMinutes)}m ago`
+        : `expires in ${String(a.expiresInMinutes)}m`
+  return `${a.id}  ${a.status}  ${a.action}  by ${by}  age ${String(a.ageMinutes)}m  [${expiry}]  — ${a.reason}`
+}
+
+function approvalsHuman(view: ApprovalListView): string {
+  const counts = Object.entries(view.counts)
+    .map(([status, n]) => `${status}:${String(n)}`)
+    .join('  ')
+  if (view.approvals.length === 0) {
+    return `no approvals match (pending only; use --all to include decided)\ncounts: ${counts}`
+  }
+  return `${view.approvals.map(approvalLine).join('\n')}\n\ncounts: ${counts}`
+}
+
+approvalsCmd
+  .command('list')
+  .description('list approvals (pending by default; overdue pendings are swept to expired first)')
+  .option('--all', 'include decided approvals (approved/denied/expired)')
+  .option('--run <id>', 'only approvals of one run (full id or unique suffix)')
+  .action(async (opts: { all?: boolean; run?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const view = await listApprovals(ctx, {
+        ...(opts.all === true ? { all: true } : {}),
+        ...(opts.run !== undefined ? { runRef: opts.run } : {}),
+      })
+      emitOk(io, json, approvalsHuman(view), view)
+    })
+  })
+
+function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string {
+  const lines: string[] = [
+    `approval ${report.approval.id}  ${report.approval.action}  → ${report.approval.status} by ${report.approval.decidedBy}`,
+  ]
+  if (report.applied !== null) {
+    lines.push(`applied muse '${report.applied.museId}' → ${report.applied.configPath}`)
+    if (report.applied.container !== null) {
+      lines.push(
+        `container ${report.applied.container.containerName} (${report.applied.container.created ? 'created' : 'reused'})`,
+      )
+    }
+    if (report.applied.containerWarning !== null) {
+      lines.push(`container warning: ${report.applied.containerWarning}`)
+    }
+  }
+  if (report.run !== null) {
+    const note = report.run.resumed
+      ? 'resumed after approval'
+      : report.run.parked
+        ? `stays parked — supervisor already exited${report.run.recordedOutcome !== null ? ` (outcome: ${report.run.recordedOutcome})` : ''}`
+        : 'still awaiting other approvals'
+    lines.push(`run ${report.run.id}  ${report.run.stateBefore} → ${report.run.stateAfter}  (${note})`)
+  }
+  if (report.expiredSwept.length > 0) {
+    lines.push(`swept ${String(report.expiredSwept.length)} overdue approval(s) to expired`)
+  }
+  return lines.join('\n')
+}
+
+approvalsCmd
+  .command('approve <approval>')
+  .description('approve a pending approval (applies approved muse.create proposals)')
+  .option('--request-id <id>', 'idempotency key: retrying with the same id never decides twice')
+  .action(async (approvalRef: string, opts: { requestId?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await decideApproval(ctx, {
+        approvalRef,
+        decision: 'approve',
+        ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
+      })
+      emitOk(io, json, decideHuman(report), report)
+    })
+  })
+
+approvalsCmd
+  .command('deny <approval>')
+  .description('deny a pending approval (nothing is ever instantiated)')
+  .option('--request-id <id>', 'idempotency key: retrying with the same id never decides twice')
+  .action(async (approvalRef: string, opts: { requestId?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await decideApproval(ctx, {
+        approvalRef,
+        decision: 'deny',
+        ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
+      })
+      emitOk(io, json, decideHuman(report), report)
     })
   })
 
