@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { InternalError, NotFoundError } from '../domain/errors.ts'
 import type { JsonValue, MuseRecord, TaskRecord } from '../domain/models.ts'
 import { getEngineAdapter } from '../engines/registry.ts'
+import { engineAdapterForMuse } from '../engines/approval.ts'
 import type {
   EngineAdapter,
   EngineEvent,
@@ -14,7 +15,7 @@ import { TERMINAL_TASK_STATES, type RunState } from '../domain/state.ts'
 import type { Store } from '../store/store.ts'
 import type { GitWorkspaceManager } from '../workspace/manager.ts'
 import { KeyedMutex } from './mutex.ts'
-import { notifyTaskTerminal, taskAncestorIds, WakeupRegistry, wakeupChannelFor } from './wakeups.ts'
+import { notifyTaskSettled, taskAncestorIds, WakeupRegistry, wakeupChannelFor } from './wakeups.ts'
 import { PlutonToolBridge, type ToolBridgeLimits } from '../tools/bridge.ts'
 
 /**
@@ -143,8 +144,9 @@ export function buildManagerPrompt(
     'Rules:',
     '- Plan first: create the minimal set of tasks with the task.create tool (assign each to the right Muse; use dependsOn for ordering; an assignee may never own an ancestor task).',
     '- Delegate only through the Pluton tools; Pluton state, not your prose, is authoritative.',
-    '- Use task.wait to wait for your team, then collect results with task.get_result.',
-    '- Never mark the goal done unless every required task record is completed; report anything unfinished.',
+    '- Use task.wait to wait for your team: it returns once every requested task has settled (completed, failed, cancelled, or awaiting verification).',
+    "- A task in 'verifying' has finished its work and awaits the operator's verification gate — report it as awaiting verification; never keep waiting for it to become completed.",
+    '- Finish by collecting the settled tasks with task.get_result, then end your turn with a concise report: what is done, what is awaiting verification, what remains. Never claim a result the task records do not support.',
   )
   const text = lines.join('\n')
   if (text.length <= maxChars) return text
@@ -189,7 +191,7 @@ export class RunSupervisor {
     this.runDeadlineMs = opts.runDeadlineMs
     this.verificationConfigured = opts.verificationConfigured
     this.loopPollMs = opts.loopPollMs ?? DEFAULT_LOOP_POLL_MS
-    this.adapterFor = opts.adapterFor ?? ((muse) => getEngineAdapter(muse.engineKind))
+    this.adapterFor = opts.adapterFor ?? ((muse) => engineAdapterForMuse(muse))
     this.workspaceManager = opts.workspaceManager ?? null
     this.engineEnv = opts.engineEnv ?? (() => ({}))
     this.mcpServerFor = opts.mcpServerFor ?? (() => null)
@@ -231,8 +233,8 @@ export class RunSupervisor {
     })
   }
 
-  private notifyTerminal(task: TaskRecord): void {
-    notifyTaskTerminal(this.wakeups, this.runId, task, taskAncestorIds(this.store, task))
+  private notifySettled(task: TaskRecord): void {
+    notifyTaskSettled(this.wakeups, this.runId, task, taskAncestorIds(this.store, task))
   }
 
   private instructionsFor(muse: MuseRecord): string | undefined {
@@ -246,7 +248,7 @@ export class RunSupervisor {
   }
 
   /** Collect one prompt's stream with an honest hard bound. */
-  private async runPrompt(session: EngineSession, prompt: PromptRequest): Promise<PromptOutcome> {
+  private async runPrompt(session: EngineSession, prompt: PromptRequest, taskId?: string): Promise<PromptOutcome> {
     let result: { outcome: PromptOutcome['outcome']; summary?: string } | null = null
     let errorCode: string | null = null
     let textChars = 0
@@ -269,6 +271,16 @@ export class RunSupervisor {
           },
           onError: (code) => {
             errorCode = code
+          },
+          onApproval: (a) => {
+            // Durable record: an operator reading the run must see that the
+            // engine asked and what Pluton decided (host-mode smoke finding:
+            // denials used to vanish, leaving a "successful" no-op task).
+            this.appendEvent(
+              'approval.requested',
+              { requestId: a.requestId, description: a.description },
+              taskId,
+            )
           },
         })
       }
@@ -298,6 +310,7 @@ export class RunSupervisor {
       onText: (n: number) => void
       onResult: (r: { outcome: PromptOutcome['outcome']; summary?: string }) => void
       onError: (code: string) => void
+      onApproval?: (a: { requestId: string; description: string }) => void
     },
   ): void {
     switch (ev.kind) {
@@ -310,8 +323,11 @@ export class RunSupervisor {
       case 'error':
         hooks.onError(`${ev.code}: ${ev.message}`.slice(0, 500))
         break
+      case 'approval_request':
+        hooks.onApproval?.({ requestId: ev.requestId, description: ev.description })
+        break
       default:
-        break // status/tool/usage/approval events: not needed for run decisions yet
+        break // status/tool/usage events: not needed for run decisions yet
     }
   }
 
@@ -332,7 +348,7 @@ export class RunSupervisor {
     }
     if (current.state === 'failed') {
       this.appendEvent(eventType, { failure }, taskId)
-      this.notifyTerminal(current)
+      this.notifySettled(current)
     }
   }
 
@@ -395,7 +411,7 @@ export class RunSupervisor {
       this.appendEvent('task.started', { museId: muse.id, engine: adapter.kind, workspaceId }, task.id)
 
       const promptText = buildTaskPrompt(task, muse, this.limits.maxBriefChars)
-      const out = await this.runPrompt(session, { text: promptText, timeoutMs: this.defaultTaskTimeoutMs })
+      const out = await this.runPrompt(session, { text: promptText, timeoutMs: this.defaultTaskTimeoutMs }, task.id)
       await session.close().catch((e: unknown) => {
         this.diagnostic(`task ${task.id}: session close failed: ${e instanceof Error ? e.message : String(e)}`)
       })
@@ -408,14 +424,18 @@ export class RunSupervisor {
         ...(out.errorCode !== null ? { error: out.errorCode } : {}),
       }
       if (out.outcome === 'success') {
-        store.setTaskState(task.id, 'verifying', { result: resultPayload })
+        const verifying = store.setTaskState(task.id, 'verifying', { result: resultPayload })
         if (this.verificationConfigured) {
+          // Work is done; only the operator's verification gate can close the
+          // task. Waiters are woken NOW so they never deadlock on `completed`
+          // (host-mode smoke finding: the manager waited out the whole run).
           this.appendEvent('task.awaiting_verification', { outcome: out.outcome }, task.id)
+          this.notifySettled(verifying)
           return // Phase-7 gate completes it; the dispatch loop leaves it here honestly
         }
         const done = store.setTaskState(task.id, 'completed')
         this.appendEvent('task.completed', { outcome: out.outcome, summary: out.summary }, task.id)
-        this.notifyTerminal(done)
+        this.notifySettled(done)
         return
       }
       if (out.outcome === 'failure') {
@@ -425,13 +445,13 @@ export class RunSupervisor {
       if (out.outcome === 'cancelled') {
         const cancelled = store.setTaskState(task.id, 'cancelled', { failure: resultPayload })
         this.appendEvent('task.cancelled', { outcome: 'cancelled', summary: out.summary }, task.id)
-        this.notifyTerminal(cancelled)
+        this.notifySettled(cancelled)
         return
       }
       // unknown — never replay automatically; a human/manager decides what next.
       const unknown = store.setTaskState(task.id, 'unknown_outcome', { failure: resultPayload })
       this.appendEvent('task.unknown_outcome', { outcome: 'unknown', summary: out.summary }, task.id)
-      this.notifyTerminal(unknown)
+      this.notifySettled(unknown)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       this.diagnostic(`task ${task.id} failed: ${message}`)

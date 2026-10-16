@@ -408,6 +408,66 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(eventCount(world.store, world.runId, 'task.completed')).toBe(0)
   })
 
+  it('work-settled: task.wait returns when a verification-gated task reaches verifying', async () => {
+    // Regression pin (host-mode smoke, 2026-10-16): the manager waited the whole
+    // run deadline for `completed` while its worker sat in `verifying` — that is
+    // settled work and only the operator's gate can close it.
+    const waited: { timedOut?: boolean; state?: string; awaitingVerification?: boolean } = {}
+    const world = makeWorld({
+      verificationConfigured: true,
+      managerTools: async (bridge) => {
+        const t = await createViaBridge(bridge, { title: 'V3', assigneeMuseId: 'worker-a' })
+        const res = await bridge.call('task.wait', { taskIds: [t.id], timeoutSeconds: 5 })
+        const data = res.data as { timedOut: boolean; tasks: { state: string; awaitingVerification: boolean }[] }
+        waited.timedOut = data.timedOut
+        waited.state = data.tasks[0]?.state
+        waited.awaitingVerification = data.tasks[0]?.awaitingVerification
+      },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(waited.timedOut).toBe(false)
+    expect(waited.state).toBe('verifying')
+    expect(waited.awaitingVerification).toBe(true)
+    expect(out.state).toBe('verifying') // still not a success claim
+  }, 20_000)
+
+  it('records engine approval requests durably (never silently drops a denial)', async () => {
+    // Regression pin (host-mode smoke, 2026-10-16): the qwen worker's edit was
+    // denied fail-closed, the approval event was dropped by the supervisor, and
+    // the task still claimed success. Every engine ask must leave a record.
+    const created: string[] = []
+    const world = makeWorld({
+      managerTools: async (bridge) => {
+        const t = await createViaBridge(bridge, { title: 'A1', assigneeMuseId: 'worker-a' })
+        created.push(t.id)
+      },
+      workerScripts: {
+        'worker-a': [
+          {
+            events: [{ kind: 'approval_request', requestId: 'req-1', description: 'edit denied (approvalPolicy=deny)' }],
+            delayMs: 5,
+            outcome: 'success',
+          },
+        ],
+      },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    const row = world.store.db
+      .prepare("SELECT task_id, payload_json FROM events WHERE run_id = ? AND type = 'approval.requested'")
+      .get(world.runId) as { task_id: string | null; payload_json: string } | undefined
+    expect(row?.task_id).toBe(created[0])
+    expect(JSON.parse(row?.payload_json as string)).toMatchObject({
+      requestId: 'req-1',
+      description: 'edit denied (approvalPolicy=deny)',
+    })
+  })
+
   it('fails the run when the manager itself fails, without inventing tasks', async () => {
     const world = makeWorld({
       managerScript: [{ delayMs: 10, outcome: 'failure', text: 'cannot plan' }],

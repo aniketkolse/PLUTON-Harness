@@ -38,6 +38,14 @@ export interface ToolHttpServerOptions {
 
 export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
 
+/**
+ * Upper bound for draining in-flight tool handlers after shutdown. Handlers
+ * observe the aborted signal (task.wait returns an `aborted: true` report
+ * immediately), so the drain normally completes in a tick; the bound exists so
+ * a wedged handler can never hold the store open forever.
+ */
+export const DRAIN_GRACE_MS = 5_000
+
 interface RegisteredSession {
   server: McpStdioServer
   spec: ToolHttpSessionSpec
@@ -53,6 +61,10 @@ export class ToolHttpServer {
   private readonly serverName: string | undefined
   private readonly serverVersion: string | undefined
   private boundPort: number | null = null
+  /** Aborted by stop(): every in-flight handler's signal fires at once. */
+  private readonly shutdown = new AbortController()
+  /** Handlers currently running — drained (bounded) before stop() resolves. */
+  private readonly inFlight = new Set<Promise<void>>()
 
   constructor(opts: ToolHttpServerOptions = {}) {
     this.host = opts.host ?? '127.0.0.1'
@@ -62,7 +74,12 @@ export class ToolHttpServer {
     this.serverName = opts.serverName
     this.serverVersion = opts.serverVersion
     this.http = createServer((req, res) => {
-      void this.handleRequest(req, res)
+      const task = this.handleRequest(req, res)
+      this.inFlight.add(task)
+      const done = (): void => {
+        this.inFlight.delete(task)
+      }
+      void task.then(done, done)
     })
   }
 
@@ -118,14 +135,39 @@ export class ToolHttpServer {
 
   async stop(): Promise<void> {
     if (this.boundPort === null) return
+    // 1. Signal shutdown first: long polls (task.wait) return immediately
+    //    instead of outliving the store (host-mode smoke: a pending task.wait
+    //    touched the closed database at process shutdown).
+    this.shutdown.abort()
     await new Promise<void>((resolve, reject) => {
       this.http.close((err) => (err ? reject(err) : resolve()))
       this.http.closeAllConnections() // keep-alive sockets must not hold the listener alive
     })
     this.boundPort = null
+    // 2. Drain in-flight handlers (bounded) so store.close() is safe.
+    if (this.inFlight.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...this.inFlight]),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, DRAIN_GRACE_MS)
+        }),
+      ])
+    }
   }
 
   // -- private plumbing (kept dumb on purpose: authn lookup + body cap only) --
+
+  /**
+   * Signal handed to one request's tool call: fires when that client goes away
+   * or when the server shuts down, whichever happens first.
+   */
+  private requestSignal(res: ServerResponse): AbortSignal {
+    const closed = new AbortController()
+    res.once('close', () => {
+      closed.abort()
+    })
+    return AbortSignal.any([this.shutdown.signal, closed.signal])
+  }
 
   private bearerToken(req: IncomingMessage): string | null {
     const header = req.headers.authorization
@@ -161,12 +203,19 @@ export class ToolHttpServer {
   }
 
   private reply(res: ServerResponse, status: number, payload: unknown): void {
+    if (res.destroyed || res.writableEnded) return // client is gone; nothing to answer
     const body = JSON.stringify(payload)
     res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
     res.end(body)
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // The client may vanish at any moment (engine cancelled, run stopping):
+    // a destroyed socket must surface as an aborted tool call, never as an
+    // unhandled 'error' or a write-after-destroy crash.
+    res.on('error', () => {
+      // Swallowed by design: the response is best-effort once the socket is gone.
+    })
     try {
       if (req.method !== 'POST') {
         this.reply(res, 405, { error: 'method_not_allowed', message: 'the MCP endpoint accepts POST JSON-RPC messages only' })
@@ -183,16 +232,18 @@ export class ToolHttpServer {
         this.reply(res, 413, { error: 'payload_too_large', message: `request exceeds ${String(this.maxRequestBytes)} bytes` })
         return
       }
-      const response = await session.server.handleLine(body)
+      const response = await session.server.handleLine(body, { signal: this.requestSignal(res) })
       if (response === null) {
-        res.writeHead(202).end() // notification accepted, no answer by design
+        if (!res.destroyed && !res.writableEnded) res.writeHead(202).end() // notification accepted, no answer by design
         return
       }
+      if (res.destroyed || res.writableEnded) return // handler outlived its client (shutdown/disconnect)
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(response) })
       res.end(response)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       this.diagnosticSink(`tool-http: request failed: ${message}`)
+      if (res.destroyed || res.writableEnded) return
       if (!res.headersSent) this.reply(res, 500, { error: 'internal_error', message: 'request handling failed' })
       else res.end()
     }

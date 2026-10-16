@@ -35,9 +35,18 @@ export interface McpToolCallResult {
   error?: { code: string; message: string }
 }
 
+export interface McpToolCallOptions {
+  /**
+   * Set while the client is connected and the host is running; aborted on
+   * client disconnect or host shutdown. Long-running tools must observe it and
+   * return promptly instead of outliving the store.
+   */
+  signal?: AbortSignal
+}
+
 export interface McpToolHost {
   listTools(): McpToolInfo[]
-  call(name: string, args: unknown): Promise<McpToolCallResult>
+  call(name: string, args: unknown, opts?: McpToolCallOptions): Promise<McpToolCallResult>
 }
 
 /** Every diagnostic line the server emits. Never stdout. */
@@ -104,7 +113,7 @@ export class McpStdioServer {
    * rejects for malformed input; a line heavier than the byte bound is
    * rejected without being parsed.
    */
-  async handleLine(line: string): Promise<string | null> {
+  async handleLine(line: string, opts?: McpToolCallOptions): Promise<string | null> {
     if (line.trim() === '') return null
     if (Buffer.byteLength(line, 'utf8') > this.maxMessageBytes) {
       return this.errorJson(null, JSONRPC_PARSE_ERROR, this.oversizeMessage())
@@ -123,7 +132,7 @@ export class McpStdioServer {
     if (!Object.prototype.hasOwnProperty.call(msg, 'id')) return null
     const rawId = msg['id']
     const id: string | number | null = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : null
-    return await this.dispatch(msg, id)
+    return await this.dispatch(msg, id, opts)
   }
 
   /**
@@ -198,7 +207,11 @@ export class McpStdioServer {
     })
   }
 
-  private async dispatch(msg: Record<string, unknown>, id: string | number | null): Promise<string | null> {
+  private async dispatch(
+    msg: Record<string, unknown>,
+    id: string | number | null,
+    opts?: McpToolCallOptions,
+  ): Promise<string | null> {
     const method = msg['method']
     if (typeof method !== 'string' || method === '') {
       return this.errorJson(id, JSONRPC_INVALID_REQUEST, 'invalid request: missing method')
@@ -232,13 +245,17 @@ export class McpStdioServer {
           return this.errorJson(id, JSONRPC_INTERNAL_ERROR, message)
         }
       case 'tools/call':
-        return await this.dispatchToolCall(msg, id)
+        return await this.dispatchToolCall(msg, id, opts)
       default:
         return this.errorJson(id, JSONRPC_METHOD_NOT_FOUND, `method not found: ${boundedOneLine(method)}`)
     }
   }
 
-  private async dispatchToolCall(msg: Record<string, unknown>, id: string | number | null): Promise<string> {
+  private async dispatchToolCall(
+    msg: Record<string, unknown>,
+    id: string | number | null,
+    opts?: McpToolCallOptions,
+  ): Promise<string> {
     if (!this.initialized) {
       return this.errorJson(id, JSONRPC_NOT_INITIALIZED, 'server not initialized')
     }
@@ -254,7 +271,7 @@ export class McpStdioServer {
 
     let result: McpToolCallResult
     try {
-      result = await this.host.call(name, args)
+      result = await this.host.call(name, args, opts)
     } catch (err) {
       const message = errorMessage(err)
       this.diagnostic(`tools/call '${name}' threw: ${boundedOneLine(message)}`)

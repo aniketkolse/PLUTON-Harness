@@ -125,8 +125,11 @@ export class PlutonToolBridge implements McpToolHost {
     })
   }
 
-  async call(name: string, args: unknown): Promise<McpToolCallResult> {
+  async call(name: string, args: unknown, opts?: { signal?: AbortSignal }): Promise<McpToolCallResult> {
     const started = this.env.now()
+    // Per-call env: the abort signal belongs to the transport's request, not to
+    // the bridge's lifetime (long waits must observe shutdown immediately).
+    const env = opts?.signal !== undefined ? { ...this.env, signal: opts.signal } : this.env
     // Bound the model-controlled name BEFORE anything is audited: an oversized
     // name must never make an event payload throw and silently drop the denial
     // record (the store caps event payloads).
@@ -144,7 +147,7 @@ export class PlutonToolBridge implements McpToolHost {
       )
     }
     try {
-      const data = await TOOL_HANDLERS[def.name](this.env, args)
+      const data = await TOOL_HANDLERS[def.name](env, args)
       const result: McpToolCallResult = { ok: true, data: this.bound(data) }
       this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.env.now() - started })
       return result

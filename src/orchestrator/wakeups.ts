@@ -3,11 +3,16 @@ import type { TaskRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 
 /**
- * In-process wakeup registry (prompt §4/§7): a completed child task wakes its
+ * In-process wakeup registry (prompt §4/§7): a settled child task wakes its
  * parent EXACTLY once, and the manager waits event-driven — it never polls.
  *
+ * "Settled" means no further automatic progress is possible: a terminal state,
+ * or `verifying` — work is done and only the operator's verification gate can
+ * close the task (host-mode smoke, 2026-10-16: waiting for `completed` under a
+ * configured gate deadlocked the manager until the run deadline).
+ *
  * Durability lives in the events table (`task.completed` etc.); this registry is
- * only the in-process accelerator that turns "a child finished" into a resolved
+ * only the in-process accelerator that turns "a child settled" into a resolved
  * promise. Correctness must never depend on it: callers re-check the actual
  * task/child states in the store after every wakeup (and on timeout), so a
  * missed or coalesced wakeup can only delay work, never lose it.
@@ -30,13 +35,14 @@ export function wakeupChannelFor(callerTaskId: string | null, runId: string): st
 }
 
 /**
- * Wake every possible waiter after a terminal transition: the manager channel
- * and each ancestor task's channel (a task-scoped caller may be waiting on any
+ * Wake every possible waiter after a settling transition (terminal, or
+ * `verifying` when a verification gate is configured): the manager channel and
+ * each ancestor task's channel (a task-scoped caller may be waiting on any
  * descendant). The registry dedupes per (channel, child) pair, so notifying
  * overlapping keys is harmless. Keying matches `wakeupChannelFor`: a task's
  * channel is the bare task id, the manager's channel is `manager:<runId>`.
  */
-export function notifyTaskTerminal(
+export function notifyTaskSettled(
   wakeups: WakeupRegistry,
   runId: string,
   task: TaskRecord,
@@ -85,10 +91,11 @@ export class WakeupRegistry {
   }
 
   /**
-   * Record a child reaching a terminal state against a channel key. One wakeup
-   * per (channel, child) pair is ever delivered. The producer chooses the keys:
-   * the run supervisor notifies the manager channel (`manager:<runId>`) and
-   * every ancestor task's channel, so a waiter on any ancestor is woken.
+   * Record a child settling against a channel key (terminal state, or
+   * `verifying` under a configured gate). One wakeup per (channel, child) pair
+   * is ever delivered. The producer chooses the keys: the run supervisor
+   * notifies the manager channel (`manager:<runId>`) and every ancestor task's
+   * channel, so a waiter on any ancestor is woken.
    */
   notify(channelKey: string, childTaskId: string, childState: TaskState): void {
     const key = pairKey(channelKey, childTaskId)

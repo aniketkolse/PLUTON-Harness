@@ -127,4 +127,53 @@ describe('ToolHttpServer', () => {
     await server.stop()
     await expect(post(url, null, INITIALIZE)).rejects.toThrow()
   })
+
+  it('stop() aborts in-flight tool calls and drains them before resolving', async () => {
+    // Regression pin (host-mode smoke, 2026-10-16): a pending task.wait used to
+    // outlive the HTTP server and touch the closed store ("database is not
+    // open"). Shutdown must abort the call signal, and stop() must not resolve
+    // until the handlers observing it have returned.
+    let observedAbort = false
+    let signalCallStarted: () => void = () => {}
+    const callStarted = new Promise<void>((resolve) => {
+      signalCallStarted = resolve
+    })
+    const host: McpToolHost = {
+      listTools: (): McpToolInfo[] => [{ name: 'slow', description: 'slow', inputSchema: { type: 'object' } }],
+      call: async (name: string, _args: unknown, opts?: { signal?: AbortSignal }): Promise<McpToolCallResult> => {
+        signalCallStarted()
+        await new Promise<void>((resolve) => {
+          const fallback = setTimeout(resolve, 30_000)
+          opts?.signal?.addEventListener(
+            'abort',
+            () => {
+              observedAbort = true
+              clearTimeout(fallback)
+              resolve()
+            },
+            { once: true },
+          )
+        })
+        return { ok: true, data: { name } }
+      },
+    }
+    const server = new ToolHttpServer({ host: '127.0.0.1', port: 0, diagnosticSink: () => {} })
+    servers.push(server)
+    const { url } = await server.start()
+    const { token } = server.register(host, { museId: 'muse-m', taskId: null, runId: 'run-1' })
+    await post(url, token, INITIALIZE)
+    // The client may die with the handler still running: swallow the transport error.
+    const callPromise = post(url, token, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'slow', arguments: {} },
+    }).catch(() => null)
+    await callStarted
+    const started = Date.now()
+    await server.stop()
+    expect(observedAbort).toBe(true)
+    expect(Date.now() - started).toBeLessThan(4_000) // drain is bounded, not the 30 s fallback
+    await callPromise
+  })
 })

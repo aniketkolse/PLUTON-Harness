@@ -27,6 +27,13 @@ export interface ToolEnv {
   limits: ToolBridgeLimits
   wakeups: WakeupRegistry
   now: () => number
+  /**
+   * Set while the caller is still connected and the host is running; aborted
+   * when the client disconnects or the runtime shuts the bridge down. Long
+   * waits (task.wait) must observe it and return promptly — a handler must
+   * never outlive the store.
+   */
+  signal?: AbortSignal
 }
 
 export type ToolHandler = (env: ToolEnv, args: unknown) => Promise<JsonValue>
@@ -72,6 +79,34 @@ function summarizeTask(t: TaskRecord): TaskSummary {
 
 function tasksById(env: ToolEnv): Map<string, TaskRecord> {
   return new Map(env.store.listTasks(env.runId).map((t) => [t.id, t]))
+}
+
+/**
+ * One heartbeat slice of a wait, cut short when the host signals shutdown (or
+ * the client disconnects). The loop that calls this re-checks durable state
+ * and the signal after every slice, so a short slice can only help.
+ */
+async function waitSlice(
+  wakeups: WakeupRegistry,
+  channel: string,
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await wakeups.waitFor(channel, ms)
+    return
+  }
+  if (signal.aborted) return
+  await new Promise<void>((resolve) => {
+    const onAbort = (): void => {
+      resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void wakeups.waitFor(channel, ms).then(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    })
+  })
 }
 
 /** Manager scope (no caller task) sees the whole run; a task-scoped caller sees itself + descendants. */
@@ -258,31 +293,38 @@ export const TOOL_HANDLERS: ToolHandlers = {
     const timeoutSeconds = a.timeoutSeconds ?? env.limits.defaultWaitSeconds
     const channel = wakeupChannelFor(env.callerTaskId, env.runId)
     const deadline = env.now() + timeoutSeconds * 1_000
-    const terminal = (t: TaskRecord): boolean => TERMINAL_TASK_STATES.has(t.state)
+    // Settled = no further automatic progress is possible: a terminal state, or
+    // `verifying` — the work is done and only the operator's verification gate
+    // can close the task. Waiting for `completed` under a configured gate
+    // deadlocked the manager until the run deadline (host-mode smoke,
+    // 2026-10-16); `verifying` therefore counts as settled and is reported
+    // explicitly, never as success.
+    const settled = (t: TaskRecord): boolean => TERMINAL_TASK_STATES.has(t.state) || t.state === 'verifying'
+    const withResult = (t: TaskRecord): JsonValue => ({
+      ...summarizeTask(t),
+      awaitingVerification: t.state === 'verifying',
+      result: t.result,
+      failure: t.failure,
+    })
+    const report = (timedOut: boolean, aborted: boolean, current: TaskRecord[]): JsonValue => ({
+      timedOut,
+      ...(aborted ? { aborted: true } : {}),
+      ...(timedOut ? { pending: current.filter((t) => !settled(t)).map(summarizeTask) } : {}),
+      tasks: current.filter((t) => settled(t)).map(withResult),
+    })
     for (;;) {
       const current = a.taskIds.map((id) => env.store.getTask(id))
-      if (current.every(terminal)) {
-        return {
-          timedOut: false,
-          tasks: current.map((t) => ({ ...summarizeTask(t), result: t.result, failure: t.failure })),
-        }
-      }
+      if (current.every(settled)) return report(false, false, current)
+      if (env.signal?.aborted === true) return report(true, true, current)
       const remaining = deadline - env.now()
-      if (remaining <= 0) {
-        return {
-          timedOut: true,
-          pending: current.filter((t) => !terminal(t)).map(summarizeTask),
-          tasks: current
-            .filter(terminal)
-            .map((t) => ({ ...summarizeTask(t), result: t.result, failure: t.failure })),
-        }
-      }
-      // Event-driven: the runtime notifies the registry on terminal transitions;
-      // a wakeup (or a heartbeat slice) simply makes us re-read durable task
-      // state. The slice keeps a standalone (stdio) bridge honest when nobody
-      // shares its in-process registry: it re-checks every heartbeat instead of
-      // sleeping until the deadline.
-      await env.wakeups.waitFor(channel, Math.min(remaining, env.limits.waitHeartbeatSeconds * 1_000))
+      if (remaining <= 0) return report(true, false, current)
+      // Event-driven: the runtime notifies the registry on settling transitions
+      // (terminal or awaiting verification); a wakeup (or a heartbeat slice)
+      // simply makes us re-read durable task state. The slice keeps a
+      // standalone (stdio) bridge honest when nobody shares its in-process
+      // registry: it re-checks every heartbeat instead of sleeping until the
+      // deadline. Abort (shutdown/disconnect) cuts the slice short.
+      await waitSlice(env.wakeups, channel, Math.min(remaining, env.limits.waitHeartbeatSeconds * 1_000), env.signal)
     }
   },
 

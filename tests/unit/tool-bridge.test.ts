@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PERMISSIONS } from '../../src/domain/permissions.ts'
+import { allowedTransitions } from '../../src/domain/state.ts'
 import type { RunRecord } from '../../src/domain/models.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
-import { notifyTaskTerminal, taskAncestorIds, WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
+import { notifyTaskSettled, taskAncestorIds, WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
 import { PlutonToolBridge, type ToolBridgeLimits } from '../../src/tools/bridge.ts'
 import { wakeupChannelFor } from '../../src/tools/handlers.ts'
 import { McpStdioServer } from '../../src/tools/mcp-server.ts'
@@ -178,6 +179,15 @@ function forceComplete(store: Store, taskId: string): void {
     const current = store.getTask(taskId)
     if (current.state === 'completed') return
     if (current.state === next) continue
+    store.setTaskState(taskId, next)
+  }
+}
+
+/** Walk a freshly admitted task along legal edges to `verifying` (work done, operator gate pending). */
+function forceVerify(store: Store, taskId: string): void {
+  for (const next of ['queued', 'admitted', 'running', 'verifying'] as const) {
+    const current = store.getTask(taskId)
+    if (current.state === next || !allowedTransitions(current.state).includes(next)) continue
     store.setTaskState(taskId, next)
   }
 }
@@ -357,6 +367,52 @@ describe('PlutonToolBridge — task.wait', () => {
     expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
     expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
     expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it('treats awaiting verification as settled — returns immediately, never claims success', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const taskId = await createTask(manager)
+    forceVerify(fx.store, taskId)
+    const started = Date.now()
+    const res = await manager.call('task.wait', { taskIds: [taskId], timeoutSeconds: 30 })
+    const data = res.data as { timedOut: boolean; tasks: { state: string; awaitingVerification: boolean }[] }
+    expect(data.timedOut).toBe(false)
+    expect(data.tasks[0]?.state).toBe('verifying')
+    expect(data.tasks[0]?.awaitingVerification).toBe(true)
+    expect(Date.now() - started).toBeLessThan(2_000) // no deadlock on `completed`
+  })
+
+  it('resolves on the awaiting-verification wakeup (configured verification gate)', async () => {
+    const fx = makeFixture()
+    const registry = new WakeupRegistry()
+    const manager = makeBridge(fx, 'manager', null, {}, registry)
+    const taskId = await createTask(manager)
+    const waiting = manager.call('task.wait', { taskIds: [taskId], timeoutSeconds: 5 })
+    await delay(25)
+    forceVerify(fx.store, taskId)
+    registry.notify(wakeupChannelFor(null, fx.run.id), taskId, 'verifying')
+    const res = await waiting
+    expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
+    expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('verifying')
+  })
+
+  it('honours an aborted signal (shutdown/disconnect) with an honest report', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const taskId = await createTask(manager)
+    const ctl = new AbortController()
+    const waiting = manager.call('task.wait', { taskIds: [taskId], timeoutSeconds: 600 }, { signal: ctl.signal })
+    await delay(20)
+    const started = Date.now()
+    ctl.abort()
+    const res = await waiting
+    const data = res.data as { timedOut: boolean; aborted: boolean; pending: unknown[]; tasks: unknown[] }
+    expect(data.aborted).toBe(true)
+    expect(data.timedOut).toBe(true) // never a silent success
+    expect(data.pending).toHaveLength(1)
+    expect(data.tasks).toHaveLength(0)
+    expect(Date.now() - started).toBeLessThan(2_000) // returns immediately, does not outlive the store
   })
 })
 
@@ -627,7 +683,7 @@ describe('PlutonToolBridge — review hardening', () => {
     await delay(50)
     forceComplete(fx.store, g)
     const gTask = fx.store.getTask(g)
-    notifyTaskTerminal(registry, fx.run.id, gTask, taskAncestorIds(fx.store, gTask))
+    notifyTaskSettled(registry, fx.run.id, gTask, taskAncestorIds(fx.store, gTask))
     const res = await waiting
     expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
     expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
