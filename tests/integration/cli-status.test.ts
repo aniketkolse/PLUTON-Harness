@@ -199,7 +199,7 @@ describe('pluton CLI read paths (integration)', () => {
   })
 
   it('planned commands fail with a stable not_implemented code', () => {
-    const { stdout, exitCode } = runCli(['run', '--json'])
+    const { stdout, exitCode } = runCli(['attach', '--json'])
     expect(exitCode).toBe(1)
     const env = parseEnvelope(stdout)
     expect(env.ok).toBe(false)

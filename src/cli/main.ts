@@ -20,6 +20,7 @@ import { requireProject } from './context.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { mcpServe } from './commands/mcp.ts'
+import { runRun } from './commands/run.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
 import { DEFAULT_WORKER_IMAGE_TAG } from '../sandbox/image.ts'
@@ -427,7 +428,7 @@ program
           const runs = statusRuns(store, limit)
           const human =
             runs.length === 0
-              ? 'no runs recorded yet (runs are created by `pluton run`, which is still planned)'
+              ? 'no runs recorded yet (create one with `pluton run --goal <text>`)'
               : runs
                   .map((s) => {
                     const counts = Object.entries(s.taskCounts)
@@ -657,11 +658,58 @@ program
   })
 
 // ---------------------------------------------------------------------------
+// run — create a supervised run and drive it to a verdict (Phase 6)
+// ---------------------------------------------------------------------------
+
+program
+  .command('run')
+  .description('start an orchestration run: the Manager Muse plans and delegates through the restricted tool bridge')
+  .option('--goal <text>', 'what the run must achieve (required)')
+  .option(
+    '--acceptance <criterion>',
+    'acceptance criterion (repeatable)',
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[],
+  )
+  .option('--manager <muse>', 'Muse that coordinates the run (default: the supervisor-role Muse)')
+  .option('--request-id <id>', 'idempotency key: retrying with the same id never creates a second run')
+  .action(
+    async (opts: { goal?: string; acceptance: string[]; manager?: string; requestId?: string }, cmd: Command) => {
+      const json = jsonMode(cmd)
+      await runCommand(io, json, async () => {
+        const ctx = requireProject(process.cwd())
+        const summary = await runRun(ctx, {
+          goal: opts.goal ?? '',
+          acceptance: opts.acceptance,
+          ...(opts.manager !== undefined ? { managerRef: opts.manager } : {}),
+          ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
+        })
+        const counts = Object.entries(summary.taskCounts)
+          .map(([state, n]) => `${state}:${n}`)
+          .join('  ')
+        const human = [
+          `run      ${summary.runId}`,
+          `state    ${summary.state}`,
+          `outcome  ${summary.outcome ?? '(in progress)'}`,
+          `tasks    ${counts || '(none)'}`,
+          ...(summary.managerSummary !== null ? [`summary  ${summary.managerSummary}`] : []),
+          ...(summary.verificationPending ? [`next: pluton verify --run ${summary.runId}`] : []),
+        ].join('\n')
+        emitOk(io, json, human, {
+          run: { id: summary.runId, state: summary.state, outcome: summary.outcome },
+          taskCounts: summary.taskCounts,
+          managerSummary: summary.managerSummary,
+          unfinishedTasks: summary.unfinishedTasks,
+        })
+      })
+    },
+  )
+
+// ---------------------------------------------------------------------------
 // Planned commands — explicit, stable `not_implemented` failures.
 // ---------------------------------------------------------------------------
 
 for (const [name, planned] of [
-  ['run', 'start an orchestration run (Manager-driven team execution)'],
   ['attach', 'attach to a Muse terminal (tmux in its container)'],
   ['integrate', 'integrate verified task branches through the integration checkout'],
 ] as const) {
