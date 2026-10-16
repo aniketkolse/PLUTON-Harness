@@ -25,7 +25,7 @@ export interface TerminalEnsureResult {
   created: boolean
 }
 
-export type TerminalKillOutcome = 'killed' | 'absent'
+export type TerminalKillOutcome = 'killed' | 'absent' | 'ambiguous'
 
 /** Machine-readable reasons carried in TerminalUnavailableError.details. */
 export type TerminalFailureReason =
@@ -33,6 +33,7 @@ export type TerminalFailureReason =
   | 'container_missing'
   | 'session_missing'
   | 'window_missing'
+  | 'window_ambiguous'
   | 'timeout'
   | 'exec_failed'
 

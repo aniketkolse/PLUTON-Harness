@@ -62,3 +62,28 @@ export function parseWindowList(stdout: string): string[] {
     .map((line) => line.replace(/\r$/, '').trim())
     .filter((line) => line.length > 0)
 }
+
+export interface TmuxWindowEntry {
+  /** tmux window id (e.g. `@7`) — unique even when window NAMES collide. */
+  id: string
+  name: string
+}
+
+/**
+ * Parse `tmux list-windows -F '#{window_id}:#{window_name}'` output. Window
+ * names can never contain ':' (SAFE_NAME_RE), so splitting on the first ':' is
+ * unambiguous; malformed lines are dropped rather than mis-attributed.
+ */
+export function parseWindowIdList(stdout: string): TmuxWindowEntry[] {
+  const entries: TmuxWindowEntry[] = []
+  for (const line of stdout.split('\n')) {
+    const clean = line.replace(/\r$/, '').trim()
+    if (clean === '') continue
+    const sep = clean.indexOf(':')
+    if (sep <= 0) continue
+    const id = clean.slice(0, sep)
+    if (!/^@\d+$/.test(id)) continue
+    entries.push({ id, name: clean.slice(sep + 1) })
+  }
+  return entries
+}

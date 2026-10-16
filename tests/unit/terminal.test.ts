@@ -4,6 +4,7 @@ import type { RunResult } from '../../src/util/exec.ts'
 import { TmuxTerminalManager } from '../../src/terminal/manager.ts'
 import {
   assertSafeTmuxName,
+  parseWindowIdList,
   parseWindowList,
   taskWindowName,
   tmuxSessionName,
@@ -75,6 +76,14 @@ describe('tmux naming', () => {
   it('parses window lists tolerantly (CRLF, blank lines)', () => {
     expect(parseWindowList('shell\r\ntask-x\r\n\r\n')).toEqual(['shell', 'task-x'])
     expect(parseWindowList('')).toEqual([])
+  })
+
+  it('parses window id lists and drops malformed lines', () => {
+    expect(parseWindowIdList('@1:shell\r\n@7:task-abc123\n\n')).toEqual([
+      { id: '@1', name: 'shell' },
+      { id: '@7', name: 'task-abc123' },
+    ])
+    expect(parseWindowIdList('nonsense\n@x:name\n:name\n')).toEqual([])
   })
 })
 
@@ -148,11 +157,16 @@ describe('ensureSession', () => {
     expect(sandbox.execCalls[1]?.argv).toEqual(['tmux', 'new-session', '-d', '-s', SESSION, '-n', 'shell'])
   })
 
-  it('is idempotent: an existing session costs exactly one exec', async () => {
+  it('re-asserts server-wide safety defaults even for an existing session (self-healing)', async () => {
     const { sandbox, tmux } = make()
-    sandbox.execQueue.push(okResult([]))
+    sandbox.execQueue.push(okResult([]), okResult([]), okResult([]), okResult([]))
     await expect(tmux.ensureSession(CONTAINER, SESSION)).resolves.toEqual({ created: false })
-    expect(sandbox.calls.length).toBe(1)
+    expect(sandbox.execCalls.map((c) => c.argv)).toEqual([
+      ['tmux', 'has-session', '-t', `=${SESSION}`],
+      ['tmux', 'set-option', '-g', 'history-limit', '20000'],
+      ['tmux', 'set-window-option', '-g', 'automatic-rename', 'off'],
+      ['tmux', 'set-window-option', '-g', 'allow-rename', 'off'],
+    ])
   })
 
   it('treats a duplicate-session race as success (created: false)', async () => {
@@ -160,16 +174,19 @@ describe('ensureSession', () => {
     sandbox.execQueue.push(
       failResult([], 'no server running'),
       failResult([], `duplicate session: ${SESSION}`),
+      okResult([]),
+      okResult([]),
+      okResult([]),
     )
     await expect(tmux.ensureSession(CONTAINER, SESSION)).resolves.toEqual({ created: false })
-    expect(sandbox.calls.length).toBe(2)
+    expect(sandbox.calls.length).toBe(5)
   })
 })
 
 describe('ensureWindow / listWindows', () => {
-  it('creates a detached window with the exact argv', async () => {
+  it('creates a detached window with the exact argv and verifies name uniqueness', async () => {
     const { sandbox, tmux } = make()
-    sandbox.execQueue.push(okResult([], 'shell\n'), okResult([]))
+    sandbox.execQueue.push(okResult([], 'shell\n'), okResult([], '@7'), okResult([], `@4:shell\n@7:${WINDOW}\n`))
     await expect(tmux.ensureWindow(CONTAINER, SESSION, WINDOW, { cwd: '/work/task' })).resolves.toEqual({
       created: true,
     })
@@ -178,6 +195,9 @@ describe('ensureWindow / listWindows', () => {
       'tmux',
       'new-window',
       '-d',
+      '-P',
+      '-F',
+      '#{window_id}',
       '-t',
       `=${SESSION}`,
       '-n',
@@ -185,6 +205,33 @@ describe('ensureWindow / listWindows', () => {
       '-c',
       '/work/task',
     ])
+    expect(sandbox.execCalls[2]?.argv).toEqual([
+      'tmux',
+      'list-windows',
+      '-t',
+      `=${SESSION}`,
+      '-F',
+      '#{window_id}:#{window_name}',
+    ])
+  })
+
+  it('loses a duplicate-window race and kills ONLY its own window by id', async () => {
+    const { sandbox, tmux } = make()
+    sandbox.execQueue.push(
+      okResult([], 'shell\n'), // the pre-check missed the concurrent creation
+      okResult([], '@8'),
+      okResult([], `@7:${WINDOW}\n@8:${WINDOW}\n`),
+      okResult([]), // the kill of our own @8
+    )
+    await expect(tmux.ensureWindow(CONTAINER, SESSION, WINDOW)).resolves.toEqual({ created: false })
+    expect(sandbox.execCalls[3]?.argv).toEqual(['tmux', 'kill-window', '-t', '@8'])
+  })
+
+  it('keeps its window when it wins the duplicate race (lowest id wins deterministically)', async () => {
+    const { sandbox, tmux } = make()
+    sandbox.execQueue.push(okResult([], 'shell\n'), okResult([], '@5'), okResult([], `@5:${WINDOW}\n@6:${WINDOW}\n`))
+    await expect(tmux.ensureWindow(CONTAINER, SESSION, WINDOW)).resolves.toEqual({ created: true })
+    expect(sandbox.calls.length).toBe(3)
   })
 
   it('is idempotent when the window is already present', async () => {
@@ -241,9 +288,23 @@ describe('capturePane', () => {
 
   it('maps a vanished window to window_missing', async () => {
     const { sandbox, tmux } = make()
-    sandbox.execQueue.push(failResult([], `can't find window: ${WINDOW}`))
+    sandbox.execQueue.push(failResult([], `can't find window: ${WINDOW}`), okResult([], 'shell\n'))
     const err = await tmux.capturePane(CONTAINER, SESSION, WINDOW).catch((e: unknown) => e)
     expect((err as TerminalUnavailableError).details).toMatchObject({ reason: 'window_missing', windowName: WINDOW })
+  })
+
+  it('reports duplicate window names as window_ambiguous, never as missing', async () => {
+    const { sandbox, tmux } = make()
+    sandbox.execQueue.push(
+      failResult([], `can't find window: ${WINDOW}`),
+      okResult([], `shell\n${WINDOW}\n${WINDOW}\n`),
+    )
+    const err = await tmux.capturePane(CONTAINER, SESSION, WINDOW).catch((e: unknown) => e)
+    expect((err as TerminalUnavailableError).details).toMatchObject({
+      reason: 'window_ambiguous',
+      windowName: WINDOW,
+      matches: 2,
+    })
   })
 })
 
@@ -257,7 +318,22 @@ describe('killWindow', () => {
 
   it('is idempotent: an already-gone window is "absent", not an error', async () => {
     const { sandbox, tmux } = make()
-    sandbox.execQueue.push(failResult([], `can't find window: ${WINDOW}`))
+    sandbox.execQueue.push(failResult([], `can't find window: ${WINDOW}`), okResult([], 'shell\n'))
+    await expect(tmux.killWindow(CONTAINER, SESSION, WINDOW)).resolves.toBe('absent')
+  })
+
+  it('is honest about duplicates: "ambiguous" instead of "absent" while two windows exist', async () => {
+    const { sandbox, tmux } = make()
+    sandbox.execQueue.push(
+      failResult([], `can't find window: ${WINDOW}`),
+      okResult([], `shell\n${WINDOW}\n${WINDOW}\n`),
+    )
+    await expect(tmux.killWindow(CONTAINER, SESSION, WINDOW)).resolves.toBe('ambiguous')
+  })
+
+  it('stays "absent" when the whole session is already gone (idempotent cleanup)', async () => {
+    const { sandbox, tmux } = make()
+    sandbox.execQueue.push(failResult([], 'no server running on /tmp/tmux-10001/default'), failResult([], 'no server running'))
     await expect(tmux.killWindow(CONTAINER, SESSION, WINDOW)).resolves.toBe('absent')
   })
 
