@@ -24,7 +24,7 @@ import { mcpServe } from './commands/mcp.ts'
 import { runRun } from './commands/run.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
-import { DEFAULT_WORKER_IMAGE_TAG } from '../sandbox/image.ts'
+import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProfile } from '../sandbox/image.ts'
 import {
   graphHuman,
   graphView,
@@ -368,19 +368,25 @@ sandboxCmd
   .description('build the worker image, verify tmux/node inside it, and record the image id')
   .option('--tag <tag>', `image tag (default: sandbox.image from pluton.yaml, else ${DEFAULT_WORKER_IMAGE_TAG})`)
   .option('--base <ref>', 'override the base image, e.g. an exact digest reference')
-  .action(async (opts: { tag?: string; base?: string }, cmd: Command) => {
+  .option('--engines', 'engines profile: also install the pinned engine CLIs for container-mode runs')
+  .action(async (opts: { tag?: string; base?: string; engines?: boolean }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
       const { record, configTagMismatch } = await sandboxBuildImage(ctx, {
         ...(opts.tag !== undefined ? { tag: opts.tag } : {}),
         ...(opts.base !== undefined ? { base: opts.base } : {}),
+        ...(opts.engines === true ? { profile: 'engines' satisfies WorkerImageProfile } : {}),
       })
       const human = [
         `built ${record.image}`,
         `image id: ${record.imageId}`,
+        `profile: ${record.profile}`,
         `tmux: ${record.tmuxVersion}   node: ${record.nodeVersion}`,
         'recorded in .pluton/state/worker-image.json',
+        record.profile === 'engines'
+          ? ''
+          : 'note: container-mode runs need the engines profile — rebuild with `pluton sandbox build-image --engines`',
         configTagMismatch
           ? `note: pluton.yaml pins a different tag — set sandbox.image: ${record.image} to use this build`
           : '',

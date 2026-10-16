@@ -5,6 +5,7 @@ import {
   dispatchReadiness,
   WorkerImageManager,
   type WorkerImageProbe,
+  type WorkerImageProfile,
   type WorkerImageRecord,
 } from '../../sandbox/image.ts'
 import { LOCAL_PROCESS_WARNING } from '../../sandbox/local-process.ts'
@@ -68,6 +69,8 @@ export async function sandboxProbe(ctx: ProjectContext): Promise<SandboxProbeRep
 export interface BuildImageRequest {
   tag?: string
   base?: string
+  /** `base` (default) = probe/terminal layer only; `engines` adds the pinned engine CLIs. */
+  profile?: WorkerImageProfile
 }
 
 export async function sandboxBuildImage(ctx: ProjectContext, req: BuildImageRequest = {}): Promise<{
@@ -79,6 +82,7 @@ export async function sandboxBuildImage(ctx: ProjectContext, req: BuildImageRequ
   const record = await new WorkerImageManager().build(ctx.rootDir, {
     tag,
     ...(req.base !== undefined ? { base: req.base } : {}),
+    ...(req.profile !== undefined ? { profile: req.profile } : {}),
   })
   const configured = ctx.loaded.config.sandbox.image
   return { record, configTagMismatch: configured !== undefined && configured !== tag }

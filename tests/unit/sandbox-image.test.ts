@@ -12,6 +12,7 @@ import {
   workerImageRecordPath,
   WorkerImageManager,
   type WorkerImageProbe,
+  type WorkerImageRecord,
 } from '../../src/sandbox/image.ts'
 import { failResult, okResult } from '../helpers/fake-sandbox.ts'
 
@@ -54,6 +55,9 @@ const isInspect = (argv: string[]): boolean => argv[1] === 'image' && argv[2] ==
 const isBuild = (argv: string[]): boolean => argv[1] === 'build'
 const isTmuxRun = (argv: string[]): boolean => argv[1] === 'run' && argv.includes('tmux')
 const isNodeRun = (argv: string[]): boolean => argv[1] === 'run' && argv.includes('node')
+/** `docker run ... --entrypoint <name> <tag> ...` for a named binary. */
+const isEntrypointRun = (argv: string[], name: string): boolean =>
+  argv[1] === 'run' && argv[argv.indexOf('--entrypoint') + 1] === name
 
 function happyRules(id = 'sha256:def456'): Rule[] {
   return [
@@ -80,6 +84,7 @@ describe('worker image build', () => {
     expect(record).toEqual({
       image: 'pluton-worker:test',
       imageId: 'sha256:def456',
+      profile: 'base',
       tmuxVersion: 'tmux 3.3a',
       nodeVersion: 'v24.0.0',
       builtAt: expect.any(String),
@@ -93,6 +98,50 @@ describe('worker image build', () => {
     expect(existsSync(path)).toBe(true)
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(record)
     expect(readWorkerImageRecord(root)).toEqual(record)
+  })
+
+  it('builds the engines profile with the pinned engine layer, verifies both binaries, and records the profile', async () => {
+    const root = tmpRoot()
+    const dockerfileDir = workerDockerfileDir()
+    const { runFn, calls } = scripted([
+      ...happyRules(),
+      { label: 'opencode', match: (argv) => isEntrypointRun(argv, 'opencode'), result: (argv) => okResult(argv, '2.0.31\n') },
+      { label: 'qwen', match: (argv: string[]) => isEntrypointRun(argv, 'qwen'), result: (argv: string[]) => okResult(argv, '0.25.2\n') },
+    ])
+    const record = await new WorkerImageManager({ runFn }).build(root, { tag: 'pluton-worker:test', profile: 'engines' })
+    expect(record.profile).toBe('engines')
+    expect(calls[1]).toEqual([
+      'docker',
+      'build',
+      '-t',
+      'pluton-worker:test',
+      '--file',
+      join(dockerfileDir, 'Dockerfile'),
+      '--build-arg',
+      'PLUTON_ENGINES=1',
+      dockerfileDir,
+    ])
+    // Both engine binaries are proven by running them inside the built image.
+    const entrypoints = calls.filter((c) => c[1] === 'run').map((c) => c[c.indexOf('--entrypoint') + 1])
+    expect(entrypoints).toEqual(expect.arrayContaining(['opencode', 'qwen']))
+    expect(readWorkerImageRecord(root)?.profile).toBe('engines')
+  })
+
+  it('refuses an engines-profile image whose engine binary is missing, writing no record', async () => {
+    const root = tmpRoot()
+    const rules = [
+      ...happyRules(),
+      {
+        label: 'opencode',
+        match: (argv: string[]) => isEntrypointRun(argv, 'opencode'),
+        result: (argv: string[]) => failResult(argv, 'opencode: executable file not found in $PATH', 127),
+      },
+      { label: 'qwen', match: (argv: string[]) => isEntrypointRun(argv, 'qwen'), result: (argv: string[]) => okResult(argv, '0.25.2\n') },
+    ]
+    const err = await new WorkerImageManager({ runFn: scripted(rules).runFn }).build(root, { profile: 'engines' }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(SandboxUnavailableError)
+    expect((err as SandboxUnavailableError).message).toContain('opencode')
+    expect(readWorkerImageRecord(root)).toBeNull()
   })
 
   it('adds an explicit --build-arg BASE when a base image is pinned', async () => {
@@ -200,6 +249,22 @@ describe('worker image probe', () => {
     const probe = await new WorkerImageManager({ runFn }).probe(root)
     expect(probe.record).toBeNull()
   })
+
+  it('treats a legacy record without profile as base, never as engines', async () => {
+    const root = tmpRoot()
+    mkdirSync(join(root, '.pluton', 'state'), { recursive: true })
+    writeFileSync(
+      workerImageRecordPath(root),
+      JSON.stringify({
+        image: DEFAULT_WORKER_IMAGE_TAG,
+        imageId: 'sha256:legacy',
+        tmuxVersion: 'tmux 3.3a',
+        nodeVersion: 'v24.0.0',
+        builtAt: '2026-01-01T00:00:00.000Z',
+      }),
+    )
+    expect(readWorkerImageRecord(root)?.profile).toBe('base')
+  })
 })
 
 const LONG_RECORD_ID = 'sha256:0123456789abcdef0123456789abcdef'
@@ -214,6 +279,17 @@ function probeFixture(over: Partial<WorkerImageProbe> = {}): WorkerImageProbe {
     matchesRecord: false,
     detail: 'fixture detail',
     ...over,
+  }
+}
+
+function recordFixture(profile: WorkerImageRecord['profile']): WorkerImageRecord {
+  return {
+    image: DEFAULT_WORKER_IMAGE_TAG,
+    imageId: 'sha256:current',
+    profile,
+    tmuxVersion: 'tmux 3.3a',
+    nodeVersion: 'v24.0.0',
+    builtAt: '2026-01-01T00:00:00.000Z',
   }
 }
 
@@ -246,6 +322,7 @@ describe('dispatch readiness (pure)', () => {
         record: {
           image: DEFAULT_WORKER_IMAGE_TAG,
           imageId: LONG_RECORD_ID,
+          profile: 'base',
           tmuxVersion: 'tmux 3.3a',
           nodeVersion: 'v24.0.0',
           builtAt: 'x',
@@ -263,14 +340,47 @@ describe('dispatch readiness (pure)', () => {
   })
 
   it('match: ready and silent', () => {
-    const record = {
-      image: DEFAULT_WORKER_IMAGE_TAG,
-      imageId: 'sha256:abc123',
-      tmuxVersion: 'tmux 3.3a',
-      nodeVersion: 'v24.0.0',
-      builtAt: '2026-01-01T00:00:00.000Z',
-    }
-    const r = dispatchReadiness(true, probeFixture({ imageId: 'sha256:abc123', record, matchesRecord: true }))
+    const r = dispatchReadiness(true, probeFixture({ imageId: 'sha256:abc123', record: recordFixture('base'), matchesRecord: true }))
     expect(r).toEqual({ ready: true, warnings: [] })
+  })
+
+  it('probe-only readiness stays green with a base-profile image', () => {
+    const r = dispatchReadiness(true, probeFixture({ record: recordFixture('base'), matchesRecord: true }))
+    expect(r).toEqual({ ready: true, warnings: [] })
+  })
+
+  it('container mode refuses a base-profile image with the exact --engines rebuild command', () => {
+    const r = dispatchReadiness(true, probeFixture({ record: recordFixture('base'), matchesRecord: true }), {
+      requireEngines: true,
+    })
+    expect(r.ready).toBe(false)
+    expect(r.warnings.join('\n')).toContain('`pluton sandbox build-image --engines`')
+  })
+
+  it('container mode: a missing image names the --engines build command', () => {
+    const r = dispatchReadiness(true, probeFixture({ present: false, imageId: null }), { requireEngines: true })
+    expect(r.ready).toBe(false)
+    expect(r.warnings.join('\n')).toContain('`pluton sandbox build-image --engines`')
+  })
+
+  it('container mode refuses an unrecorded image (the engines profile cannot be proven)', () => {
+    const r = dispatchReadiness(true, probeFixture(), { requireEngines: true })
+    expect(r.ready).toBe(false)
+    expect(r.warnings.join('\n')).toContain('`pluton sandbox build-image --engines`')
+  })
+
+  it('container mode accepts an engines-profile image (and drift still refuses)', () => {
+    const ok = dispatchReadiness(true, probeFixture({ record: recordFixture('engines'), matchesRecord: true }), {
+      requireEngines: true,
+    })
+    expect(ok).toEqual({ ready: true, warnings: [] })
+
+    const drifted = dispatchReadiness(
+      true,
+      probeFixture({ record: recordFixture('engines'), matchesRecord: false, imageId: LONG_ACTUAL_ID }),
+      { requireEngines: true },
+    )
+    expect(drifted.ready).toBe(false)
+    expect(drifted.warnings.join('\n')).toContain('changed since the recorded build')
   })
 })

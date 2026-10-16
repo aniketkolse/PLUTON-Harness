@@ -23,10 +23,22 @@ const BUILD_TIMEOUT_MS = 20 * 60_000
 const INSPECT_TIMEOUT_MS = 20_000
 const PROBE_TIMEOUT_MS = 20_000
 
+/**
+ * Image profiles: `base` is the probe/terminal layer (tmux, git, node);
+ * `engines` adds the pinned engine CLIs (OpenCode, Qwen Code) that
+ * container-mode supervised runs execute through `docker exec`. Container-mode
+ * dispatch requires the `engines` profile; probe-only use accepts `base`.
+ */
+export type WorkerImageProfile = 'base' | 'engines'
+
+/** Binary names the `engines` profile must provide (Dockerfile layer + build-time proof). */
+const ENGINE_BINARIES = ['opencode', 'qwen'] as const
+
 export interface WorkerImageRecord {
   image: string
   /** Immutable image ID (`sha256:...`) captured immediately after the build. */
   imageId: string
+  profile: WorkerImageProfile
   tmuxVersion: string
   nodeVersion: string
   builtAt: string
@@ -65,6 +77,9 @@ function reader(path: string): WorkerImageRecord | null {
       return {
         image: parsed.image,
         imageId: parsed.imageId,
+        // Legacy records predate profiles: they can only be assumed `base`
+        // (fail-closed for container mode, which requires `engines`).
+        profile: parsed.profile === 'engines' ? 'engines' : 'base',
         tmuxVersion: typeof parsed.tmuxVersion === 'string' ? parsed.tmuxVersion : 'unknown',
         nodeVersion: typeof parsed.nodeVersion === 'string' ? parsed.nodeVersion : 'unknown',
         builtAt: typeof parsed.builtAt === 'string' ? parsed.builtAt : 'unknown',
@@ -101,33 +116,62 @@ export function workerImageDriftNote(recordImageId: string, actualImageId: strin
 /** Remediation for an image that changed since the recorded build. */
 export const WORKER_IMAGE_DRIFT_FIX = 're-run `pluton sandbox build-image` or investigate'
 
+/** The rebuild command that produces the profile a caller actually requires. */
+function buildImageCommand(requireEngines: boolean): string {
+  return requireEngines ? 'pluton sandbox build-image --engines' : 'pluton sandbox build-image'
+}
+
 /**
  * Pure dispatch-readiness rule shared by `pluton sandbox probe` and `doctor`.
  * `image` is null when no worker image applies to this sandbox kind
  * (local-process); a failed image probe is a SandboxUnavailableError the caller
  * must report itself — never a null image confused with "not built".
+ *
+ * `requireEngines: true` is the container-mode gate: supervised runs execute
+ * engine CLIs inside the image, so a `base`-profile (or unrecorded, i.e.
+ * unprovable) image refuses with the exact `--engines` rebuild command.
  */
 export function dispatchReadiness(
   sandboxAvailable: boolean,
   image: WorkerImageProbe | null,
+  opts: { requireEngines?: boolean } = {},
 ): { ready: boolean; warnings: string[] } {
+  const requireEngines = opts.requireEngines === true
+  const command = buildImageCommand(requireEngines)
   if (!sandboxAvailable) return { ready: false, warnings: [] }
   if (image === null) return { ready: true, warnings: [] }
   if (!image.present) {
     return {
       ready: false,
-      warnings: [`worker image '${image.image}' is not built — run \`pluton sandbox build-image\` before dispatching tasks`],
+      warnings: [`worker image '${image.image}' is not built — run \`${command}\` before dispatching tasks`],
     }
   }
   if (image.record === null) {
+    if (requireEngines) {
+      // Present but unrecorded: the engines layer cannot be proven, and a
+      // container-mode run must not guess.
+      return {
+        ready: false,
+        warnings: [
+          `worker image '${image.image}' is present but has no build record in this project, so its profile cannot be proven — run \`${command}\` (it records the profile) before a container-mode run`,
+        ],
+      }
+    }
     // Present but unrecorded: usable, drift just cannot be checked here.
     return { ready: true, warnings: [workerImageNoRecordNote()] }
   }
   if (!image.matchesRecord) {
+    const fix = requireEngines ? `re-run \`${command}\` or investigate` : WORKER_IMAGE_DRIFT_FIX
+    return {
+      ready: false,
+      warnings: [`${workerImageDriftNote(image.record.imageId, image.imageId ?? 'unknown')} — ${fix}`],
+    }
+  }
+  if (requireEngines && image.record.profile !== 'engines') {
     return {
       ready: false,
       warnings: [
-        `${workerImageDriftNote(image.record.imageId, image.imageId ?? 'unknown')} — ${WORKER_IMAGE_DRIFT_FIX}`,
+        `worker image '${image.image}' was built with the '${image.record.profile}' profile — container-mode runs need the engine CLIs; run \`${command}\``,
       ],
     }
   }
@@ -203,19 +247,22 @@ export class WorkerImageManager {
   }
 
   /**
-   * Build the worker image, verify it actually contains tmux/node by running
-   * them, and persist the record. Returns the record (also written to disk).
+   * Build the worker image, verify what the profile promises (tmux/node
+   * always; the engine CLIs for `engines`), and persist the record. Returns
+   * the record (also written to disk).
    */
   async build(
     rootDir: string,
-    opts: { tag?: string; dockerfileDir?: string; base?: string } = {},
+    opts: { tag?: string; dockerfileDir?: string; base?: string; profile?: WorkerImageProfile } = {},
   ): Promise<WorkerImageRecord> {
     const tag = opts.tag ?? DEFAULT_WORKER_IMAGE_TAG
+    const profile = opts.profile ?? 'base'
     const contextDir = opts.dockerfileDir ?? workerDockerfileDir()
     await this.assertDaemon()
 
     const buildArgs = ['build', '-t', tag, '--file', join(contextDir, 'Dockerfile')]
     if (opts.base !== undefined) buildArgs.push('--build-arg', `BASE=${opts.base}`)
+    if (profile === 'engines') buildArgs.push('--build-arg', 'PLUTON_ENGINES=1')
     buildArgs.push(contextDir)
     const build = await this.docker(buildArgs, { timeoutMs: BUILD_TIMEOUT_MS })
     if (build.timedOut || build.exitCode !== 0) {
@@ -242,9 +289,27 @@ export class WorkerImageManager {
     }
     const node = await this.docker(['run', '--rm', '--entrypoint', 'node', tag, '--version'], { timeoutMs: INSPECT_TIMEOUT_MS })
 
+    if (profile === 'engines') {
+      // The engines profile promises executable CLIs, not just layers: prove
+      // them by running them (a missing binary must never reach a live run).
+      for (const engine of ENGINE_BINARIES) {
+        const r = await this.docker(
+          ['run', '--rm', '--network', 'none', '--entrypoint', engine, tag, '--version'],
+          { timeoutMs: INSPECT_TIMEOUT_MS },
+        )
+        if (r.exitCode !== 0 || r.stdout.trim() === '') {
+          throw new SandboxUnavailableError(
+            `worker image '${tag}' does not provide the engine binary '${engine}' (exit ${String(r.exitCode)}): ${firstLine(r.stderr, 200)}`,
+            { details: { tag, imageId: id, engine, stderr: r.stderr.slice(0, 2_000) } },
+          )
+        }
+      }
+    }
+
     const record: WorkerImageRecord = {
       image: tag,
       imageId: id,
+      profile,
       tmuxVersion: firstLine(tmux.stdout, 120),
       nodeVersion: firstLine(node.stdout, 120) || 'unknown',
       builtAt: new Date().toISOString(),
