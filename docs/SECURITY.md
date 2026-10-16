@@ -123,7 +123,7 @@ Stated plainly so nobody over-reads the guarantees above:
 1. **No live networked-engine run has been executed end to end.** The bridge,
    supervisor and gate are exercised against the deterministic mock engine and
    real child processes; an engine session driving a real run through the HTTP
-   transport has not been run on this host (§15/§16 of the delivery report).
+   transport has not been run on this host (see `docs/delivery-report.md`).
 2. **HTTP transport authentication is a bearer token over loopback.** Any
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never

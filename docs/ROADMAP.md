@@ -120,40 +120,61 @@ References (read-only, recorded commits):
 - [x] Default team template (manager/researcher/worker-a/worker-b/qa/reviewer) —
       `templates/teams/full-stack.yaml` with mixed engines (worker-b on `qwen`), validated by
       `tests/unit/init-templates.test.ts`
-- [x] Restricted Pluton tool bridge (MCP stdio) with per-call authorization — `src/tools/`
-      (MCP protocol layer, catalog, authorization bridge, handlers) + `src/orchestrator/wakeups.ts`;
-      57 unit tests across `mcp-server`, `tool-bridge`, `wakeups`
+- [x] Restricted Pluton tool bridge (MCP stdio + HTTP transport) with per-call authorization —
+      `src/tools/` (MCP protocol layer, catalog, authorization bridge, handlers, `http-transport.ts`) +
+      `src/orchestrator/wakeups.ts`; `pluton mcp serve` runs the bridge as a real stdio child for one
+      engine session; unit/integration tests across `mcp-server`, `tool-bridge`, `tool-http`, `wakeups`,
+      `cli-mcp-serve` — hardened after an adversarial review (realpath containment against
+      junctions/case/8.3 aliases, bounded audit names, dependency-scope and terminal-delegation
+      rejection, pending-approval caps)
 - [~] Dynamic specialist proposals with hard limits + audit records — `muse.propose_create` validates
       team-size/role/engine/model and records a pending operator approval (nothing instantiated
       silently); the operator-side apply/deny wiring lands with the run loop
-- [ ] Manager plan → validate → dispatch → collect → report flow (plan-first policy)
+- [x] Manager plan → validate → dispatch → collect → report flow (plan-first policy) —
+      `src/orchestrator/supervisor.ts`: the manager session runs concurrently with the dispatch loop
+      (ready tasks → per-Muse lock → engine session in its checkout), dependency order comes from
+      durable records, and finalization is honest (a failure claim fails the run, failed-dependency
+      tasks stay visibly queued, operator-waiting runs are never force-transitioned, and successful
+      tasks stop in `verifying` when checks exist) + 9 mock-engine integration tests
+      (`tests/integration/supervisor.test.ts`, including timeout → `unknown_outcome` and protocol-crash
+      failure modes)
 - [ ] Real goal through lifecycle with ≥2 engines and independent workspaces
 
-## Phase 7 — Verification and integration `[ ]`
+## Phase 7 — Verification and integration `[~]`
 
-- [ ] Acceptance criteria + safe configured checks (argument arrays, allow/deny)
+- [x] Safe configured checks (argument arrays, allow list = config, conservative deny list of
+      shells/destructive tools, bounded output, artifact retention, hard timeouts) —
+      `src/verify/runner.ts`; evidence rows in `verification_checks`, `verification.run` events
 - [ ] Integration checkout (never the user's tree), conflict detection, evidence retention
-- [ ] `pluton verify` repeatable; truthful final verdict logic; no green on failed/unrun checks
+- [x] `pluton verify --run [--task]` repeatable; truthful final verdict logic — failed, errored,
+      denied, timed-out and never-run (pending) checks can never be green; run closes from durable
+      records only (`applyTaskVerificationVerdict`, `finalizeRunVerdict`) + 5 integration tests
 
-## Phase 8 — Hardening and docs `[ ]`
+## Phase 8 — Hardening and docs `[~]`
 
-- [ ] Failure-mode tests (engine missing, malformed protocol, hang, crash, daemon restart,
-      tmux absent, Docker unavailable, conflicts, approval timeout, cycles)
-- [ ] Security review: redaction, secret paths, container config, cleanup ownership
-- [ ] Full docs set + accurate limitations
-- [ ] Final delivery report with exact evidence
+- [~] Failure-mode tests — covered: malformed engine protocol (`acp-client`, mock protocol crash),
+      prompt hang/timeout (`supervisor`), Docker daemon/image unavailable and missing tmux
+      (`sandbox`, `sandbox-image`), cycles/self-dependency (`task-graph`). Missing: git conflict
+      detection (integration checkout not built), approval timeout (no expiry path exists yet)
+- [x] Security review: redaction, secret paths, container config, cleanup ownership — 16 findings from
+      the post-Phase-5 review and 10 from the bridge adversarial review all fixed with regression
+      tests; threat model and known gaps in `docs/SECURITY.md`
+- [x] Docs set with accurate limitations — README, ROADMAP, ADRs 0001–0011, 8 reverse-engineering
+      deliverables, `docs/SECURITY.md`, this roadmap's live-status paragraph
+- [x] Final delivery report with exact evidence — `docs/delivery-report.md`
 
 ---
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phases 0–5 complete; Phase 6 in progress. Live status: 331 tests / 22 files green
+_Phases 0–5 complete; Phase 6 in progress (bridge + supervisor in; live two-engine goal pending).
+Live status: 364 tests / 26 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
 `muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
 errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task list/show`, `graph`,
-`version` — all with clean `--json`. Planned commands (`run`, `attach`, `verify`, `integrate`) fail
+`mcp serve`, `verify` — all with clean `--json`. Planned commands (`run`, `attach`, `integrate`) fail
 with a stable `not_implemented` code. Live engine suites are opt-in (`npm run test:live`; OpenCode
 3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
 (`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
@@ -162,6 +183,13 @@ verified inside the image. A full post-Phase-5 code review produced 16 findings 
 regression tests (container-name uniqueness under truncation, tmux duplicate-window handling,
 probe failure-vs-missing classification, checkout cleanup/typed failures, store upsert races,
 window-id-targeted kills). Phase 6 bridge core is in: MCP stdio server, restricted tool catalog with
-per-call server-side authorization + audit events, exactly-once wakeup registry, and engine-side
-transport recon (`docs/reverse-engineering/engine-mcp-integration.md`). Next: the manager run loop
-(plan → validate → dispatch → collect), then Phases 7–8._
+per-call server-side authorization + audit events, exactly-once wakeup registry, engine-side
+transport recon (`docs/reverse-engineering/engine-mcp-integration.md`), the HTTP transport, and
+`pluton mcp serve` for stdio sessions. An adversarial review of the bridge produced 10 findings — all
+addressed with regression tests (symlink/junction/case/8.3 escape containment, oversized audit names,
+dependency scope, terminal delegation, approval caps, git option injection). The run supervisor is in
+(`src/orchestrator/supervisor.ts` + 9 mock-engine integration tests) and the Phase 7 verification gate
+is in (`pluton verify`, `src/verify/runner.ts` + 5 integration tests): completion is only reachable
+through durable evidence. Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
+Next (not in this build): the live two-engine goal through the supervisor, `pluton run`/`attach`/
+`integrate`, and the integration checkout._
