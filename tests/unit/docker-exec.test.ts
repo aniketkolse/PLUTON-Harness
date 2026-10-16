@@ -48,6 +48,12 @@ describe('mapHostPathToContainer', () => {
     expect(err).toBeInstanceOf(ValidationError)
     expect((err as ValidationError).message).toContain('D:\\elsewhere\\x')
   })
+
+  it('collapses . and .. segments before prefix matching', () => {
+    expect(mapHostPathToContainer('C:\\work\\checkout\\sub\\..\\src', MOUNTS)).toBe('/work/src')
+    // '..' escaping the mount it was written under must not map outside it.
+    expect(() => mapHostPathToContainer('C:\\work\\checkout\\..\\elsewhere', MOUNTS)).toThrowError(ValidationError)
+  })
 })
 
 describe('dockerExecSpawn', () => {
@@ -129,5 +135,26 @@ describe('dockerExecSpawn', () => {
       spawnFn('/usr/local/bin/qwen', ['--acp'], { cwd: 'D:\\outside', env: {}, windowsHide: true }),
     ).toThrowError(ValidationError)
     expect(spawn.agents).toHaveLength(0)
+  })
+
+  it('gives the spawned docker CLI the docker client connection env — never forwarded into the container', () => {
+    const previous = process.env['DOCKER_CONTEXT']
+    process.env['DOCKER_CONTEXT'] = 'desktop-linux-test'
+    try {
+      const spawn = fakeSpawn()
+      dockerExecSpawn(ctx, spawn.spawnFn)('/usr/local/bin/qwen', ['--acp'], {
+        cwd: 'C:\\work\\checkout',
+        env: { PATH: 'C:\\Windows\\system32' },
+        windowsHide: true,
+      })
+      const agent = spawn.lastAgent()
+      // The CLI must reach the same daemon probe/create/start talked to...
+      expect(agent.spawnEnv['DOCKER_CONTEXT']).toBe('desktop-linux-test')
+      // ...but a host-only DOCKER_* var is not a container env name.
+      expect(agent.spawnArgs).not.toContain('DOCKER_CONTEXT')
+    } finally {
+      if (previous === undefined) delete process.env['DOCKER_CONTEXT']
+      else process.env['DOCKER_CONTEXT'] = previous
+    }
   })
 })

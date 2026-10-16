@@ -56,6 +56,11 @@ export class LocalProcessSandbox implements SandboxManager {
     return 'running' // there is no container; the degenerate manager is "always present"
   }
 
+  /** No container concept: reuse validation has nothing to read back. */
+  async inspect(_containerName: string): Promise<null> {
+    return null
+  }
+
   async stop(_containerName: string): Promise<void> {}
   async remove(_containerName: string): Promise<void> {}
 }

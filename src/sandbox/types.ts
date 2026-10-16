@@ -65,6 +65,18 @@ export interface SandboxExecOptions {
   maxOutputBytes?: number
 }
 
+/** Container facts read back for reuse validation (docker inspect). */
+export interface SandboxInspect {
+  /** Image ID the container was created from (sha256:…). */
+  imageId: string
+  /** Configured container user (`Config.User`), e.g. '10001:10001'. */
+  user: string
+  /** Destination mount points with their read-only flag. */
+  mounts: { destination: string; readOnly: boolean }[]
+  /** Extra host mappings from the create config (e.g. 'host.docker.internal:host-gateway'). */
+  extraHosts: string[]
+}
+
 export interface SandboxManager {
   readonly kind: 'docker' | 'local-process'
   /** Honest readiness check; never throws — callers decide with the result. */
@@ -73,6 +85,12 @@ export interface SandboxManager {
   start(containerName: string): Promise<void>
   exec(containerName: string, argv: string[], options?: SandboxExecOptions): Promise<RunResult>
   status(containerName: string): Promise<SandboxStatus>
+  /**
+   * Read back container facts for reuse validation. Returns null only for
+   * managers without a container concept (local-process); a docker-like
+   * manager returns real facts or throws — never null-as-valid.
+   */
+  inspect(containerName: string): Promise<SandboxInspect | null>
   stop(containerName: string): Promise<void>
   remove(containerName: string): Promise<void>
 }

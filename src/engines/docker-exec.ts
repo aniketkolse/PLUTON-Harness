@@ -14,7 +14,10 @@ import { defaultSpawn, type AcpSpawnFn } from './acp/client.ts'
  *   container paths (a session HOME pointing at the host engine home);
  * - host-shaped platform variables (PATH, SystemRoot, APPDATA, ...) never
  *   override the container's own values — the image ships its own PATH, and a
- *   host `PATH` inside the container would break binary resolution.
+ *   host `PATH` inside the container would break binary resolution;
+ * - the docker CLI itself still runs with host essentials plus the docker
+ *   client connection variables (DOCKER_HOST/CONTEXT/TLS...), so a non-default
+ *   daemon context behaves the same as it does for probe/create/start.
  */
 
 export interface DockerExecContext {
@@ -56,10 +59,31 @@ const DOCKER_CLI_ENV_KEYS: readonly string[] = [
   'TEMP',
   'TMP',
   'ComSpec',
+  'HOME',
+  'USERPROFILE',
 ]
 
+/**
+ * Lexical normalization: forward slashes, no trailing slash, and `.`/`..`
+ * segments collapsed. Collapsing is deliberate — a `..` inside a value must
+ * either resolve to a genuine subpath of some mount or fail to match, never
+ * map outside the mount it started in.
+ */
 function normalizePath(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '')
+  const forward = path.replace(/\\/g, '/')
+  const absolute = forward.startsWith('/')
+  const segments: string[] = []
+  for (const segment of forward.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      const last = segments[segments.length - 1]
+      if (last !== undefined && last !== '..') segments.pop()
+      else if (!absolute) segments.push('..')
+      continue
+    }
+    segments.push(segment)
+  }
+  return `${absolute ? '/' : ''}${segments.join('/')}`
 }
 
 /** Longest-prefix host→container mapping, or null when the path is not under any mount. */
@@ -99,6 +123,13 @@ function dockerCliBaseEnv(): Record<string, string> {
   for (const key of DOCKER_CLI_ENV_KEYS) {
     const value = process.env[key]
     if (value !== undefined) base[key] = value
+  }
+  // The CLI must reach the same daemon probe/create/start talked to: a
+  // non-default context (DOCKER_HOST/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/...)
+  // lives in the host environment and is harmless inside the container
+  // namespace (never forwarded — only names explicitly in containerEnv are).
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('DOCKER_') && value !== undefined) base[key] = value
   }
   return base
 }

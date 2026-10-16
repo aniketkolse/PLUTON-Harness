@@ -13,6 +13,12 @@ export interface EngineCreateOptions {
   spawnFn?: AcpSpawnFn
   binaryPath?: string
   platform?: NodeJS.Platform
+  /**
+   * Maps a host working directory to the engine's namespace (container mode:
+   * the ACP session cwd must name a container path; the process spawn cwd is
+   * mapped separately by the spawn function). Absent = identity.
+   */
+  mapWorkdir?: (hostPath: string) => string
 }
 
 export interface EngineFactory {

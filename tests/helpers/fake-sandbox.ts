@@ -1,6 +1,7 @@
 import type {
   SandboxCreateResult,
   SandboxExecOptions,
+  SandboxInspect,
   SandboxManager,
   SandboxProbe,
   SandboxSpec,
@@ -10,12 +11,12 @@ import type { RunResult } from '../../src/util/exec.ts'
 
 /**
  * In-memory sandbox fake for tests: records every call (arguments intact) and
- * lets tests script probe/exec results. The runtime and terminal managers are
- * tested against this without any container runtime.
+ * lets tests script probe/exec/inspect results. The runtime and terminal
+ * managers are tested against this without any container runtime.
  */
 
 export interface FakeSandboxCall {
-  method: 'probe' | 'create' | 'start' | 'exec' | 'status' | 'stop' | 'remove'
+  method: 'probe' | 'create' | 'start' | 'exec' | 'status' | 'inspect' | 'stop' | 'remove'
   args: unknown[]
 }
 
@@ -31,6 +32,8 @@ export class FakeSandbox implements SandboxManager {
   kind: 'docker' | 'local-process' = 'docker'
   probeResult: SandboxProbe = { available: true, kind: 'docker', detail: 'fake docker server 1.0' }
   statusResult: SandboxStatus = 'running'
+  /** Result returned by inspect(); null = "no container facts" (legacy reuse behavior). */
+  inspectResult: SandboxInspect | null = null
   /** Shifted per exec call; falls back to an empty successful result. */
   execQueue: RunResult[] = []
   readonly calls: FakeSandboxCall[] = []
@@ -62,6 +65,11 @@ export class FakeSandbox implements SandboxManager {
   status(containerName: string): Promise<SandboxStatus> {
     this.calls.push({ method: 'status', args: [containerName] })
     return Promise.resolve(this.statusResult)
+  }
+
+  inspect(containerName: string): Promise<SandboxInspect | null> {
+    this.calls.push({ method: 'inspect', args: [containerName] })
+    return Promise.resolve(this.inspectResult)
   }
 
   stop(containerName: string): Promise<void> {

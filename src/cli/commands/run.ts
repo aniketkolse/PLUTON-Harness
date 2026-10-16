@@ -12,7 +12,7 @@ import { TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
-import { dockerExecSpawn, type DockerExecContext } from '../../engines/docker-exec.ts'
+import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
 import { runBudgetFromRuntime, supervisorSettingsFromRuntime } from '../../orchestrator/run-setup.ts'
 import { RunSupervisor, type RunOutcome } from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
@@ -150,8 +150,9 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
  * image readiness (the `engines` profile is required), then one long-lived
  * container and a `docker exec` spawn context per enabled Muse. Every
  * container mounts the workspaces root (task checkouts) and its own engine
- * home; coordinator-read-only muses additionally get the project tree
- * read-only, because their sessions run with the project root as workdir.
+ * home; muses whose sessions run with the project root as workdir (every
+ * policy except isolated-task-checkout) additionally get the project tree
+ * read-only.
  */
 async function prepareContainerMode(
   ctx: ProjectContext,
@@ -186,7 +187,7 @@ async function prepareContainerMode(
     const mounts: SandboxMount[] = [
       { hostPath: workspacesRoot, containerPath: CONTAINER_WORKSPACES_PATH },
       { hostPath: muse.engineHome, containerPath: CONTAINER_ENGINE_HOME_PATH },
-      ...(muse.workspacePolicy === 'coordinator-read-only'
+      ...(muse.workspacePolicy !== 'isolated-task-checkout'
         ? [{ hostPath: ctx.rootDir, containerPath: CONTAINER_PROJECT_PATH, readOnly: true }]
         : []),
     ]
@@ -194,6 +195,7 @@ async function prepareContainerMode(
       projectId,
       museId: muse.id,
       image: imageTag,
+      ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
       limits: {
         cpus: runtime.default_cpu_limit,
         memoryMb: runtime.default_memory_mb,
@@ -234,6 +236,9 @@ function containerAdapterFor(
   return engineAdapterForMuse(muse, {
     spawnFn: dockerExecSpawn(exec, dockerSpawn),
     platform: 'linux',
+    // The ACP session cwd must name a container path; the process spawn cwd
+    // (a host path) is mapped independently inside dockerExecSpawn.
+    mapWorkdir: (hostPath: string) => mapHostPathToContainer(hostPath, exec.mounts),
     ...(binaryPath !== undefined ? { binaryPath } : {}),
   })
 }

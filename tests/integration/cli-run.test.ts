@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { runRun, type RunDeps } from '../../src/cli/commands/run.ts'
 import type { ProjectContext } from '../../src/cli/context.ts'
 import { loadConfig } from '../../src/config/load.ts'
-import { ConflictError } from '../../src/domain/errors.ts'
+import { ConflictError, SandboxUnavailableError } from '../../src/domain/errors.ts'
 import type { McpServerSpec } from '../../src/engines/contract/types.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
@@ -164,6 +164,16 @@ muses:
     permissions:
       - task.inspect
       - result.collect
+      - diff.inspect
+  researcher:
+    display_name: Researcher
+    role: researcher
+    engine: qwen
+    model: test/model-a
+    workspace_policy: read-only
+    approval_mode: ask-always
+    permissions:
+      - project.read
       - diff.inspect
 `
 
@@ -504,11 +514,13 @@ describe('runRun — container mode (engines through docker exec)', () => {
     const projectId = (project as { id: string }).id
 
     // Containers: one per Muse, host-gateway mapped, work mounts, durable records.
-    expect(fakeSandbox.created).toHaveLength(2)
+    expect(fakeSandbox.created).toHaveLength(3)
     const managerSpec = fakeSandbox.created.find((c) => c.museId === 'manager')
     const workerSpec = fakeSandbox.created.find((c) => c.museId === 'worker-a')
+    const researcherSpec = fakeSandbox.created.find((c) => c.museId === 'researcher')
     expect(managerSpec?.containerName).toBe(sandboxContainerName(projectId, 'manager'))
     expect(workerSpec?.containerName).toBe(sandboxContainerName(projectId, 'worker-a'))
+    expect(researcherSpec?.containerName).toBe(sandboxContainerName(projectId, 'researcher'))
     expect(managerSpec?.extraHosts).toEqual([HOST_GATEWAY_ADD_HOST])
     expect(workerSpec?.extraHosts).toEqual([HOST_GATEWAY_ADD_HOST])
     expect(managerSpec?.env).toEqual({})
@@ -520,8 +532,16 @@ describe('runRun — container mode (engines through docker exec)', () => {
     ])
     expect(managerSpec?.mounts[2]?.readOnly).toBe(true)
     expect(workerSpec?.mounts.map((m) => m.containerPath)).toEqual(['/pluton/workspaces', '/pluton/engine-home'])
+    // A read-only Muse also works from the project root: it must get the
+    // read-only project mount too (not just coordinator-read-only).
+    expect(researcherSpec?.mounts.map((m) => m.containerPath)).toEqual([
+      '/pluton/workspaces',
+      '/pluton/engine-home',
+      '/pluton/project',
+    ])
+    expect(researcherSpec?.mounts[2]?.readOnly).toBe(true)
     const sandboxes = store.listSandboxes(projectId)
-    expect(sandboxes).toHaveLength(2)
+    expect(sandboxes).toHaveLength(3)
     for (const sb of sandboxes) expect(sb.state).toBe('running')
 
     // Engines run inside the containers: docker exec argv, pinned binary,
@@ -551,6 +571,14 @@ describe('runRun — container mode (engines through docker exec)', () => {
       expect(agent.spawnEnv['QWEN_DIR']).toBe('/pluton/engine-home/qwen')
     }
 
+    // The ACP session cwd is the CONTAINER path (not the host workdir the
+    // spawn was given): the manager session runs against the read-only project
+    // mount, the worker against its checkout under the workspaces mount.
+    const managerSession = managerAgent.received.find((m) => m.method === 'session/new')
+    expect((managerSession?.params as { cwd?: string } | undefined)?.cwd).toBe('/pluton/project')
+    const workerSession = workerAgent.received.find((m) => m.method === 'session/new')
+    expect((workerSession?.params as { cwd?: string } | undefined)?.cwd).toBe(workerAgent.spawnArgs[4])
+
     // The manager called the bridge on the container-facing hostname.
     const spec = specOut.value as Extract<McpServerSpec, { kind: 'http' }>
     expect(spec.url).toMatch(/^http:\/\/host\.docker\.internal:\d+\/mcp$/)
@@ -561,5 +589,74 @@ describe('runRun — container mode (engines through docker exec)', () => {
     expect(tasks).toHaveLength(1)
     expect(tasks[0]?.state).toBe('completed')
     expect(tasks[0]?.assigneeMuseId).toBe('worker-a')
+  })
+
+  it('fails closed (typed error, no run row, no containers) when the daemon is unavailable', async () => {
+    registerBuiltinEngines()
+    const dir = makeProjectDir(CONFIG_CONTAINER)
+    const ctx = projectContext(dir)
+
+    const fakeSandbox = new FakeSandbox()
+    fakeSandbox.probeResult = {
+      available: false,
+      kind: 'docker',
+      detail: 'docker daemon not reachable: fixture',
+      fix: 'start Docker Desktop',
+    }
+
+    await expect(
+      runRun(
+        ctx,
+        { goal: 'never starts', acceptance: ['x'] },
+        {
+          sandboxManager: fakeSandbox,
+          workerImageProbe: () => Promise.resolve(enginesImageProbe()),
+          dockerSpawn: fakeSpawn().spawnFn,
+        },
+      ),
+    ).rejects.toThrowError(SandboxUnavailableError)
+
+    expect(fakeSandbox.created).toHaveLength(0)
+    const store = openSecondStore(dir)
+    expect(store.listRuns()).toHaveLength(0)
+  })
+
+  it('refuses container-mode runs when the worker image lacks the engines profile', async () => {
+    registerBuiltinEngines()
+    const dir = makeProjectDir(CONFIG_CONTAINER)
+    const ctx = projectContext(dir)
+
+    const baseProbe: WorkerImageProbe = {
+      present: true,
+      image: 'pluton-worker:local',
+      imageId: ENGINE_IMAGE_ID,
+      record: {
+        image: 'pluton-worker:local',
+        imageId: ENGINE_IMAGE_ID,
+        profile: 'base',
+        tmuxVersion: 'tmux 3.3a',
+        nodeVersion: 'v24.0.0',
+        builtAt: '2026-01-01T00:00:00.000Z',
+      },
+      matchesRecord: true,
+      detail: 'fixture: base profile',
+    }
+    const fakeSandbox = new FakeSandbox()
+
+    await expect(
+      runRun(
+        ctx,
+        { goal: 'never starts', acceptance: ['x'] },
+        {
+          sandboxManager: fakeSandbox,
+          workerImageProbe: () => Promise.resolve(baseProbe),
+          dockerSpawn: fakeSpawn().spawnFn,
+        },
+      ),
+    ).rejects.toThrowError(/build-image --engines/)
+
+    expect(fakeSandbox.created).toHaveLength(0)
+    const store = openSecondStore(dir)
+    expect(store.listRuns()).toHaveLength(0)
   })
 })

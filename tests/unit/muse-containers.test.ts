@@ -111,7 +111,7 @@ describe('ensureMuseContainer', () => {
 
     const r = await ensureMuseContainer(fake, store, specFor(projectId))
     expect(r).toEqual({ containerName, created: false })
-    expect(fake.methods()).toEqual(['status', 'start'])
+    expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
     expect(fake.created).toHaveLength(0)
 
     const record = store.getSandboxForMuse(projectId, 'worker-a')
@@ -126,7 +126,7 @@ describe('ensureMuseContainer', () => {
 
     const r = await ensureMuseContainer(fake, store, specFor(projectId))
     expect(r).toEqual({ containerName: sandboxContainerName(projectId, 'worker-a'), created: false })
-    expect(fake.methods()).toEqual(['status', 'start'])
+    expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
     expect(fake.created).toHaveLength(0)
   })
 
@@ -134,10 +134,13 @@ describe('ensureMuseContainer', () => {
     const { store, projectId } = freshStore('foreign')
     const fake = new FakeSandbox()
     fake.statusResult = 'running'
-    fake.start = () =>
-      Promise.reject(new PolicyDeniedError("refusing to act on container 'x': it does not carry the Pluton managed label"))
+    fake.start = (containerName: string) => {
+      fake.calls.push({ method: 'start', args: [containerName] })
+      return Promise.reject(new PolicyDeniedError("refusing to act on container 'x': it does not carry the Pluton managed label"))
+    }
 
     await expect(ensureMuseContainer(fake, store, specFor(projectId))).rejects.toThrowError(PolicyDeniedError)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
     expect(fake.created).toHaveLength(0)
     expect(store.getSandboxForMuse(projectId, 'worker-a')).toBeNull()
   })
@@ -188,5 +191,67 @@ describe('ensureMuseContainer', () => {
     expect(record?.containerName).toBe(sandboxContainerName(projectId, 'worker-a'))
     expect(record?.containerId).toBeNull()
     expect(record?.image).toBe('pluton-worker:engines')
+  })
+
+  it('recreates a stale container whose image no longer matches the spec (rebuilt worker image)', async () => {
+    const { store, projectId } = freshStore('stale-image')
+    const fake = new FakeSandbox()
+    fake.statusResult = 'running'
+    fake.inspectResult = {
+      imageId: 'sha256:old',
+      user: '10001:10001',
+      mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+      extraHosts: [HOST_GATEWAY_ADD_HOST],
+    }
+
+    const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:new' })
+    expect(r.created).toBe(true)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'remove', 'create', 'start'])
+    expect(fake.created).toHaveLength(1)
+    expect(store.getSandboxForMuse(projectId, 'worker-a')?.containerId).toBe(`cid_${r.containerName}`)
+  })
+
+  it('recreates when the recorded mounts no longer match the spec (workspace-policy change)', async () => {
+    const { store, projectId } = freshStore('stale-mounts')
+    const fake = new FakeSandbox()
+    fake.statusResult = 'stopped'
+    fake.inspectResult = {
+      imageId: 'sha256:img',
+      user: '10001:10001',
+      mounts: [{ destination: '/work', readOnly: false }], // '/home/pluton' is gone
+      extraHosts: [HOST_GATEWAY_ADD_HOST],
+    }
+
+    const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
+    expect(r.created).toBe(true)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'remove', 'create', 'start'])
+  })
+
+  it('reuses a container only when image id, user, mounts and gateway all still match', async () => {
+    const { store, projectId } = freshStore('matching')
+    store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: sandboxContainerName(projectId, 'worker-a'),
+      containerId: 'cid_match',
+      image: 'pluton-worker:engines',
+      state: 'running',
+      createdBy: 'run',
+    })
+    const fake = new FakeSandbox()
+    fake.statusResult = 'running'
+    fake.inspectResult = {
+      imageId: 'sha256:img',
+      user: '10001:10001',
+      mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+      extraHosts: [HOST_GATEWAY_ADD_HOST],
+    }
+
+    const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
+    expect(r.created).toBe(false)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
+    expect(fake.created).toHaveLength(0)
+    expect(store.getSandboxForMuse(projectId, 'worker-a')?.containerId).toBe('cid_match')
   })
 })

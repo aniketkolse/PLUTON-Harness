@@ -7,6 +7,7 @@ import {
   SANDBOX_LABEL_PROJECT,
   type SandboxCreateResult,
   type SandboxExecOptions,
+  type SandboxInspect,
   type SandboxManager,
   type SandboxManagerOptions,
   type SandboxProbe,
@@ -205,6 +206,59 @@ export class DockerSandboxManager implements SandboxManager {
     if (state === 'running') return 'running'
     if (state === 'created' || state === 'exited' || state === 'paused' || state === 'dead') return 'stopped'
     return 'unknown'
+  }
+
+  /**
+   * Container facts for reuse validation. The whole read is one `docker
+   * inspect`; a failure or unparsable output throws (fail loud) — stale
+   * detection must never silently degrade to "assume valid".
+   */
+  async inspect(containerName: string): Promise<SandboxInspect | null> {
+    const r = await this.docker(
+      [
+        'inspect',
+        '--format',
+        '{{.Image}}|{{.Config.User}}|{{json .HostConfig.ExtraHosts}}|{{json .Mounts}}',
+        containerName,
+      ],
+      { timeoutMs: INSPECT_TIMEOUT_MS },
+    )
+    if (r.timedOut || r.exitCode !== 0) {
+      throw new SandboxUnavailableError(
+        `container '${containerName}' cannot be inspected: ${r.timedOut ? `timed out after ${INSPECT_TIMEOUT_MS}ms` : firstLine(r.stderr, 200)}`,
+        { details: { containerName } },
+      )
+    }
+    const [imageId = '', user = '', extraHostsJson = '[]', mountsJson = '[]'] = r.stdout.trim().split('|')
+    if (imageId === '') {
+      throw new SandboxUnavailableError(`container '${containerName}' inspect returned no image id`, {
+        details: { containerName },
+      })
+    }
+    let extraHosts: unknown
+    let mounts: unknown
+    try {
+      extraHosts = JSON.parse(extraHostsJson)
+      mounts = JSON.parse(mountsJson)
+    } catch {
+      throw new SandboxUnavailableError(`container '${containerName}' inspect output could not be parsed`, {
+        details: { containerName, stdout: r.stdout.slice(0, 500) },
+      })
+    }
+    return {
+      imageId,
+      user,
+      extraHosts: Array.isArray(extraHosts) ? extraHosts.filter((h): h is string => typeof h === 'string') : [],
+      mounts: Array.isArray(mounts)
+        ? mounts
+            .map((m) => (m !== null && typeof m === 'object' ? (m as Record<string, unknown>) : {}))
+            .map((m) => ({
+              destination: typeof m['Destination'] === 'string' ? m['Destination'] : '',
+              readOnly: m['RW'] === false,
+            }))
+            .filter((m) => m.destination !== '')
+        : [],
+    }
   }
 
   /** Read back the managed label; refuse to act on anything Pluton did not create. */

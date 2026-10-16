@@ -87,6 +87,8 @@ export interface QwenAdapterOptions {
   /** Path to cli-entry.js (or an executable/shim) — skips PATH resolution. */
   binaryPath?: string
   platform?: NodeJS.Platform
+  /** Maps the host session workdir to the engine's namespace (container mode); identity when absent. */
+  mapWorkdir?: (hostPath: string) => string
   envOverrides?: Record<string, string>
   isFile?: (path: string) => boolean
   readTextFile?: (path: string) => string
@@ -386,13 +388,16 @@ export class QwenEngineAdapter implements EngineAdapter {
       }
 
       const mcpServers = toAcpMcpServers(req.mcpServers)
+      // Container mode: the ACP session cwd is a path in the engine's
+      // namespace, which may differ from the host path the spawn was given.
+      const sessionCwd = this.opts.mapWorkdir !== undefined ? this.opts.mapWorkdir(req.workdir) : req.workdir
       let sessionId: string
       let configOptions: unknown
       if (req.resumeToken) {
         if (agentCapabilities['loadSession'] !== true) throw new CapabilityError(this.kind, 'resumeSession')
         const loaded = await client.request<Record<string, unknown>>(
           'session/load',
-          { sessionId: req.resumeToken, cwd: req.workdir, mcpServers },
+          { sessionId: req.resumeToken, cwd: sessionCwd, mcpServers },
           { timeoutMs: SESSION_LOAD_TIMEOUT_MS },
         )
         sessionId = req.resumeToken
@@ -400,7 +405,7 @@ export class QwenEngineAdapter implements EngineAdapter {
       } else {
         const created = await client.request<Record<string, unknown>>(
           'session/new',
-          { cwd: req.workdir, mcpServers },
+          { cwd: sessionCwd, mcpServers },
           { timeoutMs: SESSION_NEW_TIMEOUT_MS },
         )
         if (typeof created['sessionId'] !== 'string' || created['sessionId'] === '') {
