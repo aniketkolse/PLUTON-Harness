@@ -65,6 +65,7 @@ interface MakeWorldOptions {
   repoGit?: boolean
   verificationConfigured?: boolean
   maxConcurrentWorkers?: number
+  defaultTaskTimeoutMs?: number
 }
 
 const WORKER_PERMISSIONS = ['task.delegate', 'task.inspect', 'result.collect', 'diff.inspect']
@@ -196,7 +197,7 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
     runId: run.id,
     limits: LIMITS,
     maxConcurrentWorkers: opts.maxConcurrentWorkers ?? 2,
-    defaultTaskTimeoutMs: 15_000,
+    defaultTaskTimeoutMs: opts.defaultTaskTimeoutMs ?? 15_000,
     runDeadlineMs: 20_000,
     verificationConfigured: opts.verificationConfigured ?? false,
     loopPollMs: 20,
@@ -451,5 +452,47 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     const runVerdict = finalizeRunVerdict(world.store, world.runId)
     expect(runVerdict).toMatchObject({ state: 'completed', outcome: 'success' })
     expect(world.store.getRun(world.runId).state).toBe('completed')
+  })
+
+  it('a prompt that exceeds its bound becomes unknown_outcome — never success, never replayed', async () => {
+    const world = makeWorld({
+      defaultTaskTimeoutMs: 150,
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'slow task', assigneeMuseId: 'worker-a' })
+      },
+      workerScripts: { 'worker-a': [{ delayMs: 2_000, outcome: 'success' }] },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('failed')
+    expect(out.outcome).toBe('failure')
+    expect(out.taskCounts).toMatchObject({ unknown_outcome: 1 })
+    const task = world.store.listTasks(world.runId)[0]
+    expect(task?.state).toBe('unknown_outcome')
+    expect(task?.failure).toMatchObject({ outcome: 'unknown', error: 'prompt_timeout' })
+    expect(eventCount(world.store, world.runId, 'task.unknown_outcome')).toBe(1)
+    expect(eventCount(world.store, world.runId, 'task.completed')).toBe(0)
+  })
+
+  it('an engine protocol crash is recorded as unknown_outcome, not as a failure or success', async () => {
+    const world = makeWorld({
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'crashy task', assigneeMuseId: 'worker-a' })
+      },
+      workerScripts: { 'worker-a': [{ protocolCrash: true }] },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('failed')
+    expect(out.outcome).toBe('failure')
+    const task = world.store.listTasks(world.runId)[0]
+    expect(task?.state).toBe('unknown_outcome')
+    expect(task?.failure).toMatchObject({ outcome: 'unknown' })
+    expect(JSON.stringify(task?.failure)).toContain('mock_protocol_crash')
+    expect(eventCount(world.store, world.runId, 'task.unknown_outcome')).toBe(1)
   })
 })
