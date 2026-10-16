@@ -52,7 +52,8 @@ node src/cli/main.ts --help        # CLI entry (no build step needed on Node 24)
 node src/cli/main.ts doctor        # checks OS/runtime, Docker, Git, tmux, engines, config
 node src/cli/main.ts init          # write pluton.yaml + .pluton/roles in the current project
 node src/cli/main.ts muse list
-node src/cli/main.ts run "Implement authentication and tests"
+node src/cli/main.ts run --goal "Implement authentication and tests"   # supervised run: the manager Muse plans and delegates
+node src/cli/main.ts verify --run <id>                                  # run the project's verification checks, apply the verdict
 node src/cli/main.ts status
 ```
 

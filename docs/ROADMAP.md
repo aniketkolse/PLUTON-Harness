@@ -134,11 +134,18 @@ References (read-only, recorded commits):
       `src/orchestrator/supervisor.ts`: the manager session runs concurrently with the dispatch loop
       (ready tasks → per-Muse lock → engine session in its checkout), dependency order comes from
       durable records, and finalization is honest (a failure claim fails the run, failed-dependency
-      tasks stay visibly queued, operator-waiting runs are never force-transitioned, and successful
-      tasks stop in `verifying` when checks exist) + 9 mock-engine integration tests
-      (`tests/integration/supervisor.test.ts`, including timeout → `unknown_outcome` and protocol-crash
-      failure modes)
-- [ ] Real goal through lifecycle with ≥2 engines and independent workspaces
+      tasks stay visibly queued, operator-waiting runs are never force-transitioned, successful
+      tasks stop in `verifying` when checks exist) + 12 mock-engine integration tests
+      (`tests/integration/supervisor.test.ts`, including timeout → `unknown_outcome`, protocol-crash
+      failure modes, the settled-wait contract, and the durable approval record)
+- [x] Real goal through lifecycle with ≥2 engines and independent workspaces — host-mode live smoke
+      (2026-10-16/17, `docs/smoke-live-run.md`): OpenCode manager + Qwen worker on a real gateway-backed
+      model, worker edits in its own per-task checkout, tasks stopped in `verifying`, and `pluton verify`
+      closed the run `completed` / `success`. The smoke exposed four wiring bugs (approval mode never
+      reached the engine session, `task.wait` deadlocked on the operator gate, an in-flight wait outlived
+      the HTTP transport, denials vanished from the record) — fixed in `cceec89`; an adversarial review of
+      that commit found no blockers and its 11 findings (wiring pinned in the suite, blocked-dependents
+      wording, event-type collision, drain/timer hygiene, aborted-wait honesty) are addressed in `c2d8fcd`
 
 ## Phase 7 — Verification and integration `[~]`
 
@@ -167,14 +174,14 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phases 0–5 complete; Phase 6 in progress (bridge + supervisor in; live two-engine goal pending).
-Live status: 364 tests / 26 files green
+_Phases 0–5 complete; Phase 6 in progress (bridge + supervisor + live two-engine goal in; dynamic-specialist operator wiring and containers pending).
+Live status: 391 tests / 30 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
 `muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
 errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task list/show`, `graph`,
-`mcp serve`, `verify` — all with clean `--json`. Planned commands (`run`, `attach`, `integrate`) fail
+`mcp serve`, `run`, `verify` — all with clean `--json`. Planned commands (`attach`, `integrate`) fail
 with a stable `not_implemented` code. Live engine suites are opt-in (`npm run test:live`; OpenCode
 3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
 (`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
@@ -188,8 +195,11 @@ transport recon (`docs/reverse-engineering/engine-mcp-integration.md`), the HTTP
 `pluton mcp serve` for stdio sessions. An adversarial review of the bridge produced 10 findings — all
 addressed with regression tests (symlink/junction/case/8.3 escape containment, oversized audit names,
 dependency scope, terminal delegation, approval caps, git option injection). The run supervisor is in
-(`src/orchestrator/supervisor.ts` + 9 mock-engine integration tests) and the Phase 7 verification gate
+(`src/orchestrator/supervisor.ts` + 12 mock-engine integration tests) and the Phase 7 verification gate
 is in (`pluton verify`, `src/verify/runner.ts` + 5 integration tests): completion is only reachable
-through durable evidence. Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
-Next (not in this build): the live two-engine goal through the supervisor, `pluton run`/`attach`/
-`integrate`, and the integration checkout._
+through durable evidence. `pluton run` is wired end to end and host-mode live-smoked with a real
+OpenCode manager + Qwen worker goal (`docs/smoke-live-run.md`; the run closed `completed` only via
+`pluton verify`).
+Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
+Next (not in this build): `attach`/`integrate`, the integration checkout, dynamic-specialist
+approval apply/deny + expiry, and per-Muse containers._
