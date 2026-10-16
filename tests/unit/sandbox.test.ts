@@ -42,6 +42,22 @@ describe('sandboxContainerName', () => {
     expect(long.length).toBeLessThanOrEqual(63)
     expect(long).toMatch(/^pluton-/)
   })
+
+  it('never lets a length cap collapse two Muses onto one container name (hash-guarded truncation)', () => {
+    // Regression: the old tail-truncation dropped the distinguishing id chars,
+    // so stop/remove for one Muse could have targeted another Muse's container.
+    const project = 'my-cool-multi-agent-orchestration-project-name'
+    const a = sandboxContainerName(project, 'muse_00000000abcdef12')
+    const b = sandboxContainerName(project, 'muse_00000000abcdef13')
+    expect(a).not.toBe(b)
+    const x = sandboxContainerName('x'.repeat(48), 'muse_00000000abcdef12')
+    const y = sandboxContainerName('x'.repeat(48), 'muse_00000000abcdef13')
+    expect(x).not.toBe(y)
+    for (const name of [a, b, x, y]) {
+      expect(name.length).toBeLessThanOrEqual(63)
+      expect(name).toMatch(/^pluton-/)
+    }
+  })
 })
 
 describe('DockerSandboxManager.create (argv conformance)', () => {
@@ -118,6 +134,35 @@ describe('DockerSandboxManager.create (argv conformance)', () => {
     expect((err as SandboxUnavailableError).message).toMatch(/Docker Desktop/)
     expect(calls.some((argv) => argv.includes('create'))).toBe(false)
   })
+
+  it('rejects users/limits that would silently strip the ADR-0004 baseline', () => {
+    for (const containerUser of ['root', '0', '0:0', '10001:root', 'pluton']) {
+      expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, containerUser })).toThrowError(ValidationError)
+    }
+    // docker treats these as UNLIMITED, not as "nothing".
+    expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, limits: { ...spec.limits, memoryMb: 0 } })).toThrowError(
+      ValidationError,
+    )
+    expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, limits: { ...spec.limits, pids: 0 } })).toThrowError(
+      ValidationError,
+    )
+    expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, limits: { ...spec.limits, cpus: 0 } })).toThrowError(
+      ValidationError,
+    )
+  })
+
+  it('rejects mount paths that would corrupt docker CSV parsing or escape the allowlist', () => {
+    const cases = [
+      { hostPath: 'C:\\x,y', containerPath: '/x' },
+      { hostPath: 'C:\\x=y', containerPath: '/x' },
+      { hostPath: 'relative\\path', containerPath: '/x' },
+      { hostPath: 'C:\\x', containerPath: 'x' },
+      { hostPath: 'C:\\x', containerPath: '/x,y' },
+    ]
+    for (const mount of cases) {
+      expect(() => DockerSandboxManager.buildCreateArgs({ ...spec, mounts: [mount] })).toThrowError(ValidationError)
+    }
+  })
 })
 
 describe('DockerSandboxManager lifecycle safety', () => {
@@ -178,6 +223,19 @@ describe('DockerSandboxManager lifecycle safety', () => {
     await expect(manager.stop('some-container')).rejects.toThrowError(PolicyDeniedError)
     await expect(manager.remove('some-container')).rejects.toThrowError(PolicyDeniedError)
     expect(calls.every((argv) => !argv.includes('stop') && !argv.includes('rm'))).toBe(true)
+  })
+
+  it('refuses to START a container without the Pluton managed label', async () => {
+    const calls: string[][] = []
+    const manager = new DockerSandboxManager({
+      runFn: async (argv) => {
+        calls.push(argv)
+        if (argv.includes('inspect')) return ok(argv, 'false\n')
+        return ok(argv, '')
+      },
+    })
+    await expect(manager.start('some-container')).rejects.toThrowError(PolicyDeniedError)
+    expect(calls.every((argv) => !argv.includes('start'))).toBe(true)
   })
 
   it('stops and removes managed containers with exact argv', async () => {

@@ -1,5 +1,6 @@
 import type { RunOptions, RunResult } from '../util/exec.ts'
 import { ValidationError } from '../domain/errors.ts'
+import { createHash } from 'node:crypto'
 import { slugify } from '../domain/ids.ts'
 
 /**
@@ -81,11 +82,21 @@ export const SANDBOX_LABEL_MUSE = 'io.pluton.muse'
 export const DOCKER_UNAVAILABLE_FIX =
   'start Docker Desktop (or the docker engine), confirm `docker info` works, and re-run `pluton doctor`'
 
-/** `pluton-<project>-<muse>`, sanitized and length-checked (Docker name limit is 255; we stay well under). */
+/**
+ * `pluton-<project>-<muse>`, sanitized, ≤ 63 chars. When the joined slug would
+ * exceed the cap, the HEAD is truncated and a short hash of the full identity
+ * is appended — a length cap must never let two Muses share one container name
+ * (stop/remove are name-targeted and would otherwise act on the wrong Muse).
+ */
 export function sandboxContainerName(projectName: string, museId: string): string {
-  const name = `pluton-${slugify(projectName)}-${slugify(museId)}`.slice(0, 63).replace(/-+$/, '')
-  if (name.length < 7) throw new ValidationError(`cannot derive a container name from '${projectName}'/'${museId}'`)
-  return name
+  const base = `pluton-${slugify(projectName)}-${slugify(museId)}`
+  if (base.length <= 63) {
+    const name = base.replace(/-+$/, '')
+    if (name.length < 7) throw new ValidationError(`cannot derive a container name from '${projectName}'/'${museId}'`)
+    return name
+  }
+  const hash = createHash('sha1').update(`${projectName}\u0000${museId}`).digest('hex').slice(0, 6)
+  return `${base.slice(0, 56).replace(/-+$/, '')}-${hash}`
 }
 
 export interface SandboxManagerOptions {

@@ -1,12 +1,20 @@
 import { existsSync, mkdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { findProjectRoot, loadConfig, stateDir, type LoadedConfig } from '../../config/load.ts'
+import { SandboxUnavailableError } from '../../domain/errors.ts'
 import { registerBuiltinEngines, listEngineKinds, getEngineAdapter } from '../../engines/registry.ts'
 import { firstLine, run } from '../../util/exec.ts'
 import { engineHomesDir } from '../../config/load.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
-import { DEFAULT_WORKER_IMAGE_TAG, WorkerImageManager } from '../../sandbox/image.ts'
+import {
+  DEFAULT_WORKER_IMAGE_TAG,
+  WORKER_IMAGE_DRIFT_FIX,
+  WorkerImageManager,
+  workerImageDriftNote,
+  workerImageNoRecordNote,
+} from '../../sandbox/image.ts'
 import { LOCAL_PROCESS_WARNING } from '../../sandbox/local-process.ts'
+import { DOCKER_UNAVAILABLE_FIX } from '../../sandbox/types.ts'
 import type { CheckResult } from '../output.ts'
 
 const MIN_NODE_MAJOR = 24
@@ -218,44 +226,66 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       } else if (probe.available) {
         checks.push({ id: 'sandbox', title: 'Sandbox', status: 'pass', message: probe.detail })
         const tag = loadedConfig.config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
-        const img = await new WorkerImageManager().probe(loadedConfig.rootDir, tag)
-        if (!img.present) {
+        try {
+          const img = await new WorkerImageManager().probe(loadedConfig.rootDir, tag)
+          if (!img.present) {
+            checks.push({
+              id: 'worker-image',
+              title: 'Worker image',
+              status: 'fail',
+              message: `'${tag}' is not built — Muse containers cannot start`,
+              fix: 'run `pluton sandbox build-image`',
+            })
+            pushTmuxInfo()
+          } else {
+            const record = img.record
+            let message = img.detail
+            if (record === null) message = workerImageNoRecordNote(tag)
+            else if (!img.matchesRecord) message = workerImageDriftNote(record.imageId, img.imageId ?? 'unknown')
+            checks.push({
+              id: 'worker-image',
+              title: 'Worker image',
+              // Drifted or missing images block dispatch (sandbox probe exits 1),
+              // so doctor must fail too; an unrecorded-but-present image does not.
+              status: img.matchesRecord ? 'pass' : record === null ? 'info' : 'fail',
+              message,
+              ...(record !== null && !img.matchesRecord ? { fix: WORKER_IMAGE_DRIFT_FIX } : {}),
+            })
+            // Real verification, not a claim: run tmux inside the built image
+            // (no network — the image may be operator-supplied).
+            const tmux = await run(
+              ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'tmux', tag, '-V'],
+              { timeoutMs: 30_000 },
+            )
+            checks.push(
+              tmux.exitCode === 0 && firstLine(tmux.stdout) !== ''
+                ? {
+                    id: 'tmux',
+                    title: 'tmux (worker image)',
+                    status: 'pass',
+                    message: `${firstLine(tmux.stdout)} inside '${tag}'`,
+                  }
+                : {
+                    id: 'tmux',
+                    title: 'tmux (worker image)',
+                    status: 'fail',
+                    message: `tmux is not usable inside '${tag}': ${firstLine(tmux.stderr, 200) || 'no output'}`,
+                    fix: 'rebuild the worker image (`pluton sandbox build-image`); it must contain tmux',
+                  },
+            )
+          }
+        } catch (e) {
+          if (!(e instanceof SandboxUnavailableError)) throw e
+          // Docker answered the sandbox probe but not the image inspect: report
+          // a daemon/probe problem, never "run build-image".
           checks.push({
             id: 'worker-image',
             title: 'Worker image',
             status: 'fail',
-            message: `'${tag}' is not built — Muse containers cannot start`,
-            fix: 'run `pluton sandbox build-image`',
+            message: e.message.replace(/ Fix: [\s\S]*$/, ''),
+            fix: DOCKER_UNAVAILABLE_FIX,
           })
           pushTmuxInfo()
-        } else {
-          checks.push({
-            id: 'worker-image',
-            title: 'Worker image',
-            status: img.matchesRecord ? 'pass' : 'warn',
-            message: img.detail,
-            ...(img.matchesRecord
-              ? {}
-              : { fix: 're-run `pluton sandbox build-image` to rebuild and re-record the image' }),
-          })
-          // Real verification, not a claim: run tmux inside the built image.
-          const tmux = await run(['docker', 'run', '--rm', '--entrypoint', 'tmux', tag, '-V'], { timeoutMs: 30_000 })
-          checks.push(
-            tmux.exitCode === 0 && firstLine(tmux.stdout) !== ''
-              ? {
-                  id: 'tmux',
-                  title: 'tmux (worker image)',
-                  status: 'pass',
-                  message: `${firstLine(tmux.stdout)} inside '${tag}'`,
-                }
-              : {
-                  id: 'tmux',
-                  title: 'tmux (worker image)',
-                  status: 'fail',
-                  message: `tmux is not usable inside '${tag}': ${firstLine(tmux.stderr, 200) || 'no output'}`,
-                  fix: 'rebuild the worker image (`pluton sandbox build-image`); it must contain tmux',
-                },
-          )
         }
       } else {
         checks.push({ id: 'sandbox', title: 'Sandbox', status: 'fail', message: probe.detail, fix: probe.fix })

@@ -1,6 +1,8 @@
+import { SandboxUnavailableError } from '../../domain/errors.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import {
   DEFAULT_WORKER_IMAGE_TAG,
+  dispatchReadiness,
   WorkerImageManager,
   type WorkerImageProbe,
   type WorkerImageRecord,
@@ -30,18 +32,20 @@ export async function sandboxProbe(ctx: ProjectContext): Promise<SandboxProbeRep
   const probe = await sandbox.probe()
   const warnings: string[] = []
   let image: WorkerImageProbe | null = null
-  let dispatchReady = probe.available
+  let imageProbeError: SandboxUnavailableError | null = null
 
   if (sandbox.kind === 'local-process') {
     warnings.push(LOCAL_PROCESS_WARNING)
   } else if (probe.available) {
     const tag = config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
-    image = await new WorkerImageManager().probe(ctx.rootDir, tag)
-    if (!image.present) {
-      dispatchReady = false
-      warnings.push(`worker image '${tag}' is not built — run \`pluton sandbox build-image\` before dispatching tasks`)
-    } else if (!image.matchesRecord) {
-      warnings.push(image.detail)
+    try {
+      image = await new WorkerImageManager().probe(ctx.rootDir, tag)
+    } catch (e) {
+      // The daemon answered the sandbox probe but not the image inspect: a
+      // probe/daemon problem, never "image not built" (the message carries the
+      // daemon fix).
+      if (!(e instanceof SandboxUnavailableError)) throw e
+      imageProbeError = e
     }
     if (config.sandbox.image === undefined) {
       warnings.push(
@@ -49,11 +53,16 @@ export async function sandboxProbe(ctx: ProjectContext): Promise<SandboxProbeRep
       )
     }
   } else {
-    dispatchReady = false
     warnings.push(probe.fix ?? 'the Docker sandbox is unavailable — dispatch fails closed')
   }
 
-  return { sandbox: probe, image, warnings, dispatchReady }
+  const readiness =
+    imageProbeError !== null
+      ? { ready: false, warnings: [imageProbeError.message] }
+      : dispatchReadiness(probe.available, image)
+  warnings.push(...readiness.warnings)
+
+  return { sandbox: probe, image, warnings, dispatchReady: readiness.ready }
 }
 
 export interface BuildImageRequest {

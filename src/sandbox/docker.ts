@@ -1,4 +1,4 @@
-import { PolicyDeniedError, SandboxUnavailableError } from '../domain/errors.ts'
+import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../domain/errors.ts'
 import { firstLine, run, type RunOptions, type RunResult } from '../util/exec.ts'
 import {
   DOCKER_UNAVAILABLE_FIX,
@@ -65,6 +65,7 @@ export class DockerSandboxManager implements SandboxManager {
 
   /** The exact `docker create` argument vector — kept pure for conformance tests. */
   static buildCreateArgs(spec: SandboxSpec): string[] {
+    DockerSandboxManager.validateSpec(spec)
     const args = [
       'create',
       '--name',
@@ -100,6 +101,46 @@ export class DockerSandboxManager implements SandboxManager {
     }
     args.push(spec.image, 'sleep', 'infinity')
     return args
+  }
+
+  /**
+   * The argv builder is the last line of defense for ADR-0004's baseline: a
+   * typo must not silently strip hardening (`--user root`, `--pids-limit 0`,
+   * `--memory 0m` and `--cpus 0` all mean UNLIMITED to the docker CLI), and a
+   * `,`/`=` in a mount path would change docker's CSV mount parsing.
+   */
+  private static validateSpec(spec: SandboxSpec): void {
+    if (!/^\d+(:\d+)?$/.test(spec.containerUser) || spec.containerUser === '0' || spec.containerUser.startsWith('0:')) {
+      throw new ValidationError(
+        `containerUser must be a numeric non-root user (uid or uid:gid), got '${spec.containerUser}'`,
+        { details: { containerUser: spec.containerUser } },
+      )
+    }
+    const { cpus, memoryMb, pids } = spec.limits
+    if (!Number.isInteger(memoryMb) || memoryMb < 1) {
+      throw new ValidationError(`sandbox memoryMb must be an integer >= 1 (docker treats 0 as unlimited), got ${String(memoryMb)}`)
+    }
+    if (!Number.isInteger(pids) || pids < 1) {
+      throw new ValidationError(`sandbox pids limit must be an integer >= 1 (docker treats 0 as unlimited), got ${String(pids)}`)
+    }
+    if (typeof cpus !== 'number' || !Number.isFinite(cpus) || cpus <= 0) {
+      throw new ValidationError(`sandbox cpus must be a finite number > 0 (docker treats 0 as unlimited), got ${String(cpus)}`)
+    }
+    for (const mount of spec.mounts) {
+      const absoluteHost = /^([A-Za-z]:[\\/]|\\\\|\/)/.test(mount.hostPath)
+      if (!absoluteHost || /[,=]/.test(mount.hostPath)) {
+        throw new ValidationError(
+          `mount hostPath must be an absolute path without ',' or '=', got '${mount.hostPath}'`,
+          { details: { hostPath: mount.hostPath } },
+        )
+      }
+      if (!mount.containerPath.startsWith('/') || /[,=]/.test(mount.containerPath)) {
+        throw new ValidationError(
+          `mount containerPath must be an absolute Linux path without ',' or '=', got '${mount.containerPath}'`,
+          { details: { containerPath: mount.containerPath } },
+        )
+      }
+    }
   }
 
   async create(spec: SandboxSpec): Promise<SandboxCreateResult> {

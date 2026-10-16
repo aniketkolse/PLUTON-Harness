@@ -80,6 +80,64 @@ export function readWorkerImageRecord(rootDir: string): WorkerImageRecord | null
   return reader(workerImageRecordPath(rootDir))
 }
 
+/**
+ * Info shown when the local image exists but this project has no build record,
+ * so drift cannot be checked. Dispatch is still allowed; with a tag it reads as
+ * a standalone sentence for `doctor`.
+ */
+export function workerImageNoRecordNote(tag?: string): string {
+  const subject = tag === undefined ? 'worker image' : `'${tag}'`
+  return (
+    `${subject} present but not drift-checked in this project (no build record); ` +
+    'run `pluton sandbox build-image` to record it (fast when layers are cached)'
+  )
+}
+
+/** Drift observation with both ids truncated for display. */
+export function workerImageDriftNote(recordImageId: string, actualImageId: string): string {
+  return `worker image changed since the recorded build (record ${shortId(recordImageId)} vs actual ${shortId(actualImageId)})`
+}
+
+/** Remediation for an image that changed since the recorded build. */
+export const WORKER_IMAGE_DRIFT_FIX = 're-run `pluton sandbox build-image` or investigate'
+
+/**
+ * Pure dispatch-readiness rule shared by `pluton sandbox probe` and `doctor`.
+ * `image` is null when no worker image applies to this sandbox kind
+ * (local-process); a failed image probe is a SandboxUnavailableError the caller
+ * must report itself — never a null image confused with "not built".
+ */
+export function dispatchReadiness(
+  sandboxAvailable: boolean,
+  image: WorkerImageProbe | null,
+): { ready: boolean; warnings: string[] } {
+  if (!sandboxAvailable) return { ready: false, warnings: [] }
+  if (image === null) return { ready: true, warnings: [] }
+  if (!image.present) {
+    return {
+      ready: false,
+      warnings: [`worker image '${image.image}' is not built — run \`pluton sandbox build-image\` before dispatching tasks`],
+    }
+  }
+  if (image.record === null) {
+    // Present but unrecorded: usable, drift just cannot be checked here.
+    return { ready: true, warnings: [workerImageNoRecordNote()] }
+  }
+  if (!image.matchesRecord) {
+    return {
+      ready: false,
+      warnings: [
+        `${workerImageDriftNote(image.record.imageId, image.imageId ?? 'unknown')} — ${WORKER_IMAGE_DRIFT_FIX}`,
+      ],
+    }
+  }
+  return { ready: true, warnings: [] }
+}
+
+function shortId(id: string): string {
+  return id.length > 19 ? `${id.slice(0, 19)}…` : id
+}
+
 export class WorkerImageManager {
   private readonly dockerBin: string
   private readonly runFn: (argv: string[], options?: RunOptions) => Promise<RunResult>
@@ -105,9 +163,21 @@ export class WorkerImageManager {
 
   private async imageId(tag: string): Promise<string | null> {
     const r = await this.docker(['image', 'inspect', '--format', '{{.Id}}', tag], { timeoutMs: INSPECT_TIMEOUT_MS })
-    if (r.exitCode !== 0) return null
-    const id = r.stdout.trim()
-    return id === '' ? null : id
+    if (r.exitCode === 0) {
+      const id = r.stdout.trim()
+      return id === '' ? null : id
+    }
+    // Only a literal "no such image" means the tag is genuinely absent on this
+    // machine. Daemon hiccups, permissions and timeouts must not be reported as
+    // "not built" — that would send the operator into a full rebuild.
+    if (/no such image/i.test(r.stderr)) return null
+    const why = r.timedOut
+      ? `inspect timed out after ${INSPECT_TIMEOUT_MS}ms`
+      : firstLine(r.stderr, 300) || `docker image inspect failed (exit ${String(r.exitCode)})`
+    throw new SandboxUnavailableError(`cannot inspect worker image '${tag}': ${why}`, {
+      fix: DOCKER_UNAVAILABLE_FIX,
+      details: { tag, exitCode: r.exitCode, stderr: r.stderr.slice(0, 2_000) },
+    })
   }
 
   async probe(rootDir: string, tag = DEFAULT_WORKER_IMAGE_TAG): Promise<WorkerImageProbe> {
@@ -160,7 +230,10 @@ export class WorkerImageManager {
       throw new SandboxUnavailableError(`docker build produced no inspectable image '${tag}'`)
     }
 
-    const tmux = await this.docker(['run', '--rm', '--entrypoint', 'tmux', tag, '-V'], { timeoutMs: INSPECT_TIMEOUT_MS })
+    const tmux = await this.docker(
+      ['run', '--rm', '--network', 'none', '--entrypoint', 'tmux', tag, '-V'],
+      { timeoutMs: INSPECT_TIMEOUT_MS },
+    )
     if (tmux.exitCode !== 0 || tmux.stdout.trim() === '') {
       throw new SandboxUnavailableError(
         `worker image '${tag}' does not provide tmux (exit ${String(tmux.exitCode)}): ${firstLine(tmux.stderr, 200)}`,

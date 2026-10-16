@@ -6,10 +6,12 @@ import { SandboxUnavailableError } from '../../src/domain/errors.ts'
 import type { RunOptions, RunResult } from '../../src/util/exec.ts'
 import {
   DEFAULT_WORKER_IMAGE_TAG,
+  dispatchReadiness,
   readWorkerImageRecord,
   workerDockerfileDir,
   workerImageRecordPath,
   WorkerImageManager,
+  type WorkerImageProbe,
 } from '../../src/sandbox/image.ts'
 import { failResult, okResult } from '../helpers/fake-sandbox.ts'
 
@@ -83,7 +85,7 @@ describe('worker image build', () => {
       builtAt: expect.any(String),
     })
     expect(calls[1]).toEqual(['docker', 'build', '-t', 'pluton-worker:test', '--file', join(dockerfileDir, 'Dockerfile'), dockerfileDir])
-    expect(calls[3]).toEqual(['docker', 'run', '--rm', '--entrypoint', 'tmux', 'pluton-worker:test', '-V'])
+    expect(calls[3]).toEqual(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'tmux', 'pluton-worker:test', '-V'])
     expect(calls[4]).toEqual(['docker', 'run', '--rm', '--entrypoint', 'node', 'pluton-worker:test', '--version'])
 
     // Persisted and readable
@@ -122,12 +124,33 @@ describe('worker image build', () => {
 })
 
 describe('worker image probe', () => {
-  it('reports a missing image with the exact inspect argv', async () => {
-    const { runFn, calls } = scripted([{ label: 'inspect', match: isInspect, result: (argv) => failResult(argv, 'No such image', 1) }])
+  it('reports a missing image (literal "no such image") with the exact inspect argv', async () => {
+    const { runFn, calls } = scripted([
+      { label: 'inspect', match: isInspect, result: (argv) => failResult(argv, 'No such image: pluton-worker:local', 1) },
+    ])
     const probe = await new WorkerImageManager({ runFn }).probe(tmpRoot())
     expect(probe.present).toBe(false)
     expect(probe.matchesRecord).toBe(false)
     expect(calls[0]).toEqual(['docker', 'image', 'inspect', '--format', '{{.Id}}', DEFAULT_WORKER_IMAGE_TAG])
+  })
+
+  it('rejects with a daemon error (never "image not built") when inspect cannot reach the daemon', async () => {
+    const { runFn, calls } = scripted([
+      {
+        label: 'inspect',
+        match: isInspect,
+        result: (argv) =>
+          failResult(argv, 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?', 1),
+      },
+    ])
+    const err = await new WorkerImageManager({ runFn }).probe(tmpRoot()).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(SandboxUnavailableError)
+    const message = (err as SandboxUnavailableError).message
+    expect(message).toContain('cannot inspect worker image')
+    expect(message).toContain('Cannot connect to the Docker daemon')
+    expect(message).toContain('start Docker Desktop')
+    expect(message).not.toContain('not built')
+    expect(calls).toHaveLength(1)
   })
 
   it('matches a recorded build (the pin the runtime trusts)', async () => {
@@ -176,5 +199,78 @@ describe('worker image probe', () => {
     const { runFn } = scripted([{ label: 'inspect', match: isInspect, result: (argv) => okResult(argv, 'sha256:x\n') }])
     const probe = await new WorkerImageManager({ runFn }).probe(root)
     expect(probe.record).toBeNull()
+  })
+})
+
+const LONG_RECORD_ID = 'sha256:0123456789abcdef0123456789abcdef'
+const LONG_ACTUAL_ID = 'sha256:fedcba9876543210fedcba9876543210'
+
+function probeFixture(over: Partial<WorkerImageProbe> = {}): WorkerImageProbe {
+  return {
+    present: true,
+    image: DEFAULT_WORKER_IMAGE_TAG,
+    imageId: 'sha256:current',
+    record: null,
+    matchesRecord: false,
+    detail: 'fixture detail',
+    ...over,
+  }
+}
+
+describe('dispatch readiness (pure)', () => {
+  it('down: not ready, no image-level warnings (the caller reports the sandbox fix)', () => {
+    expect(dispatchReadiness(false, null)).toEqual({ ready: false, warnings: [] })
+  })
+
+  it('missing: not ready, tells the operator to build the image', () => {
+    const r = dispatchReadiness(true, probeFixture({ present: false, imageId: null }))
+    expect(r.ready).toBe(false)
+    expect(r.warnings).toEqual([
+      `worker image '${DEFAULT_WORKER_IMAGE_TAG}' is not built — run \`pluton sandbox build-image\` before dispatching tasks`,
+    ])
+  })
+
+  it('no record: ready, with an info that drift was not checked in this project', () => {
+    const r = dispatchReadiness(true, probeFixture())
+    expect(r.ready).toBe(true)
+    expect(r.warnings).toHaveLength(1)
+    expect(r.warnings[0]).toContain('present but not drift-checked in this project (no build record)')
+    expect(r.warnings[0]).toContain('`pluton sandbox build-image`')
+  })
+
+  it('mismatch: not ready, reports both truncated ids and the fix', () => {
+    const r = dispatchReadiness(
+      true,
+      probeFixture({
+        imageId: LONG_ACTUAL_ID,
+        record: {
+          image: DEFAULT_WORKER_IMAGE_TAG,
+          imageId: LONG_RECORD_ID,
+          tmuxVersion: 'tmux 3.3a',
+          nodeVersion: 'v24.0.0',
+          builtAt: 'x',
+        },
+      }),
+    )
+    expect(r.ready).toBe(false)
+    const line = r.warnings.join('\n')
+    expect(line).toContain('worker image changed since the recorded build')
+    expect(line).toContain('sha256:0123456789ab…')
+    expect(line).toContain('sha256:fedcba987654…')
+    expect(line).not.toContain(LONG_RECORD_ID)
+    expect(line).not.toContain(LONG_ACTUAL_ID)
+    expect(line).toContain('re-run `pluton sandbox build-image` or investigate')
+  })
+
+  it('match: ready and silent', () => {
+    const record = {
+      image: DEFAULT_WORKER_IMAGE_TAG,
+      imageId: 'sha256:abc123',
+      tmuxVersion: 'tmux 3.3a',
+      nodeVersion: 'v24.0.0',
+      builtAt: '2026-01-01T00:00:00.000Z',
+    }
+    const r = dispatchReadiness(true, probeFixture({ imageId: 'sha256:abc123', record, matchesRecord: true }))
+    expect(r).toEqual({ ready: true, warnings: [] })
   })
 })
