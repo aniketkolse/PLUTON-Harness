@@ -268,6 +268,11 @@ export class Store {
     return row ? rowToProject(row) : null
   }
 
+  getProject(id: string): ProjectRecord | null {
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToProject(row) : null
+  }
+
   listMuses(): MuseRecord[] {
     return (this.db.prepare('SELECT * FROM muses ORDER BY id').all() as Row[]).map(rowToMuse)
   }

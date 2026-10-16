@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { NotFoundError } from '../../src/domain/errors.ts'
 import { PERMISSIONS } from '../../src/domain/permissions.ts'
 import { allowedTransitions } from '../../src/domain/state.ts'
 import type { RunRecord } from '../../src/domain/models.ts'
@@ -252,6 +253,26 @@ describe('PlutonToolBridge — identity and permissions', () => {
   it('refuses to construct a bridge for an unknown or disabled caller Muse', () => {
     const fx = makeFixture()
     expect(() => makeBridge(fx, 'ghost')).toThrowError(/not an enabled Muse/)
+  })
+
+  it('refuses to construct a bridge when runId is an unknown run id string', () => {
+    const fx = makeFixture()
+    expect(() => new PlutonToolBridge({
+      store: fx.store,
+      projectId: fx.projectId,
+      rootDir: fx.rootDir,
+      runId: 'run_nonexistent000',
+      callerMuseId: 'manager',
+      callerTaskId: null,
+      limits: BASE_LIMITS,
+    })).toThrowError(NotFoundError)
+  })
+
+  it('isolates scope: run-scoped bridge returns not_found for operator-only tools', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const res = await manager.call('run.start', { goal: 'new run' })
+    expect(res).toMatchObject({ ok: false, error: { code: 'not_found' } })
   })
 })
 

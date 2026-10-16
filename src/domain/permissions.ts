@@ -23,6 +23,11 @@ export const PERMISSIONS = [
   'verification.run',
   'approval.request',
   'run.stop',
+  'project.status',
+  'run.list',
+  'run.inspect',
+  'run.start',
+  'approvals.list',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
@@ -44,6 +49,11 @@ export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<MuseRole, readonly Permis
     'verification.run',
     'diff.inspect',
     'approval.request',
+    'project.status',
+    'run.list',
+    'run.inspect',
+    'run.start',
+    'approvals.list',
   ],
   researcher: ['project.read', 'research.report', 'diff.inspect'],
   coder: ['project.read', 'project.write', 'tests.run', 'diff.inspect', 'verification.report'],

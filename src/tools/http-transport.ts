@@ -18,7 +18,7 @@ import { McpStdioServer, type McpDiagnosticSink, type McpToolHost } from './mcp-
 export interface ToolHttpSessionSpec {
   museId: string
   taskId: string | null
-  runId: string
+  runId: string | null
   /** Human label for diagnostics only (never a secret). */
   label?: string
 }

@@ -6,14 +6,20 @@ import { WakeupRegistry } from '../orchestrator/wakeups.ts'
 import { getToolDef, toolInfosForMcp } from './catalog.ts'
 import type { McpToolCallResult, McpToolHost, McpToolInfo } from './mcp-server.ts'
 import { TOOL_HANDLERS, type ToolEnv } from './handlers.ts'
+import {
+  getOperatorToolDef,
+  OPERATOR_TOOL_HANDLERS,
+  operatorToolInfosForMcp,
+  type OperatorToolEnv,
+} from './operator-catalog.ts'
 
 export { wakeupChannelFor } from './handlers.ts'
 
 /**
- * The authorization core of the Pluton tool bridge (ADR-0007). Identity is
- * server-side: the caller Muse, its task scope and its permissions are bound
+ * The authorization core of the Pluton tool bridge (ADR-0007, ADR-0012). Identity is
+ * server-side: the caller Muse, its task/run scope and its permissions are bound
  * when the bridge is constructed for one engine session — nothing the model
- * says can widen them. Every call is validated, executed inside the run's
+ * says can widen them. Every call is validated, executed inside the run's (or operator's)
  * budget/graph rules, and audited as an event; failures are typed results, not
  * silent successes.
  */
@@ -64,18 +70,37 @@ export function toolBridgeLimitsFromRuntime(runtime: {
   }
 }
 
+export interface ToolBridgeLimits {
+  /** runtime.max_child_tasks_per_task */
+  maxChildrenPerTask: number
+  /** runtime bound for task briefs (chars). */
+  maxBriefChars: number
+  /** runtime.max_team_size */
+  maxTeamSize: number
+  /** Capped MCP response chars to keep model context sane. */
+  maxToolResultChars: number
+  /** Default wait timeout when caller passes no timeoutSeconds. */
+  defaultWaitSeconds: number
+  /** Internal poll heartbeat for sleep-based wait fallback. */
+  waitHeartbeatSeconds: number
+  /** TTL for created human approvals before expiry. */
+  approvalTtlMinutes: number
+}
+
 export interface PlutonToolBridgeOptions {
   store: Store
   projectId: string
   rootDir: string
-  runId: string
+  runId?: string | null
   callerMuseId: string
-  /** The caller's own task when its session is task-scoped (null for the manager). */
-  callerTaskId: string | null
+  /** The caller's own task when its session is task-scoped (null for the manager or operator). */
+  callerTaskId?: string | null
   limits: ToolBridgeLimits
   /** Shared per-run registry; the runtime notifies it when tasks reach terminal states. */
   wakeups?: WakeupRegistry
   now?: () => number
+  /** Injected by pluton chat: create + drive a supervised run in the background. Required when runId is null/omitted. */
+  startRun?: (input: { goal: string; acceptance: string[]; requestId?: string }) => Promise<{ runId: string }>
 }
 
 function errorDetails(e: unknown): JsonValue | undefined {
@@ -89,9 +114,16 @@ function errorDetails(e: unknown): JsonValue | undefined {
 }
 
 export class PlutonToolBridge implements McpToolHost {
-  private readonly env: ToolEnv
+  private readonly store: Store
+  private readonly projectId: string
+  private readonly rootDir: string
+  private readonly callerMuseId: string
+  private readonly now: () => number
   private readonly permissions: readonly string[]
   private readonly maxToolResultChars: number
+  private readonly isOperator: boolean
+  private readonly runEnv: ToolEnv | null
+  private readonly operatorEnv: OperatorToolEnv | null
 
   constructor(opts: PlutonToolBridgeOptions) {
     const muse = opts.store.getMuse(opts.callerMuseId)
@@ -101,29 +133,61 @@ export class PlutonToolBridge implements McpToolHost {
     if (muse.projectId !== opts.projectId) {
       throw new InternalError(`muse '${muse.id}' belongs to project ${muse.projectId}, not ${opts.projectId}`)
     }
-    const run = opts.store.getRunOrNull(opts.runId)
-    if (!run) throw new NotFoundError('run', opts.runId)
-    if (run.projectId !== opts.projectId) {
-      throw new InternalError(`run '${run.id}' belongs to project ${run.projectId}, not ${opts.projectId}`)
-    }
+
+    this.store = opts.store
+    this.projectId = opts.projectId
+    this.rootDir = opts.rootDir
+    this.callerMuseId = opts.callerMuseId
+    this.now = opts.now ?? Date.now
     this.permissions = muse.permissions
-    const now = opts.now ?? Date.now
     this.maxToolResultChars = opts.limits.maxToolResultChars
-    this.env = {
-      store: opts.store,
-      projectId: opts.projectId,
-      rootDir: opts.rootDir,
-      runId: opts.runId,
-      callerMuseId: opts.callerMuseId,
-      callerTaskId: opts.callerTaskId,
-      limits: opts.limits,
-      wakeups: opts.wakeups ?? new WakeupRegistry(),
-      now,
+
+    if (opts.runId === undefined || opts.runId === null) {
+      // Operator scope
+      if (!opts.startRun) {
+        throw new InternalError('startRun callback is required for operator-scoped bridge (runId is null/undefined)')
+      }
+      this.isOperator = true
+      this.runEnv = null
+      this.operatorEnv = {
+        store: opts.store,
+        projectId: opts.projectId,
+        rootDir: opts.rootDir,
+        callerMuseId: opts.callerMuseId,
+        now: this.now,
+        startRun: opts.startRun,
+      }
+    } else {
+      // Run scope
+      const run = opts.store.getRunOrNull(opts.runId)
+      if (!run) throw new NotFoundError('run', opts.runId)
+      if (run.projectId !== opts.projectId) {
+        throw new InternalError(`run '${run.id}' belongs to project ${run.projectId}, not ${opts.projectId}`)
+      }
+      this.isOperator = false
+      this.operatorEnv = null
+      this.runEnv = {
+        store: opts.store,
+        projectId: opts.projectId,
+        rootDir: opts.rootDir,
+        runId: opts.runId,
+        callerMuseId: opts.callerMuseId,
+        callerTaskId: opts.callerTaskId ?? null,
+        limits: opts.limits,
+        wakeups: opts.wakeups ?? new WakeupRegistry(),
+        now: this.now,
+      }
     }
   }
 
   /** Only tools this caller could actually call; the per-call check is authoritative. */
   listTools(): McpToolInfo[] {
+    if (this.isOperator) {
+      return operatorToolInfosForMcp().filter((info) => {
+        const def = getOperatorToolDef(info.name)
+        return def !== null && this.permissions.includes(def.permission)
+      })
+    }
     return toolInfosForMcp().filter((info) => {
       const def = getToolDef(info.name)
       return def !== null && this.permissions.includes(def.permission)
@@ -131,14 +195,53 @@ export class PlutonToolBridge implements McpToolHost {
   }
 
   async call(name: string, args: unknown, opts?: { signal?: AbortSignal }): Promise<McpToolCallResult> {
-    const started = this.env.now()
-    // Per-call env: the abort signal belongs to the transport's request, not to
-    // the bridge's lifetime (long waits must observe shutdown immediately).
-    const env = opts?.signal !== undefined ? { ...this.env, signal: opts.signal } : this.env
-    // Bound the model-controlled name BEFORE anything is audited: an oversized
-    // name must never make an event payload throw and silently drop the denial
-    // record (the store caps event payloads).
+    const started = this.now()
     const displayName = name.length > 200 ? `${name.slice(0, 200)}…` : name
+
+    if (this.isOperator) {
+      const def = getOperatorToolDef(name)
+      if (!def) {
+        this.audit('tool.denied', { tool: displayName, reason: 'unknown_tool' })
+        return this.failure('not_found', `unknown Pluton tool '${displayName}'`)
+      }
+      if (!this.permissions.includes(def.permission)) {
+        this.audit('tool.denied', { tool: def.name, reason: 'permission_missing', permission: def.permission })
+        return this.failure(
+          'policy_denied',
+          `muse '${this.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
+        )
+      }
+      const env: OperatorToolEnv = opts?.signal !== undefined ? { ...this.operatorEnv!, signal: opts.signal } : this.operatorEnv!
+      try {
+        const data = await OPERATOR_TOOL_HANDLERS[def.name]!(env, args)
+        const result: McpToolCallResult = { ok: true, data: this.bound(data) }
+        this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.now() - started })
+        return result
+      } catch (e) {
+        this.audit('tool.call', {
+          tool: def.name,
+          ok: false,
+          mutating: def.mutating,
+          errorCode: e instanceof ZodError ? 'invalid_arguments' : e instanceof PlutonError ? e.code : 'internal_error',
+          durationMs: this.now() - started,
+        })
+        if (e instanceof ZodError) {
+          return this.failure(
+            'invalid_arguments',
+            `invalid arguments for '${def.name}': ${e.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`.slice(0, 2_000),
+            { issues: e.issues.slice(0, 20).map((i) => ({ path: i.path.join('.'), message: i.message })) },
+          )
+        }
+        if (e instanceof PlutonError) {
+          return this.failure(e.code, e.message, errorDetails(e))
+        }
+        const message = e instanceof Error ? e.message : String(e)
+        return this.failure('internal_error', message.slice(0, 1_000))
+      }
+    }
+
+    // Run scope
+    const env = opts?.signal !== undefined ? { ...this.runEnv!, signal: opts.signal } : this.runEnv!
     const def = getToolDef(name)
     if (!def) {
       this.audit('tool.denied', { tool: displayName, reason: 'unknown_tool' })
@@ -148,13 +251,13 @@ export class PlutonToolBridge implements McpToolHost {
       this.audit('tool.denied', { tool: def.name, reason: 'permission_missing', permission: def.permission })
       return this.failure(
         'policy_denied',
-        `muse '${this.env.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
+        `muse '${this.runEnv!.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
       )
     }
     try {
       const data = await TOOL_HANDLERS[def.name](env, args)
       const result: McpToolCallResult = { ok: true, data: this.bound(data) }
-      this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.env.now() - started })
+      this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.now() - started })
       return result
     } catch (e) {
       this.audit('tool.call', {
@@ -162,7 +265,7 @@ export class PlutonToolBridge implements McpToolHost {
         ok: false,
         mutating: def.mutating,
         errorCode: e instanceof ZodError ? 'invalid_arguments' : e instanceof PlutonError ? e.code : 'internal_error',
-        durationMs: this.env.now() - started,
+        durationMs: this.now() - started,
       })
       if (e instanceof ZodError) {
         return this.failure(
@@ -196,11 +299,11 @@ export class PlutonToolBridge implements McpToolHost {
   }
 
   private audit(type: string, payload: JsonValue): void {
-    this.env.store.appendEvent({
-      projectId: this.env.projectId,
-      runId: this.env.runId,
-      taskId: this.env.callerTaskId,
-      museId: this.env.callerMuseId,
+    this.store.appendEvent({
+      projectId: this.projectId,
+      runId: this.runEnv?.runId ?? null,
+      taskId: this.runEnv?.callerTaskId ?? null,
+      museId: this.callerMuseId,
       type,
       payload,
     })
