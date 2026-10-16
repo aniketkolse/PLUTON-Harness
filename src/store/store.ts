@@ -216,6 +216,8 @@ export interface NewApprovalSpec {
   reason: string
   /** Bounded JSON scope: what exactly would happen if approved. */
   scope: JsonValue
+  /** When the pending approval stops being actionable (null = never expires). */
+  expiresAt?: string | null
 }
 
 const DEFAULT_MAX_EVENT_CHARS = 8_000
@@ -758,7 +760,7 @@ export class Store {
       .prepare(
         `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
                                  status, decided_by, decided_at, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
       )
       .run(
         id,
@@ -769,6 +771,7 @@ export class Store {
         spec.action,
         spec.reason,
         stringifyJson(spec.scope),
+        spec.expiresAt ?? null,
         now,
       )
     return this.getApproval(id)
@@ -790,6 +793,50 @@ export class Store {
       .prepare('SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at DESC, id DESC')
       .all(runId) as Row[]
     return rows.map(rowToApproval)
+  }
+
+  /** Project-scoped inbox listing, newest first. */
+  listApprovalsByProject(projectId: string, opts: { status?: ApprovalStatus; limit?: number } = {}): ApprovalRecord[] {
+    const limit = opts.limit ?? 100
+    const rows =
+      opts.status === undefined
+        ? (this.db
+            .prepare('SELECT * FROM approvals WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?')
+            .all(projectId, limit) as Row[])
+        : (this.db
+            .prepare(
+              'SELECT * FROM approvals WHERE project_id = ? AND status = ? ORDER BY created_at DESC, id DESC LIMIT ?',
+            )
+            .all(projectId, opts.status, limit) as Row[])
+    return rows.map(rowToApproval)
+  }
+
+  /**
+   * Timeout-to-denied sweep: every `pending` approval whose `expires_at` has
+   * arrived is flipped to `expired` (fail-closed — it can never be approved),
+   * stamped `decided_by: 'pluton:timeout'` at the given time. Rows without an
+   * expiry never move, and a second sweep returns nothing.
+   */
+  expirePendingApprovals(nowIso: string, projectId?: string): ApprovalRecord[] {
+    const selectSql =
+      `SELECT id FROM approvals WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?` +
+      (projectId === undefined ? '' : ' AND project_id = ?') +
+      ' ORDER BY created_at ASC, id ASC'
+    const ids = (
+      this.db.prepare(selectSql).all(nowIso, ...(projectId === undefined ? [] : [projectId])) as Row[]
+    ).map((r) => str(r, 'id'))
+    if (ids.length === 0) return []
+    const update = this.db.prepare(
+      "UPDATE approvals SET status = 'expired', decided_by = 'pluton:timeout', decided_at = ? WHERE id = ? AND status = 'pending'",
+    )
+    return withTx(this.db, () => {
+      const updated: ApprovalRecord[] = []
+      for (const id of ids) {
+        const res = update.run(nowIso, id)
+        if (Number(res.changes) > 0) updated.push(this.getApproval(id))
+      }
+      return updated
+    })
   }
 
   // -- verification checks (Phase 7 gates) -----------------------------------
@@ -953,6 +1000,18 @@ export class Store {
     const rows = this.db
       .prepare('SELECT * FROM events WHERE project_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?')
       .all(projectId, afterSeq, limit) as Row[]
+    return rows.map(rowToEvent)
+  }
+
+  /** One run's most recent events, newest first (readers look back from now). */
+  listEvents(runId: string, opts: { type?: string; limit?: number } = {}): EventRecord[] {
+    const limit = opts.limit ?? 50
+    const rows =
+      opts.type === undefined
+        ? (this.db.prepare('SELECT * FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT ?').all(runId, limit) as Row[])
+        : (this.db
+            .prepare('SELECT * FROM events WHERE run_id = ? AND type = ? ORDER BY seq DESC LIMIT ?')
+            .all(runId, opts.type, limit) as Row[])
     return rows.map(rowToEvent)
   }
 

@@ -295,6 +295,28 @@ describe('events', () => {
       store.appendEvent({ projectId, type: 'x', payload: { blob: 'a'.repeat(500) }, maxChars: 100 }),
     ).toThrow(ValidationError)
   })
+
+  it('listEvents reads one run newest-first, filters by type, and caps the result', () => {
+    const { store } = freshStore('list-events')
+    const projectId = seedProject(store)
+    store.appendEvent({ projectId, runId: 'run_other', type: 'task.admitted' })
+    const first = store.appendEvent({ projectId, runId: 'run_listed', type: 'task.admitted' })
+    const second = store.appendEvent({ projectId, runId: 'run_listed', type: 'task.completed' })
+    const third = store.appendEvent({ projectId, runId: 'run_listed', type: 'task.completed' })
+
+    expect(store.listEvents('run_listed').map((e) => e.id)).toEqual([third.id, second.id, first.id])
+    expect(store.listEvents('run_listed', { type: 'task.completed' }).map((e) => e.id)).toEqual([third.id, second.id])
+    expect(store.listEvents('run_listed', { type: 'task.admitted' }).map((e) => e.id)).toEqual([first.id])
+    expect(store.listEvents('run_listed', { limit: 1 }).map((e) => e.id)).toEqual([third.id])
+    expect(store.listEvents('run_listed', { type: 'nope' })).toEqual([])
+    expect(store.listEvents('run_missing')).toEqual([])
+
+    // Default cap is 50, newest first.
+    for (let i = 0; i < 51; i++) store.appendEvent({ projectId, runId: 'run_listed', type: 'bulk', payload: { i } })
+    const bulk = store.listEvents('run_listed')
+    expect(bulk).toHaveLength(50)
+    expect(bulk[0]?.payload).toEqual({ i: 50 })
+  })
 })
 
 describe('receipts (idempotency)', () => {
@@ -888,5 +910,114 @@ describe('approvals', () => {
     store.db.prepare("UPDATE approvals SET status = 'maybe' WHERE id = ?").run(approval.id)
     expect(() => store.getApproval(approval.id)).toThrow(InternalError)
     expect(() => store.getApproval(approval.id)).toThrow(/invalid approval status 'maybe'/)
+  })
+
+  it('createApproval stores the given expiresAt and defaults it to null', () => {
+    const { store } = freshStore('approvals-expiry-write')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const base = {
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    }
+    const withTtl = store.createApproval({ ...base, expiresAt: '2026-10-17T12:00:00.000Z' })
+    expect(withTtl.expiresAt).toBe('2026-10-17T12:00:00.000Z')
+    expect(store.getApproval(withTtl.id).expiresAt).toBe('2026-10-17T12:00:00.000Z')
+    expect(store.createApproval(base).expiresAt).toBeNull()
+  })
+
+  it('listApprovalsByProject scopes to the project, filters by status, and applies the limit', () => {
+    const { store } = freshStore('approvals-by-project')
+    const projectId = seedProject(store)
+    const otherProject = store.ensureProject({
+      name: 'other',
+      rootPath: join(tmpdir(), 'pluton-store-other-root'),
+      configPath: join(tmpdir(), 'pluton-store-other-root', 'pluton.yaml'),
+      defaultBranch: 'main',
+    })
+    const run = makeRun(store, projectId, 'g')
+    const base = {
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'x',
+      reason: 'r',
+      scope: {},
+    }
+    const first = store.createApproval({ ...base, action: 'first' })
+    const second = store.createApproval({ ...base, action: 'second' })
+    const third = store.createApproval({ ...base, action: 'third' })
+    store.createApproval({ ...base, projectId: otherProject.id, action: 'elsewhere' })
+    store.setApprovalStatus(second.id, 'denied', { decidedBy: 'operator' })
+    // created_at has millisecond resolution; pin every row so ordering is deterministic.
+    const pin = store.db.prepare('UPDATE approvals SET created_at = ? WHERE id = ?')
+    pin.run('2024-01-01T00:00:00.000Z', first.id)
+    pin.run('2024-01-02T00:00:00.000Z', second.id)
+    pin.run('2024-01-03T00:00:00.000Z', third.id)
+
+    expect(store.listApprovalsByProject(projectId).map((a) => a.id)).toEqual([third.id, second.id, first.id])
+    expect(store.listApprovalsByProject(projectId, { status: 'pending' }).map((a) => a.id)).toEqual([
+      third.id,
+      first.id,
+    ])
+    expect(store.listApprovalsByProject(projectId, { status: 'denied' }).map((a) => a.id)).toEqual([second.id])
+    expect(store.listApprovalsByProject(projectId, { limit: 2 }).map((a) => a.id)).toEqual([third.id, second.id])
+    expect(store.listApprovalsByProject('project_nope')).toEqual([])
+  })
+
+  it('expirePendingApprovals flips only overdue pendings, scopes by project and is idempotent', () => {
+    const { store } = freshStore('approvals-expire')
+    const projectId = seedProject(store)
+    const otherProject = store.ensureProject({
+      name: 'other',
+      rootPath: join(tmpdir(), 'pluton-store-other-root'),
+      configPath: join(tmpdir(), 'pluton-store-other-root', 'pluton.yaml'),
+      defaultBranch: 'main',
+    })
+    const now = '2026-10-17T12:00:00.000Z'
+    const base = {
+      projectId,
+      runId: null,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    }
+    const overdue = store.createApproval({ ...base, expiresAt: '2026-10-17T11:59:59.000Z' })
+    const exactlyNow = store.createApproval({ ...base, expiresAt: now })
+    const future = store.createApproval({ ...base, expiresAt: '2026-10-17T12:00:01.000Z' })
+    const never = store.createApproval(base)
+    const decided = store.createApproval({ ...base, expiresAt: '2026-10-17T11:00:00.000Z' })
+    store.setApprovalStatus(decided.id, 'denied', { decidedBy: 'operator' })
+    const otherOverdue = store.createApproval({
+      ...base,
+      projectId: otherProject.id,
+      expiresAt: '2026-10-17T11:00:00.000Z',
+    })
+
+    const swept = store.expirePendingApprovals(now, projectId)
+    expect(swept.map((a) => a.id).sort()).toEqual([overdue.id, exactlyNow.id].sort())
+    for (const row of swept) {
+      expect(row.status).toBe('expired')
+      expect(row.decidedBy).toBe('pluton:timeout')
+      expect(row.decidedAt).toBe(now)
+    }
+    expect(store.getApproval(future.id).status).toBe('pending')
+    expect(store.getApproval(never.id).status).toBe('pending')
+    expect(store.getApproval(decided.id).status).toBe('denied')
+    expect(store.getApproval(otherOverdue.id).status).toBe('pending') // project-scoped sweep
+    expect(store.getApproval(overdue.id)).toEqual(swept.find((a) => a.id === overdue.id))
+
+    // Idempotent: nothing is left overdue in this project, and an unscoped sweep reaches the other project.
+    expect(store.expirePendingApprovals(now, projectId)).toEqual([])
+    expect(store.expirePendingApprovals(now).map((a) => a.id)).toEqual([otherOverdue.id])
+    expect(store.getApproval(otherOverdue.id).decidedBy).toBe('pluton:timeout')
   })
 })
