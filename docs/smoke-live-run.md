@@ -109,3 +109,89 @@ Durable evidence (read-only queries of the project store):
   not pinned by the suite, `finalize()` wording for blocked dependents, `approval.requested` type
   collision, drain-timer hygiene, aborted-wait report honesty, doc drift, and others). All are
   addressed in the review-fix commit `c2d8fcd` with tests; suite 391/391 green.
+
+## Container-mode smoke (`sandbox.kind: docker`) — 2026-10-17
+
+**Status: procedure ready, live E2E NOT RUN — no Docker daemon on this host
+(`docker version` → `failed to connect to the docker API at
+npipe:////./pipe/dockerDesktopLinuxEngine`).** Everything below marked `[ ]`
+requires the daemon and is deliberately left unclaimed.
+
+Scratch project: `.pluton-tmp/smoke-docker/` (gitignored; seeded, same two
+Muses as `smoke-host`, `sandbox.kind: docker`). Implementation under test:
+Tasks 5–7 of the run-wiring plan plus the adversarial-review fixes
+(`1f9521c`, `2695e20`, `45f23f6`, `88bd335`).
+
+### Verified live without the daemon `[x]`
+
+Fail-closed behavior of container mode (review focus #1: typed error, zero
+containers created, run not started):
+
+```
+cd .pluton-tmp/smoke-docker
+node Y:\Pluton\bin\pluton.js run --goal "make the smoke test say ok" --acceptance "verification passes" --json
+```
+
+Observed (exit 1): `ok: false`, error `code: sandbox_unavailable`, message
+`container-mode runs need a reachable sandbox: docker daemon not reachable: …`
+with the `Fix: start Docker Desktop …` text from the Docker sandbox probe.
+Durable check immediately after (read-only): `runs=0`, `tasks=0`,
+`sandboxes=0` — the failure happened before the run row existed, so no
+half-started run was recorded.
+
+### Not run `[ ]` — exact commands for a host with a daemon
+
+1. Build the engines image and record its digest:
+
+   ```
+   docker build --build-arg PLUTON_ENGINES=1 -t pluton-worker:local docker/worker
+   docker run --rm pluton-worker:local sh -c "opencode --version && qwen --version"
+   node Y:\Pluton\bin\pluton.js sandbox build-image --engines --json   # records image id + profile
+   ```
+
+2. `pluton run` in `.pluton-tmp/smoke-docker/` with engine env present
+   (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` from the gitignored
+   key file — values never printed):
+
+   ```
+   node Y:\Pluton\bin\pluton.js run --goal "make the smoke test say ok" --acceptance "verification passes" --json
+   ```
+
+   Expect: one container per Muse (`pluton-<project>-manager` /
+   `-worker`), engines running via `docker exec`, the manager reaching the
+   tool bridge through `host.docker.internal`, run stopping in `verifying`.
+
+3. `node Y:\Pluton\bin\pluton.js verify --run <id> --json` → task `completed`
+   (1/1 checks), run `completed`/`success`.
+
+4. Argv hygiene spot-check while a session is live (Windows):
+
+   ```
+   Get-CimInstance Win32_Process -Filter "Name='docker.exe'" |
+     Where-Object { $_.CommandLine -match 'exec' } |
+     Select-Object -ExpandProperty CommandLine
+   ```
+
+   Expect `-e NAME` pairs only — no `=` after any `-e` (values stay in the
+   docker CLI environment; pinned by unit tests, not yet observed live).
+
+5. Record results here (and flip the `host.docker.internal` reachability note
+   in `docs/SECURITY.md` §8 if the bridge is reached) — or record another
+   failure honestly.
+
+### Unverified until the above runs
+
+- the `engines` image layer actually installs working `opencode`/`qwen`
+  binaries on linux (Dockerfile pins `@opencode/cli@2.0.31` +
+  `@qwen-code/qwen-code@0.25.2`; the in-image `--version` proof is only run at
+  build time);
+- `--add-host host.docker.internal:host-gateway` plus a bridge bound to
+  `0.0.0.0` is actually reachable from inside the containers on this host;
+- container user `10001:10001` can write into the bind-mounted checkouts and
+  engine homes — git `safe.directory '*'` is set in the image; on Windows
+  Docker Desktop mounts are broadly writable; on Linux hosts the mount
+  ownership must be aligned (uid remap/chown) and this is untested
+  (SECURITY.md §8.9);
+- `docker exec -i` stdio tunneling of ACP sessions against the real CLIs
+  (in-process coverage: `tests/unit/docker-exec.test.ts` + the container-mode
+  integration test in `tests/integration/cli-run.test.ts`).

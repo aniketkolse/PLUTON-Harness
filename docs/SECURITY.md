@@ -120,10 +120,13 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
 
 Stated plainly so nobody over-reads the guarantees above:
 
-1. **No live networked-engine run has been executed end to end.** The bridge,
-   supervisor and gate are exercised against the deterministic mock engine and
-   real child processes; an engine session driving a real run through the HTTP
-   transport has not been run on this host (see `docs/delivery-report.md`).
+1. **No live container-mode run has been executed end to end.** A host-mode
+   live run with real networked engines through the HTTP transport executed on
+   2026-10-16/17 (`docs/smoke-live-run.md`); the container-mode path (per-Muse
+   containers, `docker exec` spawns) has in-process unit/integration coverage
+   plus a live-verified fail-closed path, but its full live sequence was NOT RUN
+   on this host (no Docker daemon there at the time) — see
+   `docs/delivery-report.md` §7.
 2. **HTTP transport authentication is a bearer token over loopback.** Any
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never
@@ -139,6 +142,20 @@ Stated plainly so nobody over-reads the guarantees above:
    human commands are not sandboxed against the host.
 7. **Deny lists are conservative blocklists**, not capability systems. They
    reduce accidental damage; the config allow list is the real control.
+8. **Container-mode runs bind the tool bridge on all interfaces.** Containers
+   reach the host through the Docker gateway, so the bridge listens on `0.0.0.0`
+   for the run's duration (loopback in host mode). Per-session 256-bit bearer
+   tokens gate every call, but the port is LAN-reachable while a container-mode
+   run is live — firewall the host if the network is untrusted.
+9. **Bind-mount ownership is untested on Linux hosts.** The container user is
+   `10001:10001`; on Linux, host-owned engine homes and task checkouts may be
+   unwritable from inside the container unless ownership is aligned (uid remap
+   or chown). Docker Desktop presents mounts broadly writable, which can mask
+   the problem — the container-mode E2E that would prove this is NOT RUN.
+10. **Engine-side output is redacted by key, not by value.** An engine that
+    echoes a secret into its own output (e.g. a request header it was handed)
+    could persist it in event payloads; redaction removes known secret-keyed
+    fields, not arbitrary value patterns.
 
 ## 9. Reporting
 

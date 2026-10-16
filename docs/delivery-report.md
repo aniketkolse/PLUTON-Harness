@@ -15,26 +15,37 @@ supervises runs from durable state, and gates completion behind recorded verific
 
 Delivered and test-verified in this environment: Phases 0–5 complete; Phase 6 (bridge,
 transport, `pluton mcp serve`, run supervisor, `pluton run` wired end to end, live host-mode smoke
-with an OpenCode manager + Qwen worker) and Phase 7 gate (`pluton verify`, verdict logic);
-Phase 8 substantially (adversarial review fixes, failure-mode tests, `docs/SECURITY.md`, this
-report). **Not delivered:** `pluton attach`/`integrate` CLI commands, the integration checkout,
-operator apply/deny wiring for specialist proposals, approval expiry, and container-mode supervised
-runs. Those gaps are enumerated in §6 with reproducible commands.
+with an OpenCode manager + Qwen worker, engine containers through `docker exec` with an
+engines-profile worker image) and Phase 7 gate (`pluton verify`, verdict logic); Phase 8
+substantially (adversarial review fixes, failure-mode tests, `docs/SECURITY.md`, this report).
+**Not delivered:** `pluton attach`/`integrate` CLI commands, the integration checkout, operator
+apply/deny wiring for specialist proposals, and approval expiry. Container-mode runs are wired and
+unit/integration-verified; their live E2E is NOT RUN on this host (no Docker daemon) — exact
+commands in §7. Those gaps are enumerated in §6 with reproducible commands.
 
 ## 2. Evidence base
 
-- Last full local run of this report: `npm run check` → typecheck clean, **391 tests / 30 files
-  green** (25 unit files + 5 integration files).
+- Last full local run of this report: `npm run check` → typecheck clean, **423 tests / 32 files
+  green** (27 unit files + 5 integration files).
 - Host-mode live smoke (2026-10-16/17, `docs/smoke-live-run.md`): OpenCode manager + Qwen worker on a
   real gateway-backed model; run #1 (pre-fix) is kept as the failure of record (run `uncertain`,
   phantom worker "success" with zero edits caught by `pluton verify`); after the fix commit the same
   goal stopped in `verifying` and only `pluton verify` closed it `completed` / `success`.
+- Container-mode fail-closed behavior, live on this host (2026-10-17): with `sandbox.kind: docker`
+  (the default) and no daemon running, `pluton run` in `.pluton-tmp/smoke-docker/` exited 1 with a
+  typed `sandbox_unavailable` envelope (message carries the exact fix) and left **0 runs / 0 tasks /
+  0 sandboxes** in the store — the failure happened before the run row existed.
+- Container-mode adversarial review (independent subagent, against `45f23f6`): one blocker plus four
+  major findings, all addressed in `88bd335` with tests — ACP session cwd mapping, read-only-policy
+  mounts, docker client connection env, stale-container reuse validation (`SandboxManager.inspect`),
+  `..`-safe path mapping; two findings folded into documented limitations (SECURITY.md §8.8/8.9).
 - Opt-in Docker E2E: `PLUTON_E2E_DOCKER=1 npm run test:e2e` → **5/5 green** on this host (worker
   image `pluton-worker:local`, `sha256:a6c83676…`).
 - Opt-in live-engine suites: `npm run test:live` → **OpenCode 3/3, Qwen 4/4 green** on this host
   (OpenCode v2.0.29; Qwen Code v0.25.2 via `qwen --acp`, backed by the operator's local gateway —
   no new external credentials were provisioned).
-- Milestone commits (newest first): `c2d8fcd` review fixes of the smoke fix · `cceec89` live-smoke
+- Milestone commits (newest first): `88bd335` container-mode review fixes · `45f23f6` container-mode
+  `docker exec` engine spawn wiring · `2695e20` per-Muse containers · `1f9521c` engines image profile · `c2d8fcd` review fixes of the smoke fix · `cceec89` live-smoke
   fixes (approval wiring, settled waits, transport drain, durable approval events) · `ca0018d`
   `pluton run` wiring · `77fda33` SECURITY.md · `9a460c9` failure-mode tests ·
   `a97f33a` Phase 7 verification gate · `b21ca43` run supervisor · `7397bc6` bridge hardening
@@ -58,6 +69,7 @@ runs. Those gaps are enumerated in §6 with reproducible commands.
 | 6 (review) | Bridge adversarial review → 10 findings fixed with regression tests | `src/tools/handlers.ts` etc. | `7397bc6` |
 | 6 (run) | `pluton run` wired to the supervisor: idempotent run admission by request-id, per-Muse HTTP tool-bridge session with bearer tokens, shutdown ordering (abort + bounded drain before `store.close()`) | `src/cli/commands/run.ts`, `src/tools/http-transport.ts` | `ca0018d` |
 | 6 (live) | Host-mode live smoke with real engines → 4 wiring bugs found and fixed (approval mode never reached the engine session, `task.wait` deadlocked on the operator gate, an in-flight wait outlived the transport, denials vanished from the record); adversarial review of the fix → 11 findings addressed | `src/engines/approval.ts`, `src/orchestrator/supervisor.ts`, `docs/smoke-live-run.md` | `cceec89`, `c2d8fcd` |
+| 6 (containers) | Engines profile in the worker image (`PLUTON_ENGINES=1`, pinned `@opencode/cli@2.0.31` + `@qwen-code/qwen-code@0.25.2`, fail-closed in-image `--version` proof, recorded profile gates dispatch); per-Muse containers (`ensureMuseContainer`: labels, `host.docker.internal:host-gateway`, workspaces + engine-home mounts, durable rows) and the `docker exec` engine spawn seam (`-e NAME`-only env, host→container path rewriting, pinned in-image binaries); `pluton run` container mode fails closed before any run row exists (live-verified) | `docker/worker/Dockerfile`, `src/sandbox/image.ts`, `src/sandbox/muse-containers.ts`, `src/engines/docker-exec.ts`, `src/cli/commands/run.ts` | `1f9521c`, `2695e20`, `45f23f6` |
 | 7 | Verification gate: configured argv-array checks through the bounded runner, deny list, evidence rows + events before any verdict, `pluton verify`, truthful verdict/finalization | `src/verify/runner.ts`, `src/cli/main.ts` | `a97f33a` |
 | 8 | Failure-mode tests (timeout, protocol crash), `docs/SECURITY.md`, this report | `tests/`, `docs/` | `9a460c9`, `77fda33`, this commit |
 
@@ -66,7 +78,7 @@ runs. Those gaps are enumerated in §6 with reproducible commands.
 Commands and results observed at the report commit:
 
 1. `npx tsc -p tsconfig.json` — clean.
-2. `npx vitest run` — **391 passed / 30 files** (25 unit, 5 integration). Highlights:
+2. `npx vitest run` — **423 passed / 32 files** (27 unit, 5 integration). Highlights:
    - `tests/unit/tool-bridge.test.ts` (30): permissions enforced server-side, scope per call, audit
      events, waits event-driven, heartbeat re-read for stdio sessions, review regressions
      (junction escape denied, `.PLUTON` denied, oversized tool name audited, subtree dependencies,
@@ -74,9 +86,22 @@ Commands and results observed at the report commit:
    - `tests/integration/cli-mcp-serve.test.ts` (3): real child process over stdio — manager admits a
      task that lands in durable state; stdout is exactly the protocol; a non-assignee session fails
      closed.
-   - `tests/integration/cli-run.test.ts` (3): `pluton run` drives the manager over the real loopback
+   - `tests/integration/cli-run.test.ts` (6): `pluton run` drives the manager over the real loopback
      HTTP bridge to a finished run; re-running with the same `--request-id` returns the same run
-     without re-driving it; a config without a supervisor Muse fails cleanly with a `--json` envelope.
+     without re-driving it; container mode provisions one container per Muse (real
+     `ensureMuseContainer` + durable rows, incl. a read-only-policy Muse) and tunnels both engines
+     through the real `docker exec` seam (container-facing `host.docker.internal` bridge URL, pinned
+     in-image binaries, rewritten engine home, `-e NAME`-only argv, ACP session cwd asserted to be
+     the container path); daemon-down and base-image failures close before any run row exists; a
+     config without a supervisor Muse fails cleanly with a `--json` envelope.
+   - `tests/unit/docker-exec.test.ts` (9): the `docker exec` spawn seam — argv shape, values never in
+     argv (`-e NAME` pairs only), host-shaped platform vars (PATH/SystemRoot/APPDATA) never crossing
+     into the container while the docker CLI itself still gets them plus the connection env
+     (`DOCKER_*`), longest-prefix mount mapping with boundary and `..`-escape refusal, unmapped cwd →
+     `ValidationError` with zero spawns.
+   - `tests/unit/muse-containers.test.ts` (10): create/reuse/recreate decision table — stale image
+     (rebuilt worker image), mount mismatch (policy change), exact-match reuse, managed-label refusal
+     at start(), undeterminable state fail-closed, stale containerId carryover.
    - `tests/integration/supervisor.test.ts` (12): dependency order from durable records; failure
      gates the run while dependents stay visibly queued; same-Muse serialization; real-git isolated
      checkout on a run branch with the user branch untouched; verification-aware stop; the
@@ -112,7 +137,8 @@ Commands and results observed at the report commit:
 | Verification gates run completion; no green on failed/unrun | `src/verify/runner.ts` | 5 verify tests incl. pending check |
 | Manager delegates only via restricted tools (server-side authz) | `src/tools/catalog.ts`, `handlers.ts` | 30 bridge tests, adversarial review regressions |
 | Bounded specialists; one wakeup per settled child (terminal or awaiting verification) | `muse.propose_create` + approvals cap; `wakeups.ts` | unit tests (cap ≤ 3 pending, dedupe, exactly-once) |
-| `pluton run` end-to-end: manager plans → dispatch → verify closes | `src/cli/commands/run.ts`, `src/orchestrator/supervisor.ts` | `cli-run` integration tests; host-mode live smoke (`docs/smoke-live-run.md`) — run closed `completed` only via `pluton verify` |
+| `pluton run` end-to-end: manager plans → dispatch → verify closes | `src/cli/commands/run.ts`, `src/orchestrator/supervisor.ts` | `cli-run` integration tests (4, incl. container mode through the real `docker exec` seam); host-mode live smoke (`docs/smoke-live-run.md`) — run closed `completed` only via `pluton verify`; container-mode fail-closed live-verified (typed `sandbox_unavailable`, 0 durable rows) |
+| Container isolation: engines in per-Muse containers; env values never in argv | `src/sandbox/muse-containers.ts`, `src/engines/docker-exec.ts` | `docker-exec` unit tests (9), `muse-containers` tests (10) + `sandbox.test.ts` additions, container-mode `cli-run` integration tests (reuse validation via `SandboxManager.inspect`); live E2E NOT RUN (no daemon; §7) |
 | Isolated per-task checkouts; never touch user tree; no destructive git; no auto-merge to main | `src/workspace/manager.ts` | supervisor checkout test asserts root branch still `main`; removal guards |
 | Secrets never in yaml/db/events/logs/argv | ADR-0008, `redactDeep`, doctor presence-only | store/doctor tests; SECURITY.md §6 |
 | argv arrays only; timeouts; bounded outputs | `src/util/exec.ts` | `util.test.ts`; runner caps + truncation markers |
@@ -130,9 +156,12 @@ Honest list; none of these are simulated or stubbed-green:
 4. **Network policy `restricted`** is accepted in config but not enforced beyond container defaults
    (SECURITY.md §8.5).
 5. **Git conflict detection** — needed by `integrate`; not implemented.
-6. **Container-mode supervised run** — the live smoke ran `sandbox.kind: local-process` (host mode);
-   per-Muse engine containers consuming the HTTP bridge are not exercised end to end yet (the Docker
-   E2E suite covers sandbox/terminal plumbing only).
+6. **Container-mode supervised run** — wired and covered in-process (unit + integration through the
+   real `docker exec` seam), and its fail-closed path is live-verified; the full live E2E (engines
+   image build, containers on a real daemon, `host.docker.internal` bridge reachability, bind-mount
+   writes as uid 10001) is **NOT RUN** on this host: no Docker daemon (`docker version` → npipe not
+   found). The host-mode live smoke ran `sandbox.kind: local-process`; procedure + exact commands
+   for a daemon-capable host are in `docs/smoke-live-run.md`.
 7. **Re-dispatch after the verification gate** — dependents blocked behind an unverified (or failed)
    dependency keep the run open; the record now names them (`blockedTasks` in the run summary and
    `run.finished`), but no re-admission policy exists yet.
@@ -143,7 +172,7 @@ Honest list; none of these are simulated or stubbed-green:
 |---|---|---|
 | Docker E2E re-run at this report | `PLUTON_E2E_DOCKER=1 npm run test:e2e` (after `pluton sandbox build-image`) | green on this host earlier in the session; not re-executed at the exact report commit |
 | Live engine re-run at this report | `npm run test:live` | green earlier (3/3, 4/4); not re-executed at the exact report commit |
-| Container-mode supervised goal | — | host-mode smoke only so far (see §6.6); per-Muse engine containers do not exist yet |
+| Container-mode live goal (E2E) | `docker build --build-arg PLUTON_ENGINES=1 -t pluton-worker:local docker/worker` → `pluton sandbox build-image --engines` → `node bin/pluton.js run --goal … --json` in `.pluton-tmp/smoke-docker/` → `pluton verify --run <id>` | no Docker daemon on this host (`npipe:////./pipe/dockerDesktopLinuxEngine` not found); see `docs/smoke-live-run.md` "Container-mode smoke" — the fail-closed path is live-verified, the full daemon sequence is not |
 
 Everything else in §4 was executed with the reported result.
 
@@ -163,10 +192,11 @@ Everything else in §4 was executed with the reported result.
 ```
 node --version                # ≥ 24
 npm install
-npm run check                 # tsc + 391 tests
+npm run check                 # tsc + 423 tests
 node bin/pluton.js doctor     # host readiness — run inside a project (create one: node bin/pluton.js init)
 # optional, needs Docker Desktop:
 pluton sandbox build-image && PLUTON_E2E_DOCKER=1 npm run test:e2e
+pluton sandbox build-image --engines   # container-mode runs additionally need the engines profile
 # optional, needs installed engines:
 npm run test:live
 ```
