@@ -136,12 +136,8 @@ interface SeededTask {
   branch: string
 }
 
-/** Completed task (created → … → completed) with a Pluton-managed checkout carrying one commit. */
-async function seedCompletedTask(
-  fx: Fixture,
-  title: string,
-  mutate: (checkoutPath: string) => void,
-): Promise<SeededTask> {
+/** Running task with a Pluton-managed checkout; the caller decides how it ends. */
+async function seedTaskWithCheckout(fx: Fixture, title: string): Promise<SeededTask> {
   const task = fx.store.createTask({
     runId: fx.run.id,
     parentTaskId: null,
@@ -170,10 +166,34 @@ async function seedCompletedTask(
     baseCommit: info.baseCommit,
   })
   fx.store.setTaskState(task.id, 'running', { workspaceId: workspace.id })
-  mutate(info.path)
-  await fx.manager.commitAll(info.path, `pluton task: ${title}`)
-  const done = fx.store.setTaskState(task.id, 'completed')
-  return { task: done, workspace, checkoutPath: info.path, branch: info.branch }
+  return { task, workspace, checkoutPath: info.path, branch: info.branch }
+}
+
+/** Completed task (created → … → completed) with a Pluton-managed checkout carrying one commit. */
+async function seedCompletedTask(
+  fx: Fixture,
+  title: string,
+  mutate: (checkoutPath: string) => void,
+): Promise<SeededTask> {
+  const seeded = await seedTaskWithCheckout(fx, title)
+  mutate(seeded.checkoutPath)
+  await fx.manager.commitAll(seeded.checkoutPath, `pluton task: ${title}`)
+  return { ...seeded, task: fx.store.setTaskState(seeded.task.id, 'completed') }
+}
+
+/**
+ * Completed task whose checkout is left DIRTY: the worker edit is never
+ * committed, so the branch head still equals the base commit — the live
+ * situation `integrate` must repair by committing before merging.
+ */
+async function seedCompletedTaskDirty(
+  fx: Fixture,
+  title: string,
+  mutate: (checkoutPath: string) => void,
+): Promise<SeededTask> {
+  const seeded = await seedTaskWithCheckout(fx, title)
+  mutate(seeded.checkoutPath)
+  return { ...seeded, task: fx.store.setTaskState(seeded.task.id, 'completed') }
 }
 
 /** Completed task with no workspace row — the integrate pre-flight must report it as failed, not crash. */
@@ -224,6 +244,7 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(byTask.get(t1.task.id)).toMatchObject({ title: 'one', status: 'merged' })
     expect(byTask.get(t2.task.id)).toMatchObject({ title: 'two', status: 'merged' })
     for (const i of report.integrated) expect(i.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(report.committed).toEqual([]) // clean checkouts: no empty commits
     expect(report.conflicts).toEqual([])
     expect(report.blockedProtected).toEqual([])
     expect(report.failed).toEqual([])
@@ -253,6 +274,7 @@ describe('integrateRun — happy path (real git, real store)', () => {
 
     // Events recorded.
     expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_merged' })).toHaveLength(2)
+    expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })).toHaveLength(0)
     const checksEvents = fx.store.listEvents(fx.run.id, { type: 'integration.checks' })
     expect(checksEvents).toHaveLength(1)
     expect((checksEvents[0]?.payload as { checks: unknown[] }).checks).toHaveLength(2)
@@ -263,9 +285,11 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(existsSync(artifactPath)).toBe(true)
     const artifact = JSON.parse(readFileSync(artifactPath, 'utf8')) as {
       integrated: unknown[]
+      committed: unknown[]
       checks: unknown[]
     }
     expect(artifact.integrated).toHaveLength(2)
+    expect(artifact.committed).toEqual([])
     expect(artifact.checks).toHaveLength(2)
   })
 
@@ -284,9 +308,88 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(second.integrated).toHaveLength(2)
     expect(second.integrated.every((i) => i.status === 'already_integrated')).toBe(true)
     for (const i of second.integrated) expect(i.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(second.committed).toEqual([]) // clean checkouts: nothing recommitted
     expect(second.conflicts).toEqual([])
     expect(second.failed).toEqual([])
     expect(gitOut(second.checkout.path, ['rev-list', '--count', 'HEAD']).trim()).toBe(countBefore)
+  })
+})
+
+describe('integrateRun — dirty task checkouts are committed before merging (ADR-0009)', () => {
+  it('commits a verified checkout the worker left dirty, so the change actually lands', async () => {
+    const fx = makeProject()
+    // Mirror the live situation: the worker edited a tracked file (README.md)
+    // and never committed it; the branch head still equals the base commit.
+    const t1 = await seedCompletedTaskDirty(fx, 'dirty readme', (p) =>
+      write(p, 'README.md', '# cli-integrate project\n\nworker edit, left uncommitted\n'),
+    )
+    expect(gitOut(t1.checkoutPath, ['rev-parse', 'HEAD']).trim()).toBe(t1.workspace.baseCommit)
+    expect(gitOut(t1.checkoutPath, ['status', '--porcelain']).trim()).toBe('M README.md')
+    expect(fx.store.getWorkspace(t1.workspace.id).headCommit).toBeNull()
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    // The dirty state was committed first, and recorded in the report, the
+    // task workspace row and the event log.
+    expect(report.committed).toHaveLength(1)
+    expect(report.committed[0]?.taskId).toBe(t1.task.id)
+    const commit = report.committed[0]?.commit as string
+    expect(commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(gitOut(t1.checkoutPath, ['log', '-1', '--format=%s']).trim()).toBe(
+      `pluton: task ${t1.task.id} — ${t1.task.title} (committed at integration)`,
+    )
+    expect(gitOut(t1.checkoutPath, ['rev-parse', 'HEAD']).trim()).toBe(commit)
+    expect(gitOut(t1.checkoutPath, ['status', '--porcelain']).trim()).toBe('')
+    expect(fx.store.getWorkspace(t1.workspace.id).headCommit).toBe(commit)
+    const commitEvents = fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })
+    expect(commitEvents).toHaveLength(1)
+    expect(commitEvents[0]?.taskId).toBe(t1.task.id)
+    expect(commitEvents[0]?.payload).toMatchObject({ taskId: t1.task.id, commit })
+
+    // The merge landed the committed change and the checks ran in the checkout.
+    expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
+    expect(gitOut(report.checkout.path, ['log', '--name-only', '--format='])).toContain('README.md')
+    expect(report.checks.map((c) => [c.name, c.status])).toEqual([
+      ['check-pass', 'passed'],
+      ['check-fail', 'failed'],
+    ])
+    expect((report.checks[0]?.outputTail ?? '').toLowerCase()).toContain(
+      `inside:${report.checkout.path}`.toLowerCase(),
+    )
+
+    // Rerun: the checkout is clean now — no new commit, no new event, and the
+    // merge is honestly already integrated.
+    const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(rerun.committed).toEqual([])
+    expect(rerun.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'already_integrated']])
+    expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })).toHaveLength(1)
+  })
+
+  it('does not create an empty commit or an event for a clean checkout', async () => {
+    const fx = makeProject()
+    const t1 = await seedCompletedTask(fx, 'clean one', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
+    const headBefore = gitOut(t1.checkoutPath, ['rev-parse', 'HEAD']).trim()
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    expect(report.committed).toEqual([])
+    expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })).toHaveLength(0)
+    expect(gitOut(t1.checkoutPath, ['rev-parse', 'HEAD']).trim()).toBe(headBefore)
+  })
+
+  it('records a task whose checkout refuses the commit as failed and integrates the rest', async () => {
+    const fx = makeProject()
+    const broken = await seedCompletedTaskDirty(fx, 'unmanaged', (p) => write(p, 'src/x.ts', 'export const x = 1\n'))
+    // Sabotage the marker: commitAll refuses any checkout without it.
+    rmSync(join(broken.checkoutPath, '.git', 'pluton-workspace.json'))
+    const t2 = await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [broken.task.id, t2.task.id] })
+
+    expect(report.committed).toEqual([])
+    const failure = report.failed.find((f) => f.taskId === broken.task.id)
+    expect(failure?.detail).toContain('not a Pluton-managed checkout')
+    expect(report.integrated.map((i) => i.taskId)).toEqual([t2.task.id])
   })
 })
 

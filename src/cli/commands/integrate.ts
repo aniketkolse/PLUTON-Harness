@@ -18,6 +18,8 @@ import { runByRef, taskById } from './status.ts'
  *
  * - the checkout lives at `pluton/integration/<run>` under `.pluton/workspaces/`
  *   and is reused while its workspace row is `active`;
+ * - a dirty (uncommitted) task checkout is committed FIRST (ADR-0009), so the
+ *   verified work actually lands on the task branch before any merge;
  * - every task merge is `fetch` + `merge --no-ff` (the workspace primitives);
  *   a conflict stops the loop and is PRESERVED — Pluton never resets or aborts;
  * - a task whose diff touches `git.protected_paths` is held behind a pending
@@ -51,6 +53,8 @@ export interface IntegrateReport {
     status: 'merged' | 'already_integrated'
     commit: string | null
   }[]
+  /** Task checkouts whose dirty state this invocation committed before merging. */
+  committed: { taskId: string; commit: string }[]
   conflicts: { taskId: string; files: string[] }[]
   blockedProtected: { taskId: string; files: string[]; approvalId: string }[]
   failed: { taskId: string; detail: string }[]
@@ -155,6 +159,7 @@ export async function integrateRun(
     const protectedPatterns = ctx.loaded.config.git.protected_paths
 
     const integrated: IntegrateReport['integrated'] = []
+    const committed: IntegrateReport['committed'] = []
     const conflicts: IntegrateReport['conflicts'] = []
     const blockedProtected: IntegrateReport['blockedProtected'] = []
     const failed: IntegrateReport['failed'] = []
@@ -165,6 +170,42 @@ export async function integrateRun(
       const ws = store.getWorkspaceByTask(task.id)
       if (ws === null) {
         const detail = 'no active checkout is recorded for this task; nothing to integrate'
+        failed.push({ taskId: task.id, detail })
+        store.appendEvent({
+          projectId,
+          runId: runRecord.id,
+          taskId: task.id,
+          type: 'integration.failed',
+          payload: { taskId: task.id, detail },
+        })
+        continue
+      }
+
+      // ADR-0009: all task changes are committed. The supervisor may leave a
+      // verified checkout dirty on purpose (the manager reviews the diff
+      // there), so commit it BEFORE the protected-path diff and the merge —
+      // otherwise the branch head still equals the base commit and the merge
+      // would be a useless `already_integrated`.
+      try {
+        const { commit } = await manager.commitAll(
+          ws.path,
+          `pluton: task ${task.id} — ${task.title} (committed at integration)`,
+        )
+        if (commit !== null) {
+          store.updateWorkspace(ws.id, { headCommit: commit })
+          store.appendEvent({
+            projectId,
+            runId: runRecord.id,
+            taskId: task.id,
+            type: 'integration.task_committed',
+            payload: { taskId: task.id, commit },
+          })
+          committed.push({ taskId: task.id, commit })
+        }
+      } catch (error) {
+        // A checkout that refuses the commit (e.g. not marker-managed) is one
+        // task's failure, not the whole run's: record it and move on.
+        const detail = error instanceof Error ? error.message : String(error)
         failed.push({ taskId: task.id, detail })
         store.appendEvent({
           projectId,
@@ -287,6 +328,7 @@ export async function integrateRun(
       runId: runRecord.id,
       checkout: { id: checkout.id, path: checkout.path, branch: checkout.branch },
       integrated,
+      committed,
       conflicts,
       blockedProtected,
       failed,

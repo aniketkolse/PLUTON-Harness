@@ -797,6 +797,9 @@ program
         ...(opts.task !== undefined && opts.task.length > 0 ? { taskRefs: opts.task } : {}),
       })
       const lines: string[] = [`checkout ${report.checkout.path}  (branch ${report.checkout.branch})`]
+      for (const c of report.committed) {
+        lines.push(`task ${c.taskId}  → committed dirty changes ${c.commit.slice(0, 12)} (task checkout)`)
+      }
       for (const t of report.integrated) {
         lines.push(
           t.status === 'merged'
