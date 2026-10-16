@@ -11,6 +11,7 @@ import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
 import type { PlutonToolBridge, ToolBridgeLimits } from '../../src/tools/bridge.ts'
+import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../../src/verify/runner.ts'
 import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
 
 /**
@@ -419,5 +420,36 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(out.unfinishedTasks).toEqual([])
     expect(world.store.listTasks(world.runId)).toHaveLength(0)
     expect(world.store.getRun(world.runId).finalSummary).toBe('mock:failure')
+  })
+
+  it('verification closes the run through the gate (supervisor → verify → completed)', async () => {
+    const world = makeWorld({
+      verificationConfigured: true,
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'V2', assigneeMuseId: 'worker-a' })
+      },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+    expect(out.state).toBe('verifying')
+
+    const task = world.store.listTasks(world.runId)[0]
+    const report = await runVerificationChecks({
+      store: world.store,
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: task?.id as string,
+      checks: [{ name: 'ok', command: [process.execPath, '-e', 'process.exit(0)'] }],
+      cwd: world.dir,
+      workspaceId: null,
+      artifactsDir: join(world.dir, '.pluton', 'state', 'artifacts'),
+    })
+    expect(report.allPassed).toBe(true)
+    const verdict = applyTaskVerificationVerdict(world.store, task?.id as string)
+    expect(verdict.state).toBe('completed')
+    const runVerdict = finalizeRunVerdict(world.store, world.runId)
+    expect(runVerdict).toMatchObject({ state: 'completed', outcome: 'success' })
+    expect(world.store.getRun(world.runId).state).toBe('completed')
   })
 })

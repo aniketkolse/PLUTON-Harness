@@ -28,6 +28,7 @@ import {
   type TaskEdgeRecord,
   type TaskRecord,
   type TerminalRecord,
+  type VerificationCheckRecord,
   type WorkspaceRecord,
 } from '../domain/models.ts'
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
@@ -174,6 +175,17 @@ export interface NewWorkspaceSpec {
   path: string
   branch: string
   baseCommit: string
+}
+
+export interface NewVerificationCheckSpec {
+  projectId: string
+  runId: string
+  taskId: string | null
+  name: string
+  /** argv array — never a shell string. */
+  command: string[]
+  cwd: string | null
+  workspaceId: string | null
 }
 
 export interface UpsertSandboxSpec {
@@ -780,6 +792,100 @@ export class Store {
     return rows.map(rowToApproval)
   }
 
+  // -- verification checks (Phase 7 gates) -----------------------------------
+
+  /** Record a pending verification check. Executing it is the caller's job. */
+  createVerificationCheck(spec: NewVerificationCheckSpec): VerificationCheckRecord {
+    const id = newId('verification')
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO verification_checks (id, project_id, run_id, task_id, name, command_json, cwd, workspace_id,
+                                          status, exit_code, stdout_artifact, stderr_artifact, duration_ms,
+                                          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        id,
+        spec.projectId,
+        spec.runId,
+        spec.taskId,
+        spec.name,
+        stringifyJson(spec.command),
+        spec.cwd,
+        spec.workspaceId,
+        now,
+        now,
+      )
+    return this.getVerificationCheck(id)
+  }
+
+  getVerificationCheck(id: string): VerificationCheckRecord {
+    const check = this.getVerificationCheckOrNull(id)
+    if (!check) throw new NotFoundError('verification check', id)
+    return check
+  }
+
+  getVerificationCheckOrNull(id: string): VerificationCheckRecord | null {
+    const row = this.db.prepare('SELECT * FROM verification_checks WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToVerificationCheck(row) : null
+  }
+
+  listVerificationChecks(runId: string): VerificationCheckRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM verification_checks WHERE run_id = ? ORDER BY created_at ASC, id ASC')
+      .all(runId) as Row[]
+    return rows.map(rowToVerificationCheck)
+  }
+
+  listVerificationChecksByTask(taskId: string): VerificationCheckRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM verification_checks WHERE task_id = ? ORDER BY created_at ASC, id ASC')
+      .all(taskId) as Row[]
+    return rows.map(rowToVerificationCheck)
+  }
+
+  /**
+   * Record a check's outcome. Only `pending` may move to a final status; a
+   * re-set of the same status is an idempotent no-op, and a decided check is
+   * final — the evidence must not be rewritten.
+   */
+  setVerificationCheckResult(
+    id: string,
+    patch: {
+      status: VerificationCheckRecord['status']
+      exitCode?: number | null
+      stdoutArtifact?: string | null
+      stderrArtifact?: string | null
+      durationMs?: number | null
+    },
+  ): VerificationCheckRecord {
+    const check = this.getVerificationCheck(id)
+    if (check.status === patch.status) return check
+    if (check.status !== 'pending') {
+      throw new ValidationError(
+        `verification check ${id} is already ${check.status}; ${check.status} -> ${patch.status} is not a legal transition`,
+      )
+    }
+    const now = nowIso()
+    this.db
+      .prepare(
+        `UPDATE verification_checks SET status = ?, exit_code = ?, stdout_artifact = ?, stderr_artifact = ?,
+                                        duration_ms = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.status,
+        patch.exitCode ?? null,
+        patch.stdoutArtifact ?? null,
+        patch.stderrArtifact ?? null,
+        patch.durationMs ?? null,
+        now,
+        id,
+      )
+    return this.getVerificationCheck(id)
+  }
+
   /**
    * Decide an approval. Only `pending` may move to `approved|denied|expired`;
    * a decided approval is final. Re-setting the current status is an idempotent
@@ -1109,6 +1215,32 @@ function rowToApproval(r: Row): ApprovalRecord {
     decidedAt: nstr(r, 'decided_at'),
     expiresAt: nstr(r, 'expires_at'),
     createdAt: str(r, 'created_at'),
+  }
+}
+
+function rowToVerificationCheck(r: Row): VerificationCheckRecord {
+  const status = str(r, 'status')
+  if (status !== 'pending' && status !== 'passed' && status !== 'failed' && status !== 'skipped') {
+    throw new InternalError(`db row: invalid verification status '${status}'`)
+  }
+  const exitCode = r['exit_code']
+  const durationMs = r['duration_ms']
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    runId: str(r, 'run_id'),
+    taskId: nstr(r, 'task_id'),
+    name: str(r, 'name'),
+    command: parseJsonText<string[]>(nstr(r, 'command_json'), []),
+    cwd: nstr(r, 'cwd'),
+    workspaceId: nstr(r, 'workspace_id'),
+    status,
+    exitCode: exitCode === null || exitCode === undefined ? null : num(r, 'exit_code'),
+    stdoutArtifact: nstr(r, 'stdout_artifact'),
+    stderrArtifact: nstr(r, 'stderr_artifact'),
+    durationMs: durationMs === null || durationMs === undefined ? null : num(r, 'duration_ms'),
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
   }
 }
 

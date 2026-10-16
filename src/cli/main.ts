@@ -8,9 +8,12 @@
  * - Commands that are not implemented yet are registered as explicit stubs so
  *   scripts fail with a stable `not_implemented` code instead of a usage error.
  */
+import { join } from 'node:path'
 import { Command } from 'commander'
-import { InternalError, NotImplementedError, PlutonError, ValidationError } from '../domain/errors.ts'
+import { ConfigError, InternalError, NotImplementedError, PlutonError, ValidationError } from '../domain/errors.ts'
+import { stateDir } from '../config/load.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
+import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { requireProject } from './context.ts'
@@ -558,13 +561,108 @@ mcpCmd
   })
 
 // ---------------------------------------------------------------------------
+// verify — run the project verification checks and record the verdict
+// (Phase 7: the only path from `verifying` to `completed`)
+// ---------------------------------------------------------------------------
+
+program
+  .command('verify')
+  .description('run the project verification checks for a run and record the verdict (verifying → completed|failed)')
+  .requiredOption('--run <id>', 'run id (full id or unique suffix)')
+  .option('--task <id>', 'verify exactly one task (must be in verifying)')
+  .action(async (opts: { run: string; task?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { store, projectId } = bootstrapStore(ctx.loaded)
+      try {
+        const run = runByRef(store, opts.run)
+        const checks = ctx.loaded.config.project.verification
+        if (checks.length === 0) {
+          throw new ConfigError(
+            'no verification checks are configured under project.verification in pluton.yaml; refusing to verify without evidence',
+          )
+        }
+        const targets =
+          opts.task !== undefined
+            ? [taskById(store, opts.task)]
+            : store.listTasks(run.id).filter((t) => t.state === 'verifying')
+        if (targets.length === 0) {
+          throw new ValidationError(`run ${run.id} has no tasks in 'verifying'; nothing to verify`)
+        }
+        const artifactsDir = join(stateDir(ctx.loaded.rootDir), 'artifacts')
+        const taskReports: {
+          taskId: string
+          title: string
+          verdict: 'completed' | 'failed'
+          summary: string
+          checks: { name: string; status: string; exitCode: number | null; note: string | null }[]
+        }[] = []
+        for (const task of targets) {
+          if (task.state !== 'verifying') {
+            throw new ValidationError(`task ${task.id} is '${task.state}'; only a task in 'verifying' can be verified`)
+          }
+          const ws = store.getWorkspaceByTask(task.id)
+          const report = await runVerificationChecks({
+            store,
+            projectId,
+            runId: run.id,
+            taskId: task.id,
+            checks,
+            cwd: ws !== null ? ws.path : ctx.loaded.rootDir,
+            workspaceId: ws !== null ? ws.id : null,
+            artifactsDir,
+          })
+          const verdict = applyTaskVerificationVerdict(store, task.id)
+          taskReports.push({
+            taskId: task.id,
+            title: task.title,
+            verdict: verdict.state,
+            summary: verdict.summary,
+            checks: report.results.map((r) => ({
+              name: r.name,
+              status: r.status,
+              exitCode: r.exitCode,
+              note: r.note,
+            })),
+          })
+        }
+        const runVerdict = finalizeRunVerdict(store, run.id)
+        const finalRun = store.getRun(run.id)
+        const human: string[] = []
+        for (const tr of taskReports) {
+          human.push(`task ${tr.taskId}  ${tr.title}  → ${tr.verdict}  (${tr.summary})`)
+          for (const c of tr.checks) {
+            human.push(
+              `  [${c.status}] ${c.name}` +
+                (c.exitCode !== null ? ` (exit ${String(c.exitCode)})` : '') +
+                (c.note !== null ? ` — ${c.note}` : ''),
+            )
+          }
+        }
+        human.push(
+          runVerdict !== null
+            ? `run ${finalRun.id}  → ${finalRun.state}`
+            : `run ${finalRun.id}  → ${finalRun.state} (tasks still awaiting verification)`,
+        )
+        emitOk(io, json, human.join('\n'), {
+          run: { id: finalRun.id, state: finalRun.state },
+          tasks: taskReports,
+          runVerdict,
+        })
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+// ---------------------------------------------------------------------------
 // Planned commands — explicit, stable `not_implemented` failures.
 // ---------------------------------------------------------------------------
 
 for (const [name, planned] of [
   ['run', 'start an orchestration run (Manager-driven team execution)'],
   ['attach', 'attach to a Muse terminal (tmux in its container)'],
-  ['verify', 'run verification checks for a run'],
   ['integrate', 'integrate verified task branches through the integration checkout'],
 ] as const) {
   program
