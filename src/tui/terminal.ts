@@ -66,6 +66,16 @@ export class TerminalHost implements ChatIo {
   }
 
   redraw(frame: { lines: string[]; cursor: { row: number; col: number } }): void {
+    if (frame.lines.length === 0) {
+      if (this.throttleTimer !== null) {
+        clearTimeout(this.throttleTimer)
+        this.throttleTimer = null
+      }
+      this.pendingFrame = null
+      this.renderFrame(frame)
+      return
+    }
+
     this.pendingFrame = frame
     if (this.throttleTimer !== null) {
       return
