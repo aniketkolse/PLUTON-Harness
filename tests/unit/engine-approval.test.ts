@@ -25,6 +25,12 @@ describe('engineSessionMode', () => {
     expect(engineSessionMode('opencode', 'autonomous-bounded')).toBeUndefined()
     expect(engineSessionMode('mock', 'ask-always')).toBeUndefined()
   })
+
+  it('refuses an unrecognised mode instead of silently reverting to the fail-closed default', () => {
+    // Muse rows are read from the store with a blind cast: a hand-edited or
+    // legacy `approval_mode` must fail loudly at adapter construction.
+    expect(() => engineSessionMode('qwen', 'hand-edited' as never)).toThrow(/no session-mode mapping/)
+  })
 })
 
 describe('engineApprovalPolicy', () => {
@@ -49,5 +55,23 @@ describe('engineAdapterForMuse', () => {
 
   it('rejects unknown engine kinds loudly (never silently falls back)', () => {
     expect(() => engineAdapterForMuse({ engineKind: 'nope', approvalMode: 'ask-always' })).toThrow(/unknown engine/)
+  })
+
+  it('builds qwen adapters whose effective session settings match the mapping (the smoke regression)', () => {
+    // The smoke bug was NOT a wrong table entry: the table was never applied.
+    // These assertions read the adapter the factory actually produced, so a
+    // revert to `getEngineAdapter('qwen')` (bare defaults) fails here.
+    const bounded = engineAdapterForMuse({ engineKind: 'qwen', approvalMode: 'autonomous-bounded' })
+    expect((bounded as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'auto', policy: 'allow_once' })
+
+    const sensitive = engineAdapterForMuse({ engineKind: 'qwen', approvalMode: 'ask-for-sensitive-actions' })
+    expect((sensitive as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'auto', policy: 'deny' })
+
+    const always = engineAdapterForMuse({ engineKind: 'qwen', approvalMode: 'ask-always' })
+    expect((always as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'default', policy: 'deny' })
+  })
+
+  it('documents the fail-closed fallback an unwired adapter would run with', () => {
+    expect(new QwenEngineAdapter().sessionApproval).toEqual({ mode: 'default', policy: 'deny' })
   })
 })

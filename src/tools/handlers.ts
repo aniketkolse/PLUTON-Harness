@@ -306,18 +306,28 @@ export const TOOL_HANDLERS: ToolHandlers = {
       result: t.result,
       failure: t.failure,
     })
-    const report = (timedOut: boolean, aborted: boolean, current: TaskRecord[]): JsonValue => ({
-      timedOut,
-      ...(aborted ? { aborted: true } : {}),
-      ...(timedOut ? { pending: current.filter((t) => !settled(t)).map(summarizeTask) } : {}),
+    // `reason` distinguishes an honest deadline from a cancelled wait: an
+    // aborted wait did NOT elapse its deadline (`timedOut: false`), and callers
+    // must not read it as either "settled" or "timed out".
+    const report = (reason: 'timeout' | 'aborted', current: TaskRecord[]): JsonValue => ({
+      timedOut: reason === 'timeout',
+      ...(reason === 'aborted' ? { aborted: true } : {}),
+      reason,
+      pending: current.filter((t) => !settled(t)).map(summarizeTask),
       tasks: current.filter((t) => settled(t)).map(withResult),
     })
     for (;;) {
       const current = a.taskIds.map((id) => env.store.getTask(id))
-      if (current.every(settled)) return report(false, false, current)
-      if (env.signal?.aborted === true) return report(true, true, current)
+      if (current.every(settled)) {
+        return {
+          timedOut: false,
+          reason: 'settled',
+          tasks: current.filter((t) => settled(t)).map(withResult),
+        }
+      }
+      if (env.signal?.aborted === true) return report('aborted', current)
       const remaining = deadline - env.now()
-      if (remaining <= 0) return report(true, false, current)
+      if (remaining <= 0) return report('timeout', current)
       // Event-driven: the runtime notifies the registry on settling transitions
       // (terminal or awaiting verification); a wakeup (or a heartbeat slice)
       // simply makes us re-read durable task state. The slice keeps a

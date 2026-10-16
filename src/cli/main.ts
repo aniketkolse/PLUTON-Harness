@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { ConfigError, InternalError, NotImplementedError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { stateDir } from '../config/load.ts'
+import { TERMINAL_TASK_STATES } from '../domain/state.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { PLUTON_VERSION } from '../version.ts'
@@ -630,6 +631,16 @@ program
         }
         const runVerdict = finalizeRunVerdict(store, run.id)
         const finalRun = store.getRun(run.id)
+        // A run can stay open with tasks that are NOT awaiting verification:
+        // dependents are only admissible once their dependency is `completed`,
+        // so they sit `queued` behind an unverified (or failed) dependency and
+        // `pluton verify` cannot close the run. Name them honestly instead of
+        // claiming everything awaits verification.
+        const remaining = store.listTasks(run.id)
+        const stillVerifying = remaining.filter((t) => t.state === 'verifying')
+        const blockedTasks = remaining.filter(
+          (t) => !TERMINAL_TASK_STATES.has(t.state) && t.state !== 'verifying',
+        )
         const human: string[] = []
         for (const tr of taskReports) {
           human.push(`task ${tr.taskId}  ${tr.title}  → ${tr.verdict}  (${tr.summary})`)
@@ -644,12 +655,24 @@ program
         human.push(
           runVerdict !== null
             ? `run ${finalRun.id}  → ${finalRun.state}`
-            : `run ${finalRun.id}  → ${finalRun.state} (tasks still awaiting verification)`,
+            : `run ${finalRun.id}  → ${finalRun.state} (not closed: ${
+                [
+                  ...(stillVerifying.length > 0 ? [`${stillVerifying.length} task(s) awaiting verification`] : []),
+                  ...(blockedTasks.length > 0
+                    ? [
+                        `blocked behind unverified dependencies: ${blockedTasks
+                          .map((t) => `${t.id} (${t.state})`)
+                          .join(', ')}`,
+                      ]
+                    : []),
+                ].join('; ') || 'no run verdict recorded'
+              })`,
         )
         emitOk(io, json, human.join('\n'), {
           run: { id: finalRun.id, state: finalRun.state },
           tasks: taskReports,
           runVerdict,
+          ...(blockedTasks.length > 0 ? { blockedTasks: blockedTasks.map((t) => t.id) } : {}),
         })
       } finally {
         store.close()
@@ -694,12 +717,18 @@ program
           `tasks    ${counts || '(none)'}`,
           ...(summary.managerSummary !== null ? [`summary  ${summary.managerSummary}`] : []),
           ...(summary.verificationPending ? [`next: pluton verify --run ${summary.runId}`] : []),
+          ...(summary.blockedTasks.length > 0
+            ? [
+                `note: ${summary.blockedTasks.length} task(s) blocked behind unverified dependencies: ${summary.blockedTasks.join(', ')}`,
+              ]
+            : []),
         ].join('\n')
         emitOk(io, json, human, {
           run: { id: summary.runId, state: summary.state, outcome: summary.outcome },
           taskCounts: summary.taskCounts,
           managerSummary: summary.managerSummary,
           unfinishedTasks: summary.unfinishedTasks,
+          blockedTasks: summary.blockedTasks,
         })
       })
     },

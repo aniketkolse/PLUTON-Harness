@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { InternalError, NotFoundError } from '../domain/errors.ts'
 import type { JsonValue, MuseRecord, TaskRecord } from '../domain/models.ts'
-import { getEngineAdapter } from '../engines/registry.ts'
 import { engineAdapterForMuse } from '../engines/approval.ts'
 import type {
   EngineAdapter,
@@ -77,6 +76,13 @@ export interface RunOutcome {
   taskCounts: Record<string, number>
   /** Tasks left non-terminal when the run finished (e.g. blocked by a failed dep). */
   unfinishedTasks: string[]
+  /**
+   * Non-terminal tasks that are NOT awaiting verification: they cannot progress
+   * because a dependency has not been verified yet. A run in `verifying` with
+   * blocked tasks can never be closed by `pluton verify` — the operator must
+   * decide what to do with the blocked work (Phase-7 follow-up).
+   */
+  blockedTasks: string[]
 }
 
 interface PromptOutcome {
@@ -164,7 +170,12 @@ export class RunSupervisor {
   private readonly runDeadlineMs: number
   private readonly verificationConfigured: boolean
   private readonly loopPollMs: number
-  private readonly adapterFor: (muse: MuseRecord) => EngineAdapter
+  /**
+   * The per-Muse engine factory actually used: the injected seam, or the
+   * approval-aware default ({@link engineAdapterForMuse}). Public so the
+   * default path itself is testable without spawning engines.
+   */
+  readonly adapterFor: (muse: MuseRecord) => EngineAdapter
   private readonly workspaceManager: GitWorkspaceManager | null
   private readonly engineEnv: (muse: MuseRecord) => Record<string, string>
   private readonly mcpServerFor: (muse: MuseRecord, taskId: string | null) => McpServerSpec | null
@@ -223,11 +234,12 @@ export class RunSupervisor {
     return wakeupChannelFor(null, this.runId)
   }
 
-  private appendEvent(type: string, payload: JsonValue, taskId?: string): void {
+  private appendEvent(type: string, payload: JsonValue, taskId?: string, museId?: string): void {
     this.store.appendEvent({
       projectId: this.projectId,
       runId: this.runId,
       ...(taskId !== undefined ? { taskId } : {}),
+      ...(museId !== undefined ? { museId } : {}),
       type,
       payload,
     })
@@ -248,7 +260,11 @@ export class RunSupervisor {
   }
 
   /** Collect one prompt's stream with an honest hard bound. */
-  private async runPrompt(session: EngineSession, prompt: PromptRequest, taskId?: string): Promise<PromptOutcome> {
+  private async runPrompt(
+    session: EngineSession,
+    prompt: PromptRequest,
+    context?: { taskId?: string; museId?: string },
+  ): Promise<PromptOutcome> {
     let result: { outcome: PromptOutcome['outcome']; summary?: string } | null = null
     let errorCode: string | null = null
     let textChars = 0
@@ -273,13 +289,18 @@ export class RunSupervisor {
             errorCode = code
           },
           onApproval: (a) => {
-            // Durable record: an operator reading the run must see that the
-            // engine asked and what Pluton decided (host-mode smoke finding:
-            // denials used to vanish, leaving a "successful" no-op task).
+            // Durable record of an engine permission request and Pluton's
+            // answer (the decision text lives in `description`). Distinct from
+            // `approval.requested`, which records a Muse filing an approval
+            // through the tool bridge: this event is the ENGINE asking and the
+            // host deciding (host-mode smoke finding: denials used to vanish,
+            // leaving a "successful" no-op task). Description is bounded like
+            // every other model-controlled string before it reaches the store.
             this.appendEvent(
-              'approval.requested',
-              { requestId: a.requestId, description: a.description },
-              taskId,
+              'approval.engine_decision',
+              { requestId: a.requestId, description: a.description.slice(0, 1_000) },
+              context?.taskId,
+              context?.museId,
             )
           },
         })
@@ -411,7 +432,11 @@ export class RunSupervisor {
       this.appendEvent('task.started', { museId: muse.id, engine: adapter.kind, workspaceId }, task.id)
 
       const promptText = buildTaskPrompt(task, muse, this.limits.maxBriefChars)
-      const out = await this.runPrompt(session, { text: promptText, timeoutMs: this.defaultTaskTimeoutMs }, task.id)
+      const out = await this.runPrompt(
+        session,
+        { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
+        { taskId: task.id, museId: muse.id },
+      )
       await session.close().catch((e: unknown) => {
         this.diagnostic(`task ${task.id}: session close failed: ${e instanceof Error ? e.message : String(e)}`)
       })
@@ -503,7 +528,7 @@ export class RunSupervisor {
       run.acceptanceCriteria,
       this.limits.maxBriefChars,
     )
-    return this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs })
+    return this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { museId: muse.id })
   }
 
   /**
@@ -555,6 +580,12 @@ export class RunSupervisor {
     const taskCounts: Record<string, number> = {}
     for (const t of tasks) taskCounts[t.state] = (taskCounts[t.state] ?? 0) + 1
     const unfinished = tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)).map((t) => t.id)
+    // Dependents are only admissible once their dependency is `completed`, so
+    // tasks stuck behind unverified dependencies are not awaiting verification
+    // themselves — name them separately or the record overstates the gate.
+    const blocked = tasks
+      .filter((t) => !TERMINAL_TASK_STATES.has(t.state) && t.state !== 'verifying')
+      .map((t) => t.id)
     const anyBad = tasks.some((t) => t.state === 'failed' || t.state === 'unknown_outcome')
     const anyVerifying = tasks.some((t) => t.state === 'verifying')
 
@@ -596,6 +627,7 @@ export class RunSupervisor {
       outcome,
       state: runState,
       taskCounts,
+      ...(blocked.length > 0 ? { blockedTasks: blocked } : {}),
       ...(managerSummary !== null ? { managerSummary } : {}),
       ...(managerError !== null ? { managerError } : {}),
       durationMs: this.now() - startedMs,
@@ -624,6 +656,7 @@ export class RunSupervisor {
       managerSummary,
       taskCounts,
       unfinishedTasks: unfinished,
+      blockedTasks: blocked,
     }
   }
 

@@ -50,6 +50,8 @@ export interface RunSummary {
   taskCounts: Record<string, number>
   managerSummary: string | null
   unfinishedTasks: string[]
+  /** Non-terminal tasks stuck behind unverified dependencies (cannot progress without a verdict). */
+  blockedTasks: string[]
   verificationPending: boolean
 }
 
@@ -95,6 +97,9 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
     taskCounts,
     managerSummary: run.finalSummary,
     unfinishedTasks: tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)).map((t) => t.id),
+    blockedTasks: tasks
+      .filter((t) => !TERMINAL_TASK_STATES.has(t.state) && t.state !== 'verifying')
+      .map((t) => t.id),
     verificationPending: run.state === 'verifying',
   }
 }
@@ -224,6 +229,7 @@ export async function runRun(
         taskCounts: outcome.taskCounts,
         managerSummary: outcome.managerSummary,
         unfinishedTasks: outcome.unfinishedTasks,
+        blockedTasks: outcome.blockedTasks,
         verificationPending: outcome.state === 'verifying',
       }
     } finally {

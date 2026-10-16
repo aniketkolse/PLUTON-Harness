@@ -218,6 +218,17 @@ export class QwenEngineAdapter implements EngineAdapter {
     this.runFn = opts.runFn ?? run
   }
 
+  /**
+   * Effective session-level approval settings (read-only introspection): the
+   * session mode this adapter will request and the policy it answers
+   * permission prompts with — same defaults as the session itself (`default`
+   * mode, `deny` policy). Pinned by the wiring tests so reverting the per-Muse
+   * mapping in `engines/approval.ts` must fail the suite.
+   */
+  get sessionApproval(): { mode: string; policy: QwenApprovalPolicy } {
+    return { mode: this.opts.approvalMode ?? 'default', policy: this.opts.approvalPolicy ?? 'deny' }
+  }
+
   capabilities(): EngineCapabilities {
     return {
       ...defaultCapabilities(),

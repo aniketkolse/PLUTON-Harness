@@ -23,8 +23,11 @@ cycles, duplicate wakeups and hidden team growth are exactly the failure modes t
   availability, model catalogue, team size, permissions) and — when it adds an engine or expands
   capabilities — requires an approval record per policy. Every creation and refusal is an event
   visible in `pluton logs`/`status`. Predefined-team mode can be enforced by config.
-- A child completion wakes its parent **exactly once** (receipt); parents wait event-driven with
-  timeout, not by polling loops.
+- A child *settling* wakes each waiting parent channel **exactly once** (receipt). Settled means a
+  terminal state **or** `verifying`: under a configured verification gate the operator verdict is
+  out-of-process (`pluton verify`), so the awaiting-verification transition is what must wake the
+  manager. Later transitions of the same child are not re-delivered — waiters re-read durable state
+  on every wakeup/heartbeat slice. Parents wait event-driven with timeout, not by polling loops.
 
 ## Consequences
 

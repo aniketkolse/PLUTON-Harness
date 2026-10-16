@@ -132,7 +132,7 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'result.collect',
     mutating: false,
     description:
-      'Wait until every requested task is settled — a terminal state, or `verifying`: the work is done and the operator’s verification gate closes the task later — or the timeout elapses. Settled is not the same as successful: check timedOut, awaitingVerification and the returned states before acting. Event wakeups are in-process; a standalone bridge (e.g. the stdio server) re-reads durable state every runtime heartbeat_seconds instead of waking instantly. Bounded to 600 seconds.',
+      'Wait until every requested task is settled — a terminal state, or `verifying`: the work is done and the operator’s verification gate closes the task later — or the timeout elapses. Settled is not the same as successful: check `reason` (`settled` | `timeout` | `aborted`), timedOut, awaitingVerification and the returned states before acting. `aborted` means the wait was cancelled (shutdown or client disconnect) before the deadline: timedOut stays false and nothing was decided. Event wakeups are in-process; a standalone bridge (e.g. the stdio server) re-reads durable state every runtime heartbeat_seconds instead of waking instantly. Bounded to 600 seconds.',
   },
   'task.get_result': {
     permission: 'result.collect',

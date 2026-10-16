@@ -332,8 +332,10 @@ describe('PlutonToolBridge — task.wait', () => {
     const taskId = await createTask(manager)
     const started = Date.now()
     const res = await manager.call('task.wait', { taskIds: [taskId], timeoutSeconds: 1 })
-    expect((res.data as { timedOut: boolean }).timedOut).toBe(true)
-    expect((res.data as { pending: unknown[] }).pending).toHaveLength(1)
+    const data = res.data as { timedOut: boolean; reason: string; pending: unknown[] }
+    expect(data.timedOut).toBe(true)
+    expect(data.reason).toBe('timeout')
+    expect(data.pending).toHaveLength(1)
     expect(Date.now() - started).toBeGreaterThanOrEqual(900)
   })
 
@@ -407,9 +409,16 @@ describe('PlutonToolBridge — task.wait', () => {
     const started = Date.now()
     ctl.abort()
     const res = await waiting
-    const data = res.data as { timedOut: boolean; aborted: boolean; pending: unknown[]; tasks: unknown[] }
+    const data = res.data as {
+      timedOut: boolean
+      aborted: boolean
+      reason: string
+      pending: unknown[]
+      tasks: unknown[]
+    }
     expect(data.aborted).toBe(true)
-    expect(data.timedOut).toBe(true) // never a silent success
+    expect(data.timedOut).toBe(false) // the deadline did not elapse: cancelled, not timed out
+    expect(data.reason).toBe('aborted')
     expect(data.pending).toHaveLength(1)
     expect(data.tasks).toHaveLength(0)
     expect(Date.now() - started).toBeLessThan(2_000) // returns immediately, does not outlive the store

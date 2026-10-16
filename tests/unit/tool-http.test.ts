@@ -131,9 +131,12 @@ describe('ToolHttpServer', () => {
   it('stop() aborts in-flight tool calls and drains them before resolving', async () => {
     // Regression pin (host-mode smoke, 2026-10-16): a pending task.wait used to
     // outlive the HTTP server and touch the closed store ("database is not
-    // open"). Shutdown must abort the call signal, and stop() must not resolve
-    // until the handlers observing it have returned.
+    // open"). Two properties, both asserted: shutdown must abort the call
+    // signal, AND stop() must not resolve until the handler has returned —
+    // this stub deliberately ignores the abort, so only a real bounded drain
+    // keeps store.close() behind the handler.
     let observedAbort = false
+    let handlerReturnedAt = 0
     let signalCallStarted: () => void = () => {}
     const callStarted = new Promise<void>((resolve) => {
       signalCallStarted = resolve
@@ -142,18 +145,17 @@ describe('ToolHttpServer', () => {
       listTools: (): McpToolInfo[] => [{ name: 'slow', description: 'slow', inputSchema: { type: 'object' } }],
       call: async (name: string, _args: unknown, opts?: { signal?: AbortSignal }): Promise<McpToolCallResult> => {
         signalCallStarted()
+        opts?.signal?.addEventListener(
+          'abort',
+          () => {
+            observedAbort = true
+          },
+          { once: true },
+        )
         await new Promise<void>((resolve) => {
-          const fallback = setTimeout(resolve, 30_000)
-          opts?.signal?.addEventListener(
-            'abort',
-            () => {
-              observedAbort = true
-              clearTimeout(fallback)
-              resolve()
-            },
-            { once: true },
-          )
+          setTimeout(resolve, 200) // ignores the abort: pins the drain, not just the signal
         })
+        handlerReturnedAt = Date.now()
         return { ok: true, data: { name } }
       },
     }
@@ -172,8 +174,11 @@ describe('ToolHttpServer', () => {
     await callStarted
     const started = Date.now()
     await server.stop()
-    expect(observedAbort).toBe(true)
-    expect(Date.now() - started).toBeLessThan(4_000) // drain is bounded, not the 30 s fallback
+    expect(observedAbort).toBe(true) // the signal fired even though the handler ignored it
+    expect(handlerReturnedAt).toBeGreaterThan(0)
+    expect(Date.now()).toBeGreaterThanOrEqual(handlerReturnedAt) // stop() resolved after the handler returned
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150) // it really waited for the 200 ms handler
+    expect(Date.now() - started).toBeLessThan(4_000) // bounded by the drain grace, not the 30 s handler fallback
     await callPromise
   })
 })

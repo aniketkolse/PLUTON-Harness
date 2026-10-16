@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { PERMISSIONS } from '../../src/domain/permissions.ts'
 import type { MuseRecord } from '../../src/domain/models.ts'
 import { MockEngineAdapter, type MockScriptStep } from '../../src/engines/mock/adapter.ts'
+import { QwenEngineAdapter } from '../../src/engines/qwen/adapter.ts'
+import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import { RunSupervisor } from '../../src/orchestrator/supervisor.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
@@ -25,6 +27,9 @@ import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
+
+// The default-adapter test below resolves non-qwen kinds through the registry.
+registerBuiltinEngines()
 
 afterEach(() => {
   for (const db of openDbs.splice(0)) {
@@ -66,6 +71,8 @@ interface MakeWorldOptions {
   verificationConfigured?: boolean
   maxConcurrentWorkers?: number
   defaultTaskTimeoutMs?: number
+  /** Skip the injected adapterFor seam: exercises the supervisor's own default factory. */
+  useDefaultAdapters?: boolean
 }
 
 const WORKER_PERMISSIONS = ['task.delegate', 'task.inspect', 'result.collect', 'diff.inspect']
@@ -201,11 +208,15 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
     runDeadlineMs: 20_000,
     verificationConfigured: opts.verificationConfigured ?? false,
     loopPollMs: 20,
-    adapterFor: (muse: MuseRecord) => {
-      const adapter = adapters.get(muse.id)
-      if (!adapter) throw new Error(`no mock adapter for muse ${muse.id}`)
-      return adapter
-    },
+    ...(opts.useDefaultAdapters === true
+      ? {}
+      : {
+          adapterFor: (muse: MuseRecord) => {
+            const adapter = adapters.get(muse.id)
+            if (!adapter) throw new Error(`no mock adapter for muse ${muse.id}`)
+            return adapter
+          },
+        }),
     workspaceManager: new GitWorkspaceManager({ workspacesRoot }),
     diagnostic: () => {},
   })
@@ -459,13 +470,40 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     await world.settleTools()
 
     const row = world.store.db
-      .prepare("SELECT task_id, payload_json FROM events WHERE run_id = ? AND type = 'approval.requested'")
-      .get(world.runId) as { task_id: string | null; payload_json: string } | undefined
+      .prepare(
+        "SELECT task_id, muse_id, payload_json FROM events WHERE run_id = ? AND type = 'approval.engine_decision'",
+      )
+      .get(world.runId) as { task_id: string | null; muse_id: string | null; payload_json: string } | undefined
     expect(row?.task_id).toBe(created[0])
+    expect(row?.muse_id).toBe('worker-a')
     expect(JSON.parse(row?.payload_json as string)).toMatchObject({
       requestId: 'req-1',
       description: 'edit denied (approvalPolicy=deny)',
     })
+  })
+
+  it('the default per-Muse factory routes through the approval-aware wiring (no injected seam)', () => {
+    // Pin for the smoke regression: reverting `adapterFor`'s default to a bare
+    // registry lookup must fail this test, not just the unit mapping tests.
+    const world = makeWorld({ useDefaultAdapters: true })
+
+    const bounded = world.supervisor.adapterFor({
+      engineKind: 'qwen',
+      approvalMode: 'autonomous-bounded',
+    } as unknown as MuseRecord)
+    expect(bounded).toBeInstanceOf(QwenEngineAdapter)
+    expect((bounded as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'auto', policy: 'allow_once' })
+
+    const askAlways = world.supervisor.adapterFor({
+      engineKind: 'qwen',
+      approvalMode: 'ask-always',
+    } as unknown as MuseRecord)
+    expect((askAlways as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'default', policy: 'deny' })
+
+    // Non-qwen kinds still resolve through the engine registry.
+    expect(
+      world.supervisor.adapterFor({ engineKind: 'mock', approvalMode: 'ask-always' } as unknown as MuseRecord),
+    ).toBeInstanceOf(MockEngineAdapter)
   })
 
   it('fails the run when the manager itself fails, without inventing tasks', async () => {

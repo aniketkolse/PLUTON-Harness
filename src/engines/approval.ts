@@ -1,3 +1,4 @@
+import { ValidationError } from '../domain/errors.ts'
 import type { ApprovalMode } from '../domain/models.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { QwenEngineAdapter, type QwenApprovalPolicy } from './qwen/adapter.ts'
@@ -27,11 +28,13 @@ import { getEngineAdapter } from './registry.ts'
  *   isolated checkout, budgets and the verification gate, not by per-action
  *   prompts.
  * - `ask-for-sensitive-actions` → `auto` + deny: safe actions pass without a
- *   prompt; sensitive ones are denied and surfaced as `approval.requested`
+ *   prompt; sensitive ones are denied and surfaced as `approval.engine_decision`
  *   run events until an operator channel exists.
- * - `ask-always` → `default` + deny: every edit/shell asks and is therefore
- *   denied fail-closed; such a Muse stalls honestly instead of acting without
- *   approval.
+ * - `ask-always` → `default` + deny: every edit/shell asks and is denied
+ *   fail-closed. A denial does not stall the turn — the engine ends it having
+ *   done nothing, so the task can still record a syntactically "successful"
+ *   no-op; only `approval.engine_decision` events (and an empty diff) show why.
+ *   Keep `ask-always` off until Phase 8 provides an operator channel.
  */
 export function engineSessionMode(engineKind: string, approvalMode: ApprovalMode): string | undefined {
   if (engineKind !== 'qwen') return undefined // engines without a mode select keep their own default
@@ -41,6 +44,15 @@ export function engineSessionMode(engineKind: string, approvalMode: ApprovalMode
       return 'auto'
     case 'ask-always':
       return 'default'
+    default:
+      // Unreachable through parsed config (the schema enum validates), but Muse
+      // rows are read from the store with a blind cast: an unrecognised stored
+      // mode must fail loudly at construction instead of silently falling back
+      // to fail-closed `default` — the no-op "success" shape this wiring
+      // exists to prevent.
+      throw new ValidationError(
+        `qwen has no session-mode mapping for approval mode '${String(approvalMode as string)}'`,
+      )
   }
 }
 

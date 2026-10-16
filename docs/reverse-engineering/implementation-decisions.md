@@ -53,7 +53,7 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 
 - **Idea:** a completed child produces exactly one wake receipt for its parent, and reports are latched once.
 - **Source:** OpenMausBot (`omb-rt`: `server/runtime/runtime.ts:589-609, 626-648`).
-- **Pluton:** "a completed child produces exactly one wakeup receipt for its parent; parents consume child results before continuing" (ADR-0006); restated for delegation in ADR-0007 ("a child completion wakes its parent exactly once").
+- **Pluton:** "a completed child produces exactly one wakeup receipt for its parent; parents consume child results before continuing" (ADR-0006); restated for delegation in ADR-0007 ("a child settling — terminal, or awaiting verification under a gate — wakes each parent channel exactly once; later transitions of the same child are not re-delivered — waiters re-read durable state per slice").
 - **Acceptance test:** complete a child task; assert exactly one wake receipt and exactly one parent activation; replaying the child completion event produces no second wake. **Status:** decided, not yet implemented.
 
 ### A6. Typed refusals, never thrown into a turn

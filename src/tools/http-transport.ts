@@ -146,12 +146,19 @@ export class ToolHttpServer {
     this.boundPort = null
     // 2. Drain in-flight handlers (bounded) so store.close() is safe.
     if (this.inFlight.size > 0) {
-      await Promise.race([
-        Promise.allSettled([...this.inFlight]),
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, DRAIN_GRACE_MS)
-        }),
-      ])
+      let graceTimer: ReturnType<typeof setTimeout> | null = null
+      try {
+        await Promise.race([
+          Promise.allSettled([...this.inFlight]),
+          new Promise<void>((resolve) => {
+            graceTimer = setTimeout(resolve, DRAIN_GRACE_MS)
+          }),
+        ])
+      } finally {
+        // The race resolves early when the handlers finish first; the pending
+        // grace timer must not hold the event loop (or a test worker) alive.
+        if (graceTimer !== null) clearTimeout(graceTimer)
+      }
     }
   }
 
