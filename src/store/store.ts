@@ -14,8 +14,14 @@ import {
 } from '../domain/state.ts'
 import {
   APPROVAL_STATUSES,
+  CHAT_MESSAGE_ROLES,
+  CHAT_SESSION_STATES,
   type ApprovalRecord,
   type ApprovalStatus,
+  type ChatMessageRecord,
+  type ChatMessageRole,
+  type ChatSessionRecord,
+  type ChatSessionState,
   type EventRecord,
   type JsonValue,
   type MuseRecord,
@@ -221,6 +227,9 @@ export interface NewApprovalSpec {
 }
 
 const DEFAULT_MAX_EVENT_CHARS = 8_000
+
+/** Hard cap for one persisted chat message; the tail is replaced by a marker. */
+export const MAX_CHAT_MESSAGE_CHARS = 32_000
 
 // ---------------------------------------------------------------------------
 // Store
@@ -1015,6 +1024,133 @@ export class Store {
     return rows.map(rowToEvent)
   }
 
+  // -- chat (operator conversation, ADR-0012) --------------------------------
+
+  createChatSession(spec: { projectId: string; museId: string; title?: string | null }): ChatSessionRecord {
+    const id = newId('chat')
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO chat_sessions (id, project_id, muse_id, title, state, native_session_id, resume_token,
+                                    engine_session_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(id, spec.projectId, spec.museId, spec.title ?? null, now, now)
+    return this.getChatSession(id)
+  }
+
+  getChatSession(id: string): ChatSessionRecord {
+    const session = this.getChatSessionOrNull(id)
+    if (!session) throw new NotFoundError('chat session', id)
+    return session
+  }
+
+  getChatSessionOrNull(id: string): ChatSessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToChatSession(row) : null
+  }
+
+  /** Patch semantics: `undefined` leaves a field alone, `null` clears it. */
+  updateChatSession(
+    id: string,
+    patch: {
+      title?: string | null
+      state?: ChatSessionState
+      nativeSessionId?: string | null
+      resumeToken?: string | null
+      engineSessionId?: string | null
+    },
+  ): ChatSessionRecord {
+    this.getChatSession(id) // NotFoundError before any write
+    const sets: string[] = []
+    const values: Array<string | null> = []
+    if (patch.title !== undefined) {
+      sets.push('title = ?')
+      values.push(patch.title)
+    }
+    if (patch.state !== undefined) {
+      sets.push('state = ?')
+      values.push(patch.state)
+    }
+    if (patch.nativeSessionId !== undefined) {
+      sets.push('native_session_id = ?')
+      values.push(patch.nativeSessionId)
+    }
+    if (patch.resumeToken !== undefined) {
+      sets.push('resume_token = ?')
+      values.push(patch.resumeToken)
+    }
+    if (patch.engineSessionId !== undefined) {
+      sets.push('engine_session_id = ?')
+      values.push(patch.engineSessionId)
+    }
+    sets.push('updated_at = ?')
+    values.push(nowIso())
+    this.db.prepare(`UPDATE chat_sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values, id)
+    return this.getChatSession(id)
+  }
+
+  /** Newest session for (project, muse) by updated_at (ties broken by id DESC); null when none. */
+  getLatestChatSession(projectId: string, museId: string): ChatSessionRecord | null {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM chat_sessions WHERE project_id = ? AND muse_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1',
+      )
+      .get(projectId, museId) as Row | undefined
+    return row ? rowToChatSession(row) : null
+  }
+
+  /**
+   * Append one message; the seq is computed and inserted inside one
+   * transaction so two appends in the same tick stay monotonic. Text over
+   * `MAX_CHAT_MESSAGE_CHARS` is cut and the marker records how much was
+   * dropped (`meta.truncatedChars`). Appending bumps the session's updated_at.
+   */
+  appendChatMessage(spec: {
+    sessionId: string
+    role: ChatMessageRole
+    text: string
+    meta?: JsonValue
+  }): ChatMessageRecord {
+    this.getChatSession(spec.sessionId) // NotFoundError before any write
+    const now = nowIso()
+    let text = spec.text
+    let meta: JsonValue = spec.meta ?? {}
+    if (text.length > MAX_CHAT_MESSAGE_CHARS) {
+      const truncatedChars = text.length - MAX_CHAT_MESSAGE_CHARS
+      text = `${text.slice(0, MAX_CHAT_MESSAGE_CHARS)}\n… [truncated ${truncatedChars} chars]`
+      const base = meta !== null && typeof meta === 'object' && !Array.isArray(meta) ? meta : {}
+      meta = { ...base, truncatedChars }
+    }
+    const id = newId('msg')
+    return withTx(this.db, () => {
+      const next = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM chat_messages WHERE session_id = ?')
+        .get(spec.sessionId) as Row
+      const seq = num(next, 'seq')
+      this.db
+        .prepare(
+          'INSERT INTO chat_messages (id, session_id, seq, role, text, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(id, spec.sessionId, seq, spec.role, text, stringifyJson(meta), now)
+      this.db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(now, spec.sessionId)
+      const saved = this.db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(id) as Row | undefined
+      if (!saved) throw new InternalError('chat message insert disappeared')
+      return rowToChatMessage(saved)
+    })
+  }
+
+  /** Newest `limit` messages of a session, returned in seq ASC order (default limit 1000). */
+  listChatMessages(sessionId: string, opts: { limit?: number } = {}): ChatMessageRecord[] {
+    const limit = opts.limit ?? 1000
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM (SELECT * FROM chat_messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC',
+      )
+      .all(sessionId, limit) as Row[]
+    return rows.map(rowToChatMessage)
+  }
+
   // -- receipts (idempotency core, §5) ---------------------------------------
 
   getReceipt(id: string): RequestReceiptRecord | null {
@@ -1313,6 +1449,41 @@ function rowToEvent(r: Row): EventRecord {
     museId: nstr(r, 'muse_id'),
     type: str(r, 'type'),
     payload: parseJsonText<JsonValue>(nstr(r, 'payload_json'), {}),
+    createdAt: str(r, 'created_at'),
+  }
+}
+
+function rowToChatSession(r: Row): ChatSessionRecord {
+  const state = str(r, 'state')
+  if (!(CHAT_SESSION_STATES as readonly string[]).includes(state)) {
+    throw new InternalError(`db row: invalid chat session state '${state}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    museId: str(r, 'muse_id'),
+    title: nstr(r, 'title'),
+    state: state as ChatSessionState,
+    nativeSessionId: nstr(r, 'native_session_id'),
+    resumeToken: nstr(r, 'resume_token'),
+    engineSessionId: nstr(r, 'engine_session_id'),
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
+  }
+}
+
+function rowToChatMessage(r: Row): ChatMessageRecord {
+  const role = str(r, 'role')
+  if (!(CHAT_MESSAGE_ROLES as readonly string[]).includes(role)) {
+    throw new InternalError(`db row: invalid chat message role '${role}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    sessionId: str(r, 'session_id'),
+    seq: num(r, 'seq'),
+    role: role as ChatMessageRole,
+    text: str(r, 'text'),
+    meta: parseJsonText<JsonValue>(nstr(r, 'meta_json'), {}),
     createdAt: str(r, 'created_at'),
   }
 }

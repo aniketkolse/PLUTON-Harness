@@ -227,6 +227,35 @@ export const MIGRATIONS: Migration[] = [
       `CREATE UNIQUE INDEX idx_terminals_project_muse ON terminals(project_id, IFNULL(muse_id, ''))`,
     ],
   },
+  {
+    version: 3,
+    name: 'chat-sessions',
+    statements: [
+      `CREATE TABLE chat_sessions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        muse_id TEXT NOT NULL REFERENCES muses(id),
+        title TEXT,
+        state TEXT NOT NULL,
+        native_session_id TEXT,
+        resume_token TEXT,
+        engine_session_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_chat_sessions_project ON chat_sessions(project_id, updated_at)`,
+      `CREATE TABLE chat_messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id),
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        meta_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE UNIQUE INDEX idx_chat_messages_session_seq ON chat_messages(session_id, seq)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

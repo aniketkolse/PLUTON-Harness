@@ -247,3 +247,36 @@ export interface VerificationCheckRecord {
   createdAt: string
   updatedAt: string
 }
+
+export const CHAT_SESSION_STATES = ['active', 'closed'] as const
+export type ChatSessionState = (typeof CHAT_SESSION_STATES)[number]
+
+export interface ChatSessionRecord {
+  id: string
+  projectId: string
+  museId: string
+  title: string | null
+  state: ChatSessionState
+  /** Engine-native session id for resume, when the engine exposes one. */
+  nativeSessionId: string | null
+  /** Opaque token the adapter needs to reopen the native session. */
+  resumeToken: string | null
+  /** Pluton-side engine session id (diagnostics/audit). */
+  engineSessionId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export const CHAT_MESSAGE_ROLES = ['user', 'assistant', 'system', 'tool'] as const
+export type ChatMessageRole = (typeof CHAT_MESSAGE_ROLES)[number]
+
+export interface ChatMessageRecord {
+  id: string
+  sessionId: string
+  /** Per-session monotonic sequence, 1-based. */
+  seq: number
+  role: ChatMessageRole
+  text: string
+  meta: JsonValue
+  createdAt: string
+}

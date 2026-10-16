@@ -78,7 +78,11 @@ describe('migrations', () => {
     const first = migrate(db)
     expect(first.from).toBe(0)
     expect(first.to).toBe(SCHEMA_VERSION)
-    expect(first.applied).toEqual(['v1:initial-schema', 'v2:unique-sandbox-and-terminal-per-muse'])
+    expect(first.applied).toEqual([
+      'v1:initial-schema',
+      'v2:unique-sandbox-and-terminal-per-muse',
+      'v3:chat-sessions',
+    ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
     db.close()
@@ -117,8 +121,8 @@ describe('migrations', () => {
 
     const result = migrate(db)
     expect(result.from).toBe(1)
-    expect(result.to).toBe(2)
-    expect(result.applied).toEqual(['v2:unique-sandbox-and-terminal-per-muse'])
+    expect(result.to).toBe(SCHEMA_VERSION)
+    expect(result.applied).toEqual(['v2:unique-sandbox-and-terminal-per-muse', 'v3:chat-sessions'])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
     const terminalIds = db.prepare('SELECT id FROM terminals ORDER BY id').all().map((r) => r['id'])
