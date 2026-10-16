@@ -10,14 +10,23 @@ import { loadConfig } from '../../src/config/load.ts'
 import { ConflictError } from '../../src/domain/errors.ts'
 import type { McpServerSpec } from '../../src/engines/contract/types.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
+import { registerBuiltinEngines } from '../../src/engines/registry.ts'
+import { HOST_GATEWAY_ADD_HOST } from '../../src/sandbox/muse-containers.ts'
+import type { WorkerImageProbe } from '../../src/sandbox/image.ts'
+import { sandboxContainerName } from '../../src/sandbox/types.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
+import { FakeAcpAgent, fakeSpawn, type FakeAgentMessage } from '../helpers/fake-acp-agent.ts'
+import { FakeSandbox } from '../helpers/fake-sandbox.ts'
+import { loadQwenFrames, scriptQwen } from '../helpers/qwen-script.ts'
 
 /**
  * Integration: `pluton run` wiring — the manager Muse reaches the restricted
  * tool bridge over the real loopback HTTP transport (bearer token per session),
  * delegates to a worker, and the run finalizes from durable records. Also:
- * `--request-id` idempotency and the no-supervisor-muse CLI error path.
+ * `--request-id` idempotency, the no-supervisor-muse CLI error path, and
+ * container mode (per-Muse containers + `docker exec` engine spawns, driven
+ * in-process with a fake sandbox manager and a fake docker spawn).
  */
 
 const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
@@ -42,6 +51,9 @@ project:
   repository: .
   default_branch: main
   verification: []
+sandbox:
+  kind: local-process
+  local_process_acknowledged: true
 runtime:
   max_concurrent_workers: 2
   max_team_size: 4
@@ -96,6 +108,9 @@ project:
   repository: .
   default_branch: main
   verification: []
+sandbox:
+  kind: local-process
+  local_process_acknowledged: true
 muses:
   worker-a:
     display_name: Worker A
@@ -107,6 +122,115 @@ muses:
     permissions:
       - task.inspect
 `
+
+const CONFIG_CONTAINER = `version: 1
+project:
+  name: cli-run-it
+  repository: .
+  default_branch: main
+  verification: []
+sandbox:
+  kind: docker
+runtime:
+  max_concurrent_workers: 2
+  max_delegation_depth: 3
+  max_tasks_per_run: 10
+muses:
+  manager:
+    display_name: Manager
+    role: supervisor
+    engine: qwen
+    model: test/model-a
+    workspace_policy: coordinator-read-only
+    approval_mode: autonomous-bounded
+    permissions:
+      - project.read
+      - task.create
+      - task.delegate
+      - task.inspect
+      - task.cancel
+      - result.collect
+      - diff.inspect
+      - muse.propose_create
+      - approval.request
+      - run.stop
+  worker-a:
+    display_name: Worker A
+    role: coder
+    engine: qwen
+    model: test/model-a
+    workspace_policy: isolated-task-checkout
+    approval_mode: ask-for-sensitive-actions
+    permissions:
+      - task.inspect
+      - result.collect
+      - diff.inspect
+`
+
+const ENGINE_IMAGE_ID = `sha256:${'a'.repeat(64)}`
+
+function enginesImageProbe(): WorkerImageProbe {
+  return {
+    present: true,
+    image: 'pluton-worker:local',
+    imageId: ENGINE_IMAGE_ID,
+    record: {
+      image: 'pluton-worker:local',
+      imageId: ENGINE_IMAGE_ID,
+      profile: 'engines',
+      tmuxVersion: 'tmux 3.3a',
+      nodeVersion: 'v24.0.0',
+      builtAt: '2026-01-01T00:00:00.000Z',
+    },
+    matchesRecord: true,
+    detail: 'fixture: engines profile present',
+  }
+}
+
+/**
+ * Manager-side qwen session that drives the real tool bridge during its first
+ * prompt: the container-mode manager speaks ACP for real, so the bridge work
+ * happens between `session/prompt` and its response.
+ */
+function scriptedBridgeManager(agent: FakeAcpAgent, createdTaskIds: string[], specOut: { value: McpServerSpec | null }): void {
+  const frames = loadQwenFrames()
+  scriptQwen(agent, { promptNeverResolves: true, modelChoices: [{ value: 'test/model-a' }] })
+  const baseOnMessage = agent.onMessage
+  let driving = false
+  agent.onMessage = (msg: FakeAgentMessage, a: FakeAcpAgent): boolean => {
+    if (msg.method === 'session/new') {
+      // Rebuild the spec the manager would actually call: the ACP wire shape
+      // is {type:'http', name, url, headers:[{name,value}]}.
+      const wire = (msg.params as { mcpServers?: Array<Record<string, unknown>> } | undefined)?.mcpServers?.[0]
+      if (wire !== undefined && wire['type'] === 'http' && typeof wire['url'] === 'string') {
+        const headers: Record<string, string> = {}
+        for (const h of (wire['headers'] as Array<{ name: string; value: string }> | undefined) ?? []) {
+          headers[h.name] = h.value
+        }
+        specOut.value = { kind: 'http', name: String(wire['name'] ?? 'pluton'), url: wire['url'], headers }
+      }
+    }
+    if (msg.method === 'session/prompt') {
+      const id = msg.id as number
+      const spec = specOut.value
+      if (spec === null || spec.kind !== 'http' || driving) return baseOnMessage(msg, a)
+      driving = true
+      // The test process lives on the host: the container-facing URL is
+      // asserted as-is, but the drive itself goes through loopback.
+      const hostSpec = { ...spec, url: spec.url.replace('host.docker.internal', '127.0.0.1') }
+      void (async () => {
+        try {
+          await driveBridge(hostSpec, createdTaskIds)
+          a.respond(id, { ...structuredClone(frames.promptResult), stopReason: 'end_turn' })
+        } catch (e) {
+          a.respondError(id, -32603, e instanceof Error ? e.message : String(e))
+        }
+      })()
+      return true
+    }
+    return baseOnMessage(msg, a)
+  }
+}
 
 interface Fixture {
   dir: string
@@ -337,5 +461,105 @@ describe('runRun — supervisor wired to the HTTP tool bridge', () => {
     expect(parsed.ok).toBe(false)
     expect(parsed.error?.code).toBe('config_invalid')
     expect(parsed.error?.message).toContain('supervisor')
+  })
+})
+
+describe('runRun — container mode (engines through docker exec)', () => {
+  it('provisions per-Muse containers and drives the run through docker exec spawns', async () => {
+    registerBuiltinEngines()
+    const dir = makeProjectDir(CONFIG_CONTAINER)
+    const ctx = projectContext(dir)
+
+    const fakeSandbox = new FakeSandbox()
+    fakeSandbox.statusResult = 'missing'
+
+    const createdTaskIds: string[] = []
+    const specOut: { value: McpServerSpec | null } = { value: null }
+    let spawned = 0
+    const spawn = fakeSpawn(() => {
+      const agent = new FakeAcpAgent()
+      const index = spawned
+      spawned += 1
+      if (index === 0) scriptedBridgeManager(agent, createdTaskIds, specOut)
+      else scriptQwen(agent, { modelChoices: [{ value: 'test/model-a' }] })
+      return agent
+    })
+
+    const summary = await runRun(
+      ctx,
+      { goal: 'ship it in containers', acceptance: ['recorded'] },
+      {
+        sandboxManager: fakeSandbox,
+        workerImageProbe: () => Promise.resolve(enginesImageProbe()),
+        dockerSpawn: spawn.spawnFn,
+      },
+    )
+
+    expect(summary.state).toBe('completed')
+    expect(summary.taskCounts).toEqual({ completed: 1 })
+
+    const store = openSecondStore(dir)
+    const project = store.getProjectByRoot(ctx.rootDir)
+    expect(project).not.toBeNull()
+    const projectId = (project as { id: string }).id
+
+    // Containers: one per Muse, host-gateway mapped, work mounts, durable records.
+    expect(fakeSandbox.created).toHaveLength(2)
+    const managerSpec = fakeSandbox.created.find((c) => c.museId === 'manager')
+    const workerSpec = fakeSandbox.created.find((c) => c.museId === 'worker-a')
+    expect(managerSpec?.containerName).toBe(sandboxContainerName(projectId, 'manager'))
+    expect(workerSpec?.containerName).toBe(sandboxContainerName(projectId, 'worker-a'))
+    expect(managerSpec?.extraHosts).toEqual([HOST_GATEWAY_ADD_HOST])
+    expect(workerSpec?.extraHosts).toEqual([HOST_GATEWAY_ADD_HOST])
+    expect(managerSpec?.env).toEqual({})
+    expect(workerSpec?.env).toEqual({})
+    expect(managerSpec?.mounts.map((m) => m.containerPath)).toEqual([
+      '/pluton/workspaces',
+      '/pluton/engine-home',
+      '/pluton/project',
+    ])
+    expect(managerSpec?.mounts[2]?.readOnly).toBe(true)
+    expect(workerSpec?.mounts.map((m) => m.containerPath)).toEqual(['/pluton/workspaces', '/pluton/engine-home'])
+    const sandboxes = store.listSandboxes(projectId)
+    expect(sandboxes).toHaveLength(2)
+    for (const sb of sandboxes) expect(sb.state).toBe('running')
+
+    // Engines run inside the containers: docker exec argv, pinned binary,
+    // mapped workdir, -e NAME-only env, session env values in the CLI env.
+    expect(spawn.agents).toHaveLength(2)
+    const managerAgent = spawn.agents[0] as FakeAcpAgent
+    const workerAgent = spawn.agents[1] as FakeAcpAgent
+    expect(managerAgent.spawnArgs.slice(0, 5)).toEqual(['docker', 'exec', '-i', '-w', '/pluton/project'])
+    expect(workerAgent.spawnArgs.slice(0, 4)).toEqual(['docker', 'exec', '-i', '-w'])
+    expect(workerAgent.spawnArgs[4]).toMatch(/^\/pluton\/workspaces\//)
+    expect(managerAgent.spawnArgs.slice(-3)).toEqual([
+      sandboxContainerName(projectId, 'manager'),
+      '/usr/local/bin/qwen',
+      '--acp',
+    ])
+    expect(workerAgent.spawnArgs.slice(-3)).toEqual([
+      sandboxContainerName(projectId, 'worker-a'),
+      '/usr/local/bin/qwen',
+      '--acp',
+    ])
+    for (const agent of [managerAgent, workerAgent]) {
+      for (let i = 0; i < agent.spawnArgs.length; i += 1) {
+        if (agent.spawnArgs[i] === '-e') expect(agent.spawnArgs[i + 1]).not.toContain('=')
+      }
+      expect(agent.spawnArgs).not.toContain('PATH') // host essentials never cross
+      expect(agent.spawnEnv['HOME']).toBe('/pluton/engine-home')
+      expect(agent.spawnEnv['QWEN_DIR']).toBe('/pluton/engine-home/qwen')
+    }
+
+    // The manager called the bridge on the container-facing hostname.
+    const spec = specOut.value as Extract<McpServerSpec, { kind: 'http' }>
+    expect(spec.url).toMatch(/^http:\/\/host\.docker\.internal:\d+\/mcp$/)
+    expect(spec.headers?.['Authorization']).toMatch(/^Bearer .+$/)
+
+    // Durable truth: the worker task came from real supervisor work.
+    const tasks = store.listTasks(summary.runId)
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]?.state).toBe('completed')
+    expect(tasks[0]?.assigneeMuseId).toBe('worker-a')
   })
 })

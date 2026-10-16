@@ -37,7 +37,8 @@ export interface AcpSpawnOptions {
 
 export type AcpSpawnFn = (command: string, args: string[], options: AcpSpawnOptions) => AcpChild
 
-const defaultSpawn: AcpSpawnFn = (command, args, options) =>
+/** Default child-process spawn; exported so transports can wrap it (e.g. `docker exec`). */
+export const defaultSpawn: AcpSpawnFn = (command, args, options) =>
   spawn(command, args, {
     cwd: options.cwd,
     env: options.env,

@@ -20,7 +20,10 @@ import { sandboxContainerName, type SandboxLimits, type SandboxManager, type San
  */
 
 /** Docker's special value: the host as seen from inside any container. */
-export const HOST_GATEWAY_ADD_HOST = 'host.docker.internal:host-gateway'
+export const HOST_GATEWAY_HOSTNAME = 'host.docker.internal'
+
+/** The `/etc/hosts` mapping every Pluton-created container carries. */
+export const HOST_GATEWAY_ADD_HOST = `${HOST_GATEWAY_HOSTNAME}:host-gateway`
 
 /** The uid:gid the worker image creates (docker/worker/Dockerfile). */
 const MUSE_CONTAINER_USER = '10001:10001'

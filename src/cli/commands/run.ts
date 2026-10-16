@@ -1,12 +1,30 @@
 import { bootstrapStore } from '../../bootstrap.ts'
 import { findManager, workspaceDir } from '../../config/load.ts'
-import { ConfigError, InternalError, NotFoundError } from '../../domain/errors.ts'
+import {
+  ConfigError,
+  InternalError,
+  NotFoundError,
+  SandboxUnavailableError,
+  ValidationError,
+} from '../../domain/errors.ts'
 import type { JsonValue, MuseRecord, RunRecord } from '../../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
+import type { AcpSpawnFn } from '../../engines/acp/client.ts'
+import { engineAdapterForMuse } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
+import { dockerExecSpawn, type DockerExecContext } from '../../engines/docker-exec.ts'
 import { runBudgetFromRuntime, supervisorSettingsFromRuntime } from '../../orchestrator/run-setup.ts'
 import { RunSupervisor, type RunOutcome } from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
+import { createSandboxManager } from '../../sandbox/factory.ts'
+import {
+  DEFAULT_WORKER_IMAGE_TAG,
+  dispatchReadiness,
+  WorkerImageManager,
+  type WorkerImageProbe,
+} from '../../sandbox/image.ts'
+import { ensureMuseContainer, HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
+import { sandboxContainerName, type SandboxManager, type SandboxMount } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
@@ -28,6 +46,10 @@ import { resolveMuseByRef } from './mcp.ts'
  *   retried command can never create a second run.
  * - Engine auth lives in per-Muse engine homes (ADR-0008); `engineEnv` adds
  *   nothing on top of each adapter's own allowlist.
+ * - `sandbox.kind: docker` (the default) runs engines inside per-Muse
+ *   containers through `docker exec`, with pinned in-image binaries and the
+ *   bridge exposed on the host gateway; the acknowledged dev-only
+ *   `local-process` mode keeps host child processes.
  */
 
 export interface RunCommandOptions {
@@ -40,6 +62,12 @@ export interface RunCommandOptions {
 export interface RunDeps {
   /** Test seam: adapter per Muse; default = the built-in engine registry. */
   adapterFor?: (muse: MuseRecord) => EngineAdapter
+  /** Test seam: replaces the Docker sandbox manager in container mode. */
+  sandboxManager?: SandboxManager
+  /** Test seam: replaces the worker-image probe in container mode. */
+  workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
+  /** Test seam: replaces the process spawn behind `docker exec` children. */
+  dockerSpawn?: AcpSpawnFn
 }
 
 export interface RunSummary {
@@ -54,6 +82,19 @@ export interface RunSummary {
   blockedTasks: string[]
   verificationPending: boolean
 }
+
+/** Container paths for the mounts every Muse container receives (prepareContainerMode). */
+const CONTAINER_WORKSPACES_PATH = '/pluton/workspaces'
+const CONTAINER_ENGINE_HOME_PATH = '/pluton/engine-home'
+const CONTAINER_PROJECT_PATH = '/pluton/project'
+
+/** Engine binaries pinned by the worker image's `engines` profile (docker/worker/Dockerfile). */
+const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
+  opencode: '/usr/local/bin/opencode',
+  qwen: '/usr/local/bin/qwen',
+}
+
+const CONTAINER_PIDS_LIMIT = 512
 
 function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): MuseRecord {
   if (managerRef !== undefined) return resolveMuseByRef(store, managerRef)
@@ -104,6 +145,99 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
   }
 }
 
+/**
+ * Container mode: fail closed before any run row exists — daemon probe, worker
+ * image readiness (the `engines` profile is required), then one long-lived
+ * container and a `docker exec` spawn context per enabled Muse. Every
+ * container mounts the workspaces root (task checkouts) and its own engine
+ * home; coordinator-read-only muses additionally get the project tree
+ * read-only, because their sessions run with the project root as workdir.
+ */
+async function prepareContainerMode(
+  ctx: ProjectContext,
+  store: Store,
+  projectId: string,
+  manager: SandboxManager,
+  imageProbeOverride: ((rootDir: string) => Promise<WorkerImageProbe>) | undefined,
+): Promise<Map<string, DockerExecContext>> {
+  const probe = await manager.probe()
+  if (!probe.available) {
+    throw new SandboxUnavailableError(`container-mode runs need a reachable sandbox: ${probe.detail}`, {
+      fix: probe.fix,
+    })
+  }
+  const imageTag = ctx.loaded.config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
+  const imageProbe =
+    imageProbeOverride !== undefined
+      ? await imageProbeOverride(ctx.rootDir)
+      : await new WorkerImageManager().probe(ctx.rootDir, imageTag)
+  const readiness = dispatchReadiness(true, imageProbe, { requireEngines: true })
+  if (!readiness.ready) {
+    throw new SandboxUnavailableError(
+      `worker image '${imageTag}' is not ready for container-mode runs:\n  - ${readiness.warnings.join('\n  - ')}`,
+    )
+  }
+
+  const runtime = ctx.loaded.config.runtime
+  const workspacesRoot = workspaceDir(ctx.rootDir)
+  const byMuse = new Map<string, DockerExecContext>()
+  for (const muse of store.listMuses()) {
+    if (!muse.enabled) continue
+    const mounts: SandboxMount[] = [
+      { hostPath: workspacesRoot, containerPath: CONTAINER_WORKSPACES_PATH },
+      { hostPath: muse.engineHome, containerPath: CONTAINER_ENGINE_HOME_PATH },
+      ...(muse.workspacePolicy === 'coordinator-read-only'
+        ? [{ hostPath: ctx.rootDir, containerPath: CONTAINER_PROJECT_PATH, readOnly: true }]
+        : []),
+    ]
+    await ensureMuseContainer(manager, store, {
+      projectId,
+      museId: muse.id,
+      image: imageTag,
+      limits: {
+        cpus: runtime.default_cpu_limit,
+        memoryMb: runtime.default_memory_mb,
+        pids: CONTAINER_PIDS_LIMIT,
+      },
+      network: runtime.network_policy,
+      mounts,
+    })
+    byMuse.set(muse.id, {
+      containerName: sandboxContainerName(projectId, muse.id),
+      mounts: mounts.map((mount) => ({ hostPath: mount.hostPath, containerPath: mount.containerPath })),
+      env: {},
+    })
+  }
+  return byMuse
+}
+
+/**
+ * The container-mode adapter per Muse: pinned in-image binaries, `docker exec`
+ * as the process spawn, Linux platform env construction (the engine process
+ * runs inside the container, never on the host).
+ */
+function containerAdapterFor(
+  muse: MuseRecord,
+  contexts: Map<string, DockerExecContext>,
+  dockerSpawn: AcpSpawnFn | undefined,
+): EngineAdapter {
+  const exec = contexts.get(muse.id)
+  if (exec === undefined) {
+    throw new InternalError(`container mode: no container was prepared for Muse '${muse.id}'`)
+  }
+  const binaryPath = CONTAINER_ENGINE_BINARIES[muse.engineKind]
+  if (binaryPath === undefined && muse.engineKind !== 'mock') {
+    throw new ValidationError(
+      `engine '${muse.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode, qwen)`,
+    )
+  }
+  return engineAdapterForMuse(muse, {
+    spawnFn: dockerExecSpawn(exec, dockerSpawn),
+    platform: 'linux',
+    ...(binaryPath !== undefined ? { binaryPath } : {}),
+  })
+}
+
 export async function runRun(
   ctx: ProjectContext,
   opts: RunCommandOptions,
@@ -119,6 +253,21 @@ export async function runRun(
     const runtime = ctx.loaded.config.runtime
     const budget = runBudgetFromRuntime(runtime)
     const settings = supervisorSettingsFromRuntime(runtime)
+
+    // Container mode (sandbox.kind: docker — the default) provisions the
+    // per-Muse containers before the run row exists, so a daemon or image
+    // failure never leaves a started run behind. Unacknowledged
+    // local-process configs are refused the same way every sandbox consumer
+    // refuses them; only the acknowledged dev-only mode runs engines on the
+    // host.
+    let containerContexts: Map<string, DockerExecContext> | null = null
+    if (ctx.loaded.config.sandbox.kind === 'docker') {
+      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
+      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
+    } else {
+      // Gate only: throws unless local_process_acknowledged is set.
+      createSandboxManager(ctx.loaded.config)
+    }
 
     const payload: JsonValue = {
       goal,
@@ -170,10 +319,26 @@ export async function runRun(
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
-    const http = new ToolHttpServer({ serverName: 'pluton-tools', serverVersion: PLUTON_VERSION })
-    await http.start()
-    const bridgeUrl = `${http.url as string}mcp`
+    const http = new ToolHttpServer({
+      serverName: 'pluton-tools',
+      serverVersion: PLUTON_VERSION,
+      // Container mode: the bridge must be reachable through the host
+      // gateway from inside the containers (per-session bearer tokens still
+      // guard every request); host mode stays loopback-only.
+      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+    })
+    const started = await http.start()
+    const bridgeUrl =
+      containerContexts !== null
+        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
+        : `${http.url as string}mcp`
     try {
+      let supervisorAdapterFor = deps.adapterFor
+      if (supervisorAdapterFor === undefined && containerContexts !== null) {
+        const contexts = containerContexts
+        supervisorAdapterFor = (muse: MuseRecord): EngineAdapter =>
+          containerAdapterFor(muse, contexts, deps.dockerSpawn)
+      }
       const supervisor = new RunSupervisor({
         store,
         projectId,
@@ -185,7 +350,7 @@ export async function runRun(
         defaultTaskTimeoutMs: settings.defaultTaskTimeoutMs,
         runDeadlineMs: settings.runDeadlineMs,
         verificationConfigured: ctx.loaded.config.project.verification.length > 0,
-        ...(deps.adapterFor !== undefined ? { adapterFor: deps.adapterFor } : {}),
+        ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
         workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),
         engineEnv: () => ({}),
         mcpServerFor: (muse, taskId) => {

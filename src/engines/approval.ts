@@ -2,7 +2,7 @@ import { ValidationError } from '../domain/errors.ts'
 import type { ApprovalMode } from '../domain/models.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { QwenEngineAdapter, type QwenApprovalPolicy } from './qwen/adapter.ts'
-import { getEngineAdapter } from './registry.ts'
+import { getEngineAdapter, type EngineCreateOptions } from './registry.ts'
 
 /**
  * Pluton approval mode → engine session settings.
@@ -64,14 +64,19 @@ export function engineApprovalPolicy(approvalMode: ApprovalMode): QwenApprovalPo
 /**
  * The per-Muse engine adapter the run supervisor builds sessions from: engine
  * session settings come from the Muse's recorded approval mode, never from an
- * adapter default.
+ * adapter default. `opts` carries container-mode pins (spawn, in-image binary)
+ * and test seams.
  */
-export function engineAdapterForMuse(muse: { engineKind: string; approvalMode: ApprovalMode }): EngineAdapter {
+export function engineAdapterForMuse(
+  muse: { engineKind: string; approvalMode: ApprovalMode },
+  opts: EngineCreateOptions = {},
+): EngineAdapter {
   if (muse.engineKind === 'qwen') {
     return new QwenEngineAdapter({
+      ...opts,
       approvalMode: engineSessionMode('qwen', muse.approvalMode),
       approvalPolicy: engineApprovalPolicy(muse.approvalMode),
     })
   }
-  return getEngineAdapter(muse.engineKind)
+  return getEngineAdapter(muse.engineKind, opts)
 }
