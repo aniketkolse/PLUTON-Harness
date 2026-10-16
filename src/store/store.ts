@@ -12,20 +12,23 @@ import {
   type SandboxState,
   type TaskState,
 } from '../domain/state.ts'
-import type {
-  EventRecord,
-  JsonValue,
-  MuseRecord,
-  ProjectRecord,
-  RequestReceiptRecord,
-  RequestTargetKind,
-  RunBudget,
-  RunRecord,
-  SandboxRecord,
-  TaskEdgeRecord,
-  TaskRecord,
-  TerminalRecord,
-  WorkspaceRecord,
+import {
+  APPROVAL_STATUSES,
+  type ApprovalRecord,
+  type ApprovalStatus,
+  type EventRecord,
+  type JsonValue,
+  type MuseRecord,
+  type ProjectRecord,
+  type RequestReceiptRecord,
+  type RequestTargetKind,
+  type RunBudget,
+  type RunRecord,
+  type SandboxRecord,
+  type TaskEdgeRecord,
+  type TaskRecord,
+  type TerminalRecord,
+  type WorkspaceRecord,
 } from '../domain/models.ts'
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
 import { redactDeep } from '../util/redact.ts'
@@ -190,6 +193,17 @@ export interface UpsertTerminalSpec {
   sandboxId: string | null
   tmuxSessionName: string
   state: TerminalRecord['state']
+}
+
+export interface NewApprovalSpec {
+  projectId: string
+  runId: string | null
+  taskId: string | null
+  requestedByMuseId: string | null
+  action: string
+  reason: string
+  /** Bounded JSON scope: what exactly would happen if approved. */
+  scope: JsonValue
 }
 
 const DEFAULT_MAX_EVENT_CHARS = 8_000
@@ -573,28 +587,30 @@ export class Store {
 
   // -- sandboxes (one long-lived container per Muse, ADR-0004) --------------
 
-  /** One sandbox row per (project, muse); re-upserting keeps the same record id. */
+  /**
+   * One sandbox row per (project, muse), re-upserting keeps the same record id.
+   * Backed by the NULL-safe unique index `idx_sandboxes_project_muse` (v2): the
+   * insert and the conflicting update are one atomic statement, so two
+   * concurrent writers cannot both insert — the loser updates the winner's row
+   * (excluded.id is never assigned, so id/created_by/created_at stay stable).
+   */
   upsertSandbox(spec: UpsertSandboxSpec): SandboxRecord {
-    const existing = this.getSandboxForMuse(spec.projectId, spec.museId)
     const now = nowIso()
-    if (existing) {
-      this.db
-        .prepare(
-          `UPDATE sandboxes SET kind = ?, container_name = ?, container_id = ?, image = ?, state = ?,
-                               updated_at = ? WHERE id = ?`,
-        )
-        .run(spec.kind, spec.containerName, spec.containerId, spec.image, spec.state, now, existing.id)
-      return this.getSandboxOrNull(existing.id) as SandboxRecord
-    }
-    const id = newId('sandbox')
     this.db
       .prepare(
         `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
                                 created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, IFNULL(muse_id,'')) DO UPDATE SET
+           kind = excluded.kind,
+           container_name = excluded.container_name,
+           container_id = excluded.container_id,
+           image = excluded.image,
+           state = excluded.state,
+           updated_at = excluded.updated_at`,
       )
       .run(
-        id,
+        newId('sandbox'),
         spec.projectId,
         spec.museId,
         spec.kind,
@@ -606,7 +622,9 @@ export class Store {
         now,
         now,
       )
-    return this.getSandbox(id)
+    const saved = this.getSandboxForMuse(spec.projectId, spec.museId)
+    if (!saved) throw new InternalError('sandbox row disappeared inside upsert')
+    return saved
   }
 
   getSandbox(id: string): SandboxRecord {
@@ -657,24 +675,36 @@ export class Store {
 
   // -- terminals (tmux per Muse, ADR-0005) -----------------------------------
 
-  /** One terminal row per (project, muse); re-upserting keeps the same record id. */
+  /**
+   * One terminal row per (project, muse), re-upserting keeps the same record id.
+   * Same atomic single-statement upsert shape as upsertSandbox, backed by the
+   * NULL-safe unique index `idx_terminals_project_muse` (v2).
+   */
   upsertTerminal(spec: UpsertTerminalSpec): TerminalRecord {
-    const existing = this.getTerminalForMuse(spec.projectId, spec.museId)
     const now = nowIso()
-    if (existing) {
-      this.db
-        .prepare('UPDATE terminals SET sandbox_id = ?, tmux_session_name = ?, state = ?, updated_at = ? WHERE id = ?')
-        .run(spec.sandboxId, spec.tmuxSessionName, spec.state, now, existing.id)
-      return this.getTerminal(existing.id)
-    }
-    const id = newId('terminal')
     this.db
       .prepare(
         `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, IFNULL(muse_id,'')) DO UPDATE SET
+           sandbox_id = excluded.sandbox_id,
+           tmux_session_name = excluded.tmux_session_name,
+           state = excluded.state,
+           updated_at = excluded.updated_at`,
       )
-      .run(id, spec.projectId, spec.museId, spec.sandboxId, spec.tmuxSessionName, spec.state, now, now)
-    return this.getTerminal(id)
+      .run(
+        newId('terminal'),
+        spec.projectId,
+        spec.museId,
+        spec.sandboxId,
+        spec.tmuxSessionName,
+        spec.state,
+        now,
+        now,
+      )
+    const saved = this.getTerminalForMuse(spec.projectId, spec.museId)
+    if (!saved) throw new InternalError('terminal row disappeared inside upsert')
+    return saved
   }
 
   getTerminal(id: string): TerminalRecord {
@@ -705,6 +735,69 @@ export class Store {
   setTerminalState(id: string, state: TerminalRecord['state']): TerminalRecord {
     this.db.prepare('UPDATE terminals SET state = ?, updated_at = ? WHERE id = ?').run(state, nowIso(), id)
     return this.getTerminal(id)
+  }
+
+  // -- approvals (human gate, prompt §4/§7) ----------------------------------
+
+  createApproval(spec: NewApprovalSpec): ApprovalRecord {
+    const id = newId('approval')
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
+                                 status, decided_by, decided_at, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?)`,
+      )
+      .run(
+        id,
+        spec.projectId,
+        spec.runId,
+        spec.taskId,
+        spec.requestedByMuseId,
+        spec.action,
+        spec.reason,
+        stringifyJson(spec.scope),
+        now,
+      )
+    return this.getApproval(id)
+  }
+
+  getApproval(id: string): ApprovalRecord {
+    const approval = this.getApprovalOrNull(id)
+    if (!approval) throw new NotFoundError('approval', id)
+    return approval
+  }
+
+  getApprovalOrNull(id: string): ApprovalRecord | null {
+    const row = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToApproval(row) : null
+  }
+
+  listApprovals(runId: string): ApprovalRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at DESC, id DESC')
+      .all(runId) as Row[]
+    return rows.map(rowToApproval)
+  }
+
+  /**
+   * Decide an approval. Only `pending` may move to `approved|denied|expired`;
+   * a decided approval is final. Re-setting the current status is an idempotent
+   * no-op (the record is returned unchanged, the patch is ignored).
+   */
+  setApprovalStatus(id: string, status: ApprovalStatus, patch: { decidedBy?: string | null } = {}): ApprovalRecord {
+    const approval = this.getApproval(id)
+    if (approval.status === status) return approval
+    if (approval.status !== 'pending') {
+      throw new ValidationError(
+        `approval ${id} is already ${approval.status}; ${approval.status} -> ${status} is not a legal transition (only pending approvals can be decided)`,
+      )
+    }
+    const now = nowIso()
+    this.db
+      .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?')
+      .run(status, patch.decidedBy ?? null, now, id)
+    return this.getApproval(id)
   }
 
   // -- events ----------------------------------------------------------------
@@ -833,6 +926,10 @@ export class Store {
 
 function isTerminalRunState(state: RunState): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled' || state === 'uncertain'
+}
+
+function isApprovalStatus(value: string): value is ApprovalStatus {
+  return (APPROVAL_STATUSES as readonly string[]).includes(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1089,26 @@ function rowToTerminal(r: Row): TerminalRecord {
     state,
     createdAt: str(r, 'created_at'),
     updatedAt: str(r, 'updated_at'),
+  }
+}
+
+function rowToApproval(r: Row): ApprovalRecord {
+  const status = str(r, 'status')
+  if (!isApprovalStatus(status)) throw new InternalError(`db row: invalid approval status '${status}'`)
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    runId: nstr(r, 'run_id'),
+    taskId: nstr(r, 'task_id'),
+    requestedByMuseId: nstr(r, 'requested_by_muse_id'),
+    action: str(r, 'action'),
+    reason: str(r, 'reason'),
+    scope: parseJsonText<JsonValue>(nstr(r, 'scope_json'), {}),
+    status,
+    decidedBy: nstr(r, 'decided_by'),
+    decidedAt: nstr(r, 'decided_at'),
+    expiresAt: nstr(r, 'expires_at'),
+    createdAt: str(r, 'created_at'),
   }
 }
 

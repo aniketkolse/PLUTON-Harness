@@ -193,6 +193,40 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    version: 2,
+    name: 'unique-sandbox-and-terminal-per-muse',
+    statements: [
+      // Readers resolve "the" sandbox/terminal for a muse with
+      // `ORDER BY created_at DESC LIMIT 1`, so when duplicates already exist the
+      // newest row per (project_id, muse_id) is kept and the rest are dropped
+      // before the unique index below can be created.
+      `DELETE FROM sandboxes
+        WHERE id NOT IN (
+          SELECT id FROM (
+            SELECT id,
+                   ROW_NUMBER() OVER (PARTITION BY project_id, IFNULL(muse_id, '') ORDER BY created_at DESC, id DESC) AS rn
+            FROM sandboxes
+          ) WHERE rn = 1
+        )`,
+      `DELETE FROM terminals
+        WHERE id NOT IN (
+          SELECT id FROM (
+            SELECT id,
+                   ROW_NUMBER() OVER (PARTITION BY project_id, IFNULL(muse_id, '') ORDER BY created_at DESC, id DESC) AS rn
+            FROM terminals
+          ) WHERE rn = 1
+        )`,
+      // muse_id is NULL for project-level sandboxes (terminals.muse_id is NOT NULL
+      // today, but the expression keeps both tables uniform) and SQLite UNIQUE
+      // treats NULLs as distinct, so a plain UNIQUE(project_id, muse_id) index
+      // would let duplicate NULL rows through. Building the index over
+      // IFNULL(muse_id, '') makes the constraint NULL-safe; the store upserts
+      // name the same expression as their ON CONFLICT target.
+      `CREATE UNIQUE INDEX idx_sandboxes_project_muse ON sandboxes(project_id, IFNULL(muse_id, ''))`,
+      `CREATE UNIQUE INDEX idx_terminals_project_muse ON terminals(project_id, IFNULL(muse_id, ''))`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

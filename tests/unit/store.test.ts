@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
-import { migrate, SCHEMA_VERSION } from '../../src/store/migrations.ts'
+import { openDatabase, setUserVersion, type DatabaseSync } from '../../src/store/db.ts'
+import { MIGRATIONS, migrate, SCHEMA_VERSION } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
-import { ConflictError, NotFoundError, StateTransitionError, ValidationError } from '../../src/domain/errors.ts'
+import { ConflictError, InternalError, NotFoundError, StateTransitionError, ValidationError } from '../../src/domain/errors.ts'
 import type { RunBudget } from '../../src/domain/models.ts'
 
 const tmpDirs: string[] = []
@@ -78,7 +78,7 @@ describe('migrations', () => {
     const first = migrate(db)
     expect(first.from).toBe(0)
     expect(first.to).toBe(SCHEMA_VERSION)
-    expect(first.applied).toEqual(['v1:initial-schema'])
+    expect(first.applied).toEqual(['v1:initial-schema', 'v2:unique-sandbox-and-terminal-per-muse'])
     const second = migrate(db)
     expect(second.applied).toEqual([])
     db.close()
@@ -86,6 +86,47 @@ describe('migrations', () => {
     const db2 = openDatabase(path)
     expect(migrate(db2).from).toBe(SCHEMA_VERSION)
     db2.close()
+  })
+
+  it('v2 dedupes pre-existing duplicates, keeping the newest row per (project, muse)', () => {
+    const path = tmpDbPath('mig-dedupe')
+    const db = openDatabase(path)
+    openDbs.push(db)
+    // Build a legacy v1 database, where duplicate rows per (project, muse) were possible.
+    for (const sql of MIGRATIONS[0]!.statements) db.exec(sql)
+    setUserVersion(db, 1)
+    db.prepare(
+      `INSERT INTO projects (id, name, root_path, config_path, default_branch, created_at, updated_at)
+       VALUES ('project_legacy', 'legacy', '/legacy', '/legacy/pluton.yaml', 'main', ?, ?)`,
+    ).run('2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
+    const insertSandbox = db.prepare(
+      `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
+                              created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'docker', NULL, NULL, NULL, 'running', 'legacy', ?, ?)`,
+    )
+    insertSandbox.run('sb_old', 'project_legacy', 'worker-a', '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
+    insertSandbox.run('sb_new', 'project_legacy', 'worker-a', '2024-02-01T00:00:00.000Z', '2024-02-01T00:00:00.000Z')
+    insertSandbox.run('sb_null_old', 'project_legacy', null, '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
+    insertSandbox.run('sb_null_new', 'project_legacy', null, '2024-02-01T00:00:00.000Z', '2024-02-01T00:00:00.000Z')
+    const insertTerminal = db.prepare(
+      `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, 'sess', 'absent', ?, ?)`,
+    )
+    insertTerminal.run('tm_old', 'project_legacy', 'worker-a', '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
+    insertTerminal.run('tm_new', 'project_legacy', 'worker-a', '2024-02-01T00:00:00.000Z', '2024-02-01T00:00:00.000Z')
+
+    const result = migrate(db)
+    expect(result.from).toBe(1)
+    expect(result.to).toBe(2)
+    expect(result.applied).toEqual(['v2:unique-sandbox-and-terminal-per-muse'])
+    const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
+    expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
+    const terminalIds = db.prepare('SELECT id FROM terminals ORDER BY id').all().map((r) => r['id'])
+    expect(terminalIds).toEqual(['tm_new'])
+    // The index now rejects a duplicate that the v1 schema would have accepted.
+    expect(() =>
+      insertSandbox.run('sb_dup', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z'),
+    ).toThrow(/UNIQUE constraint failed/)
   })
 })
 
@@ -584,5 +625,268 @@ describe('workspace / sandbox / terminal registry (Phase 5)', () => {
     const absent = store.setTerminalState(first.id, 'absent')
     expect(absent.state).toBe('absent')
     expect(() => store.getTerminal('terminal_nope')).toThrow(NotFoundError)
+  })
+
+  it('re-upserting a project-level sandbox (muse_id NULL) keeps the same id and exactly one row', () => {
+    const { store } = freshStore('sandboxes4')
+    const projectId = seedProject(store)
+    const spec = {
+      projectId,
+      museId: null,
+      kind: 'local-process' as const,
+      containerName: null,
+      containerId: null,
+      image: null,
+      state: 'creating' as const,
+      createdBy: 'tester',
+    }
+    const first = store.upsertSandbox(spec)
+    const second = store.upsertSandbox({ ...spec, state: 'running', createdBy: 'someone-else' })
+    expect(second.id).toBe(first.id)
+    expect(second.state).toBe('running')
+    // created_by/created_at belong to the original row; only mutable columns move.
+    expect(second.createdBy).toBe('tester')
+    expect(second.createdAt).toBe(first.createdAt)
+    const count = store.db
+      .prepare('SELECT COUNT(*) AS n FROM sandboxes WHERE project_id = ? AND muse_id IS NULL')
+      .get(projectId)
+    expect(count?.['n']).toBe(1)
+  })
+
+  it('re-upserting a terminal for the same (project, muse) keeps the same id and exactly one row', () => {
+    const { store } = freshStore('terminals2')
+    const projectId = seedProject(store)
+    // terminals.muse_id is NOT NULL (v1 schema), so only the sandbox case can have muse_id NULL.
+    const first = store.upsertTerminal({
+      projectId,
+      museId: 'worker-a',
+      sandboxId: null,
+      tmuxSessionName: 'pluton_test_dup',
+      state: 'absent',
+    })
+    const second = store.upsertTerminal({
+      projectId,
+      museId: 'worker-a',
+      sandboxId: null,
+      tmuxSessionName: 'pluton_test_dup',
+      state: 'present',
+    })
+    expect(second.id).toBe(first.id)
+    expect(second.state).toBe('present')
+    expect(second.createdAt).toBe(first.createdAt)
+    const count = store.db
+      .prepare('SELECT COUNT(*) AS n FROM terminals WHERE project_id = ? AND muse_id = ?')
+      .get(projectId, 'worker-a')
+    expect(count?.['n']).toBe(1)
+  })
+
+  it('the NULL-safe unique indexes reject raw duplicate rows at the database level', () => {
+    const { store } = freshStore('sandbox-index')
+    const projectId = seedProject(store)
+    const createdAt = '2024-01-01T00:00:00.000Z'
+    const rawSandbox = (id: string, museId: string | null): void => {
+      store.db
+        .prepare(
+          `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
+                                  created_by, created_at, updated_at)
+           VALUES (?, ?, ?, 'docker', NULL, NULL, NULL, 'running', 'raw', ?, ?)`,
+        )
+        .run(id, projectId, museId, createdAt, createdAt)
+    }
+    store.upsertSandbox({
+      projectId,
+      museId: 'worker-a',
+      kind: 'docker',
+      containerName: 'c',
+      containerId: 'cid',
+      image: 'img',
+      state: 'running',
+      createdBy: 'tester',
+    })
+    store.upsertSandbox({
+      projectId,
+      museId: null,
+      kind: 'local-process',
+      containerName: null,
+      containerId: null,
+      image: null,
+      state: 'running',
+      createdBy: 'tester',
+    })
+    expect(() => rawSandbox('sandbox_dup', 'worker-a')).toThrow(/UNIQUE constraint failed/)
+    // A plain UNIQUE(project_id, muse_id) index lets NULLs duplicate; ours must not.
+    expect(() => rawSandbox('sandbox_dup_null', null)).toThrow(/UNIQUE constraint failed/)
+
+    store.upsertTerminal({
+      projectId,
+      museId: 'worker-a',
+      sandboxId: null,
+      tmuxSessionName: 'pluton_test_raw',
+      state: 'absent',
+    })
+    expect(() =>
+      store.db
+        .prepare(
+          `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+           VALUES ('terminal_dup', ?, 'worker-a', NULL, 'pluton_test_raw', 'absent', ?, ?)`,
+        )
+        .run(projectId, createdAt, createdAt),
+    ).toThrow(/UNIQUE constraint failed/)
+  })
+})
+
+describe('approvals', () => {
+  function makeRun(store: Store, projectId: string, goal: string) {
+    return store.createRun({
+      projectId,
+      goal,
+      origin: 'cli',
+      requestedBy: 'tester',
+      acceptanceCriteria: [],
+      managerMuseId: 'worker-a',
+      budget: BUDGET,
+    })
+  }
+
+  it('create -> get round-trips every field, including the JSON scope', () => {
+    const { store } = freshStore('approvals1')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const task = store.createTask({
+      runId: run.id,
+      parentTaskId: null,
+      title: 't',
+      brief: 'b',
+      acceptanceCriteria: [],
+      assigneeMuseId: 'worker-a',
+    })
+    const scope = { branch: 'pluton/run/task', force: false, remotes: ['origin', 'upstream'] }
+    const created = store.createApproval({
+      projectId,
+      runId: run.id,
+      taskId: task.id,
+      requestedByMuseId: 'worker-a',
+      action: 'git.push',
+      reason: 'publish the branch',
+      scope,
+    })
+    expect(created.id.startsWith('approval_')).toBe(true)
+    expect(created.status).toBe('pending')
+    expect(created.decidedBy).toBeNull()
+    expect(created.decidedAt).toBeNull()
+    expect(created.expiresAt).toBeNull()
+    expect(created.createdAt).not.toBe('')
+    const got = store.getApproval(created.id)
+    expect(got).toEqual(created)
+    expect(got.scope).toEqual(scope)
+  })
+
+  it('missing ids throw NotFoundError and getApprovalOrNull returns null', () => {
+    const { store } = freshStore('approvals2')
+    expect(() => store.getApproval('approval_nope')).toThrow(NotFoundError)
+    expect(store.getApprovalOrNull('approval_nope')).toBeNull()
+    expect(() => store.setApprovalStatus('approval_nope', 'approved')).toThrow(NotFoundError)
+  })
+
+  it('listApprovals isolates runs and returns the newest first', () => {
+    const { store } = freshStore('approvals3')
+    const projectId = seedProject(store)
+    const runA = makeRun(store, projectId, 'a')
+    const runB = makeRun(store, projectId, 'b')
+    const base = {
+      projectId,
+      taskId: null,
+      requestedByMuseId: null,
+      reason: 'r',
+      scope: { kind: 'test' },
+    }
+    const older = store.createApproval({ ...base, runId: runA.id, action: 'x' })
+    const newer = store.createApproval({ ...base, runId: runA.id, action: 'y' })
+    store.createApproval({ ...base, runId: runB.id, action: 'z' })
+    // created_at has millisecond resolution; pin the older row so ordering is deterministic.
+    store.db
+      .prepare('UPDATE approvals SET created_at = ? WHERE id = ?')
+      .run('2024-01-01T00:00:00.000Z', older.id)
+    expect(store.listApprovals(runA.id).map((a) => a.id)).toEqual([newer.id, older.id])
+    expect(store.listApprovals(runB.id).map((a) => a.action)).toEqual(['z'])
+    expect(store.listApprovals('run_nope')).toEqual([])
+  })
+
+  it('pending -> approved stamps decided_by and decided_at', () => {
+    const { store } = freshStore('approvals4')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const approval = store.createApproval({
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    })
+    const approved = store.setApprovalStatus(approval.id, 'approved', { decidedBy: 'operator' })
+    expect(approved.status).toBe('approved')
+    expect(approved.decidedBy).toBe('operator')
+    expect(approved.decidedAt).not.toBeNull()
+    expect(store.getApproval(approval.id)).toEqual(approved)
+  })
+
+  it('setting the same status again is an idempotent no-op returning the record unchanged', () => {
+    const { store } = freshStore('approvals5')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const approval = store.createApproval({
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    })
+    // Pending no-op ignores the patch and does not decide anything.
+    expect(store.setApprovalStatus(approval.id, 'pending', { decidedBy: 'sneaky' })).toEqual(approval)
+    const approved = store.setApprovalStatus(approval.id, 'approved', { decidedBy: 'operator' })
+    // A decided approval re-set to the same status is returned without touching the decision.
+    expect(store.setApprovalStatus(approval.id, 'approved', { decidedBy: 'someone-else' })).toEqual(approved)
+    expect(store.getApproval(approval.id).decidedBy).toBe('operator')
+  })
+
+  it('rejects a transition out of a decided state', () => {
+    const { store } = freshStore('approvals6')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const approval = store.createApproval({
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    })
+    store.setApprovalStatus(approval.id, 'denied', { decidedBy: 'operator' })
+    expect(() => store.setApprovalStatus(approval.id, 'approved')).toThrow(ValidationError)
+    expect(() => store.setApprovalStatus(approval.id, 'expired')).toThrow(/denied -> expired/)
+    expect(store.getApproval(approval.id).status).toBe('denied')
+  })
+
+  it('an unknown status written directly to the database is an InternalError, never coerced', () => {
+    const { store } = freshStore('approvals7')
+    const projectId = seedProject(store)
+    const run = makeRun(store, projectId, 'g')
+    const approval = store.createApproval({
+      projectId,
+      runId: run.id,
+      taskId: null,
+      requestedByMuseId: null,
+      action: 'git.push',
+      reason: 'r',
+      scope: {},
+    })
+    store.db.prepare("UPDATE approvals SET status = 'maybe' WHERE id = ?").run(approval.id)
+    expect(() => store.getApproval(approval.id)).toThrow(InternalError)
+    expect(() => store.getApproval(approval.id)).toThrow(/invalid approval status 'maybe'/)
   })
 })
