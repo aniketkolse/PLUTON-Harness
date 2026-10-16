@@ -49,6 +49,27 @@ export interface CheckoutDiff {
   truncated: boolean
 }
 
+export interface IntegrateBranchOptions {
+  /** The integration checkout (Pluton-managed marker required). */
+  checkoutPath: string
+  /** The task checkout to fetch from (Pluton-managed marker required). */
+  sourcePath: string
+  /** Branch inside `sourcePath`, e.g. `pluton/<run>/<slug>`. */
+  sourceBranch: string
+  /** Required, non-empty merge commit message. */
+  message: string
+}
+
+export interface IntegrateBranchResult {
+  status: 'merged' | 'already_integrated' | 'conflict' | 'failed'
+  /** merged: the merge commit; already_integrated: the source head. */
+  commit: string | null
+  /** Conflicted file list (unmerged paths). */
+  conflicts: string[]
+  /** Failure explanation (first stderr line, bounded). */
+  detail: string | null
+}
+
 interface MarkerFile {
   managed: true
   kind: CheckoutRequest['kind']
@@ -265,6 +286,91 @@ export class GitWorkspaceManager {
     throw new WorkspaceError(`git commit failed (exit ${String(commit.exitCode)}): ${firstLine(commit.stderr, 300)}`, {
       details: { stdout: commit.stdout.slice(0, 2_000), stderr: commit.stderr.slice(0, 2_000) },
     })
+  }
+
+  /** `git diff --name-only <from>..<to>` inside a Pluton-managed checkout. */
+  async changedFiles(checkoutPath: string, from: string, to = 'HEAD'): Promise<string[]> {
+    const abs = resolve(checkoutPath)
+    this.assertInsideRoot(abs, 'changed files')
+    if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
+    const diff = await this.git(['diff', '--name-only', `${from}..${to}`], abs)
+    if (diff.exitCode !== 0) {
+      throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(diff.stderr, 300)}`)
+    }
+    return diff.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '')
+  }
+
+  /**
+   * Merge a task branch into an integration checkout: `git fetch` by source
+   * path + branch into FETCH_HEAD (no refs written), then `git merge --no-ff`.
+   * Conflicts stop the merge and are PRESERVED: Pluton never runs
+   * `merge --abort`, `reset` or `clean`, so the operator can resolve the
+   * mid-merge state or recreate the checkout. An existing unresolved merge is
+   * reported as `failed` before anything is fetched.
+   */
+  async integrateBranch(opts: IntegrateBranchOptions): Promise<IntegrateBranchResult> {
+    const checkout = resolve(opts.checkoutPath)
+    const source = resolve(opts.sourcePath)
+    this.assertInsideRoot(checkout, 'integrate')
+    this.assertInsideRoot(source, 'integrate')
+    if (!this.readMarker(checkout)) throw new WorkspaceError(`not a Pluton-managed checkout: ${checkout}`)
+    if (!this.readMarker(source)) throw new WorkspaceError(`not a Pluton-managed checkout: ${source}`)
+    if (opts.message.trim() === '') throw new ValidationError('merge message must be non-empty')
+
+    if (existsSync(join(checkout, '.git', 'MERGE_HEAD'))) {
+      return {
+        status: 'failed',
+        commit: null,
+        conflicts: [],
+        detail: `unresolved merge in progress in ${checkout}; Pluton never resets or aborts — resolve it or recreate the integration checkout`,
+      }
+    }
+
+    const fetch = await this.git(['fetch', source, opts.sourceBranch], checkout)
+    if (fetch.exitCode !== 0 || fetch.timedOut) {
+      return {
+        status: 'failed',
+        commit: null,
+        conflicts: [],
+        detail: fetch.timedOut
+          ? `git fetch timed out after ${this.timeoutMs}ms`
+          : firstLine(fetch.stderr, 300),
+      }
+    }
+
+    const ancestor = await this.git(['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], checkout)
+    if (ancestor.exitCode === 0) {
+      const rev = await this.git(['rev-parse', 'FETCH_HEAD'], checkout)
+      return {
+        status: 'already_integrated',
+        commit: rev.exitCode === 0 ? rev.stdout.trim() : null,
+        conflicts: [],
+        detail: null,
+      }
+    }
+
+    const merge = await this.git([...COMMIT_OPTS, 'merge', '--no-ff', '-m', opts.message, 'FETCH_HEAD'], checkout)
+    if (merge.exitCode === 0) {
+      const rev = await this.git(['rev-parse', 'HEAD'], checkout)
+      return { status: 'merged', commit: rev.exitCode === 0 ? rev.stdout.trim() : null, conflicts: [], detail: null }
+    }
+
+    const unmerged = await this.git(['diff', '--name-only', '--diff-filter=U'], checkout)
+    const conflicts =
+      unmerged.exitCode === 0
+        ? unmerged.stdout
+            .split(/\r?\n/)
+            .filter((line) => line.trim() !== '')
+        : []
+    if (conflicts.length > 0) {
+      return { status: 'conflict', commit: null, conflicts, detail: null }
+    }
+    const detail = merge.timedOut
+      ? `git merge timed out after ${this.timeoutMs}ms`
+      : firstLine(merge.stderr, 300) || `git merge failed (exit ${String(merge.exitCode)})`
+    return { status: 'failed', commit: null, conflicts: [], detail }
   }
 
   /**

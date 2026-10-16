@@ -30,6 +30,12 @@ async function git(args: string[], cwd: string): Promise<void> {
   if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
 }
 
+async function gitOut(args: string[], cwd: string): Promise<string> {
+  const r = await run(['git', ...args], { cwd, timeoutMs: 60_000 })
+  if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
+  return r.stdout
+}
+
 async function makeRepo(): Promise<string> {
   const repo = tempDir('pluton-ws-repo-')
   await git(['init', '-b', 'main'], repo)
@@ -400,5 +406,216 @@ describe('GitWorkspaceManager removal guards', () => {
         // afterAll retries once the child is gone.
       }
     }
+  })
+})
+
+describe('GitWorkspaceManager integration primitives (real git)', () => {
+  /** One task checkout plus one integration checkout, both based on the repo HEAD. */
+  async function makePair(manager: GitWorkspaceManager, repo: string) {
+    const task = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'task-checkout',
+      runId: 'run_abc123ff',
+      slug: 'integration task',
+    })
+    const integration = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'integration-checkout',
+      runId: 'run_abc123ff',
+    })
+    return { task, integration }
+  }
+
+  it('lists committed files between two commits and refuses unmanaged paths', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task } = await makePair(manager, repo)
+
+    expect(await manager.changedFiles(task.path, task.baseCommit)).toEqual([])
+    writeFileSync(join(task.path, 'README.md'), 'hello\nworld\n')
+    writeFileSync(join(task.path, 'new-file.txt'), 'new\n')
+    await manager.commitAll(task.path, 'task: two files')
+
+    const files = await manager.changedFiles(task.path, task.baseCommit)
+    expect([...files].sort()).toEqual(['README.md', 'new-file.txt'])
+    expect(await manager.changedFiles(task.path, 'HEAD')).toEqual([])
+
+    const outside = tempDir('pluton-ws-outside-')
+    await expect(manager.changedFiles(outside, 'HEAD')).rejects.toThrowError(
+      /outside Pluton's workspaces root/,
+    )
+    await expect(manager.changedFiles(root, 'HEAD')).rejects.toThrowError(/not a Pluton-managed checkout/)
+  })
+
+  it('merges a diverged task branch with --no-ff and reports already_integrated on rerun', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task, integration } = await makePair(manager, repo)
+
+    writeFileSync(join(task.path, 'feature.txt'), 'feature work\n')
+    const committed = await manager.commitAll(task.path, 'task: add feature')
+    expect(committed.commit).not.toBeNull()
+
+    const opts = {
+      checkoutPath: integration.path,
+      sourcePath: task.path,
+      sourceBranch: task.branch,
+      message: 'pluton: merge integration task',
+    }
+    const merged = await manager.integrateBranch(opts)
+    expect(merged.status).toBe('merged')
+    expect(merged.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(merged.conflicts).toEqual([])
+    expect(merged.detail).toBeNull()
+
+    // A merge commit with two parents proves --no-ff was used.
+    const parents = (await gitOut(['rev-list', '--parents', '-n', '1', 'HEAD'], integration.path))
+      .trim()
+      .split(/\s+/)
+    expect(parents).toHaveLength(3)
+    expect(parents[0]).toBe(merged.commit)
+    expect(existsSync(join(integration.path, 'feature.txt'))).toBe(true)
+    expect(existsSync(join(integration.path, '.git', 'MERGE_HEAD'))).toBe(false)
+
+    const headAfterMerge = (await gitOut(['rev-parse', 'HEAD'], integration.path)).trim()
+    const again = await manager.integrateBranch(opts)
+    expect(again.status).toBe('already_integrated')
+    expect(again.commit).toBe(committed.commit)
+    expect(again.conflicts).toEqual([])
+    expect((await gitOut(['rev-parse', 'HEAD'], integration.path)).trim()).toBe(headAfterMerge)
+  })
+
+  it('stops on conflict, keeps the mid-merge state and never aborts or resets', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task, integration } = await makePair(manager, repo)
+
+    writeFileSync(join(task.path, 'README.md'), 'task side\n')
+    await manager.commitAll(task.path, 'task: readme from task')
+    writeFileSync(join(integration.path, 'README.md'), 'integration side\n')
+    await manager.commitAll(integration.path, 'integration: readme on integration')
+
+    const headBefore = (await gitOut(['rev-parse', 'HEAD'], integration.path)).trim()
+    const opts = {
+      checkoutPath: integration.path,
+      sourcePath: task.path,
+      sourceBranch: task.branch,
+      message: 'pluton: merge conflicting task',
+    }
+    const result = await manager.integrateBranch(opts)
+    expect(result.status).toBe('conflict')
+    expect(result.commit).toBeNull()
+    expect(result.conflicts).toEqual(['README.md'])
+
+    // The mid-merge state must survive: MERGE_HEAD, markers, unchanged HEAD,
+    // unmerged index entries — Pluton never runs merge --abort/reset/clean.
+    expect(existsSync(join(integration.path, '.git', 'MERGE_HEAD'))).toBe(true)
+    const conflicted = readFileSync(join(integration.path, 'README.md'), 'utf8')
+    expect(conflicted).toContain('<<<<<<<')
+    expect(conflicted).toContain('>>>>>>>')
+    expect((await gitOut(['rev-parse', 'HEAD'], integration.path)).trim()).toBe(headBefore)
+    const status = await manager.status(integration.path)
+    expect(status.changes.some((line) => line.startsWith('UU'))).toBe(true)
+
+    // A rerun refuses to merge over the unresolved merge; nothing is reset.
+    const again = await manager.integrateBranch(opts)
+    expect(again.status).toBe('failed')
+    expect(again.detail).toMatch(/unresolved merge in progress/)
+    expect(existsSync(join(integration.path, '.git', 'MERGE_HEAD'))).toBe(true)
+  })
+
+  it('reports failed when the source branch cannot be fetched', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { integration } = await makePair(manager, repo)
+
+    const result = await manager.integrateBranch({
+      checkoutPath: integration.path,
+      sourcePath: integration.path,
+      sourceBranch: 'pluton/run_abc123ff/does-not-exist',
+      message: 'pluton: merge missing branch',
+    })
+    expect(result.status).toBe('failed')
+    expect(result.commit).toBeNull()
+    expect(result.conflicts).toEqual([])
+    expect(result.detail).toBeTruthy()
+  })
+
+  it('requires a non-empty merge message and a Pluton-managed source checkout', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task, integration } = await makePair(manager, repo)
+
+    await expect(
+      manager.integrateBranch({
+        checkoutPath: integration.path,
+        sourcePath: task.path,
+        sourceBranch: task.branch,
+        message: '   ',
+      }),
+    ).rejects.toThrowError(ValidationError)
+
+    const unmanaged = join(root, 'not-managed')
+    mkdirSync(unmanaged, { recursive: true })
+    await expect(
+      manager.integrateBranch({
+        checkoutPath: integration.path,
+        sourcePath: unmanaged,
+        sourceBranch: 'main',
+        message: 'pluton: unmanaged source',
+      }),
+    ).rejects.toThrowError(/not a Pluton-managed checkout/)
+  })
+
+  it('fetches by source path + branch into FETCH_HEAD without refspecs or destructive git', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const creator = makeManager(root)
+    const { task, integration } = await makePair(creator, repo)
+    writeFileSync(join(task.path, 'g.txt'), 'g\n')
+    await creator.commitAll(task.path, 'task: g')
+
+    const argvLog: string[][] = []
+    const spying = new GitWorkspaceManager({
+      workspacesRoot: root,
+      runFn: async (argv, options) => {
+        argvLog.push(argv)
+        return run(argv, options)
+      },
+    })
+    const message = 'pluton: merge spied task'
+    const result = await spying.integrateBranch({
+      checkoutPath: integration.path,
+      sourcePath: task.path,
+      sourceBranch: task.branch,
+      message,
+    })
+    expect(result.status).toBe('merged')
+    expect(argvLog).toContainEqual(['git', 'fetch', task.path, task.branch])
+    expect(argvLog).toContainEqual([
+      'git',
+      '-c',
+      'user.name=Pluton',
+      '-c',
+      'user.email=pluton@localhost',
+      'merge',
+      '--no-ff',
+      '-m',
+      message,
+      'FETCH_HEAD',
+    ])
+    await spying.changedFiles(task.path, task.baseCommit)
+    expect(argvLog).toContainEqual(['git', 'diff', '--name-only', `${task.baseCommit}..HEAD`])
+
+    const flat = argvLog.flat()
+    expect(flat).not.toContain('--abort')
+    expect(flat).not.toContain('reset')
+    expect(flat).not.toContain('clean')
+    expect(flat).not.toContain('--force')
   })
 })
