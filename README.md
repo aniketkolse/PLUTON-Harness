@@ -54,14 +54,17 @@ node src/cli/main.ts init          # write pluton.yaml + .pluton/roles in the cu
 node src/cli/main.ts muse list
 node src/cli/main.ts run --goal "Implement authentication and tests"   # supervised run: the manager Muse plans and delegates
 node src/cli/main.ts verify --run <id>                                  # run the project's verification checks, apply the verdict
+node src/cli/main.ts attach <muse>                                      # live tmux session inside the Muse's container
+node src/cli/main.ts integrate --run <id>                               # merge verified task branches into the integration checkout (never main)
+node src/cli/main.ts approvals list                                     # operator inbox: list/approve/deny pending approvals
 node src/cli/main.ts status
 ```
 
 ## Command families (target surface)
 
 `doctor` · `init` · `project` · `muse` (list/show/create/edit/chat·engine/model) · `run` ·
-`status` · `runs` · `task` (list/show/graph/diff/retry) · `verify` · `approve` · `stop` ·
-`attach` · `logs` — all with `--json` where meaningful.
+`status` · `runs` · `task` (list/show/graph/diff/retry) · `verify` · `integrate` · `attach` ·
+`approvals` (list/approve/deny) · `stop` · `logs` — all with `--json` where meaningful.
 
 ## Repository layout
 

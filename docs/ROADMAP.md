@@ -113,6 +113,10 @@ References (read-only, recorded commits):
       stop/remove — `src/sandbox/docker.ts` + conformance tests; `local-process` is acknowledgement-gated
 - [x] Per-Muse tmux sessions executed inside the container via argv-only sandbox exec, `=`-exact target
       matching, typed failure reasons (`src/terminal/`) + tests; native-Windows tmux deliberately unsupported
+- [x] `pluton attach` — interactive operator terminal into a Muse's container tmux session: resolves
+      Muse → container → session, ensures the session once, returns the exact `docker exec -it` argv
+      (live argv + session-ensure proven; the interactive `-it` leg is NOT RUN — no real TTY in this
+      harness; `docs/smoke-live-run.md`)
 - [x] Isolated checkouts: per-task `git clone --local`, branch `pluton/<run>/<slug>`, hardlink fallback,
       Pluton-owned removal guards (`src/workspace/manager.ts`) + tests; workspace/sandbox/terminal registry
       rows in the store
@@ -132,9 +136,12 @@ References (read-only, recorded commits):
       `cli-mcp-serve` — hardened after an adversarial review (realpath containment against
       junctions/case/8.3 aliases, bounded audit names, dependency-scope and terminal-delegation
       rejection, pending-approval caps)
-- [~] Dynamic specialist proposals with hard limits + audit records — `muse.propose_create` validates
+- [x] Dynamic specialist proposals with hard limits + audit records — `muse.propose_create` validates
       team-size/role/engine/model and records a pending operator approval (nothing instantiated
-      silently); the operator-side apply/deny wiring lands with the run loop
+      silently); the operator side landed as `pluton approvals` (list/approve/deny): approving a
+      `muse.create` applies it through the real team sync + container provisioning when the run is
+      live in docker mode, denying never instantiates, and pending approvals expire fail-closed
+      (operator-configurable TTL; sweep on list/decide)
 - [x] Manager plan → validate → dispatch → collect → report flow (plan-first policy) —
       `src/orchestrator/supervisor.ts`: the manager session runs concurrently with the dispatch loop
       (ready tasks → per-Muse lock → engine session in its checkout), dependency order comes from
@@ -164,12 +171,18 @@ References (read-only, recorded commits):
       `completed` / `success`; the smoke found and fixed one engine-session leak, `ba68557`);
       `local-process` remains the acknowledgement-gated host-mode path
 
-## Phase 7 — Verification and integration `[~]`
+## Phase 7 — Verification and integration `[x]`
 
 - [x] Safe configured checks (argument arrays, allow list = config, conservative deny list of
       shells/destructive tools, bounded output, artifact retention, hard timeouts) —
       `src/verify/runner.ts`; evidence rows in `verification_checks`, `verification.run` events
-- [ ] Integration checkout (never the user's tree), conflict detection, evidence retention
+- [x] Integration checkout (never the user's tree), conflict detection, evidence retention —
+      `pluton integrate` creates the per-run checkout under `.pluton/workspaces/`, commits any dirty
+      Pluton-managed task checkout first (`19f8f19`), merges verified task branches (`--no-ff`) into
+      `pluton/integration/<run>`, runs the configured checks there and writes an artifact; conflicts
+      stop the merge, stay on the branch and are recorded; a protected-path gate blocks disallowed
+      paths behind an `integration.apply` approval. Never main (ADR-0009) — live-verified
+      (`docs/smoke-live-run.md`)
 - [x] `pluton verify --run [--task]` repeatable; truthful final verdict logic — failed, errored,
       denied, timed-out and never-run (pending) checks can never be green; run closes from durable
       records only (`applyTaskVerificationVerdict`, `finalizeRunVerdict`) + 5 integration tests
@@ -178,8 +191,10 @@ References (read-only, recorded commits):
 
 - [~] Failure-mode tests — covered: malformed engine protocol (`acp-client`, mock protocol crash),
       prompt hang/timeout (`supervisor`), Docker daemon/image unavailable and missing tmux
-      (`sandbox`, `sandbox-image`), cycles/self-dependency (`task-graph`). Missing: git conflict
-      detection (integration checkout not built), approval timeout (no expiry path exists yet)
+      (`sandbox`, `sandbox-image`), cycles/self-dependency (`task-graph`), git merge conflicts and
+      protected-path blocks (`cli-integrate`), approval expiry sweep (`cli-approvals` + live).
+      Missing: an auto-continue path for `integration.apply` approvals (re-running `integrate` is
+      the documented flow)
 - [x] Security review: redaction, secret paths, container config, cleanup ownership — 16 findings from
       the post-Phase-5 review and 10 from the bridge adversarial review all fixed with regression
       tests; threat model and known gaps in `docs/SECURITY.md`
@@ -191,15 +206,17 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phases 0–5 complete; Phase 6 in progress (bridge + supervisor + live two-engine goal in; engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring pending).
-Live status: 425 tests / 32 files green
+_Phases 0–5 complete; Phase 6 essentially complete (bridge + supervisor + live two-engine goal in;
+engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring delivered as
+`pluton approvals`). Phase 7 complete (verification gate + integration checkout via `pluton integrate`).
+Live status: 492 tests / 37 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
 `muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
 errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task list/show`, `graph`,
-`mcp serve`, `run`, `verify` — all with clean `--json`. Planned commands (`attach`, `integrate`) fail
-with a stable `not_implemented` code. Live engine suites are opt-in (`npm run test:live`; OpenCode
+`mcp serve`, `run`, `verify`, `attach`, `integrate`, `approvals` (list/approve/deny) — all with clean
+`--json`. Live engine suites are opt-in (`npm run test:live`; OpenCode
 3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
 (`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
 Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`) 5/5 green; `pluton doctor` fully green with tmux
@@ -221,6 +238,15 @@ engine spawns, engines-image gate — `1f9521c`, `2695e20`, `45f23f6`); its fail
 live-verified and its full live E2E ran 2026-10-17 — PASS (engines image with in-image version
 proof, per-Muse containers, a real worker edit closed by `pluton verify` `completed`/`success`;
 the smoke found and fixed an engine-session leak, `ba68557`; `docs/smoke-live-run.md`).
+The attach/integrate/approvals slice landed (`60f513f`…`19f8f19`) and is live-verified on the same
+running setup: `pluton attach --json` resolves the Muse container and ensures its tmux session
+(argv + session-ensure proven live; the interactive `-it` leg is NOT RUN — this harness has no real
+TTY); `pluton integrate --run` committed a dirty worker checkout (`19f8f19` — a live finding),
+merged it `--no-ff` into `pluton/integration/run_mvbdxegw64ba23de` and passed the configured check
+inside the integration checkout; `pluton approvals` list/approve/deny and the expiry sweep
+(`pluton:timeout`, fail-closed) all ran live against real rows. `docs/smoke-live-run.md` records
+the evidence.
 Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
-Next (not in this build): `attach`/`integrate`, the integration checkout, and dynamic-specialist
-approval apply/deny + expiry._
+Next (not in this build): network policy `restricted` enforcement, container behavior on Linux
+hosts (mount ownership/uid alignment), re-dispatch after the verification gate, and an auto-continue
+path for `integration.apply` approvals._

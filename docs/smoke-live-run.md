@@ -230,3 +230,84 @@ half-started run was recorded.
 - [ ] on Linux hosts, mount ownership (uid remap/chown) remains untested —
   Docker Desktop's broad mount permissions can mask the problem
   (SECURITY.md §8.9).
+
+## Attach / integrate / approvals slice — live evidence (2026-10-17)
+
+Implementation under test: Tasks 1–9 of
+`docs/superpowers/plans/2026-10-17-attach-integrate-approvals.md` (commits `60f513f`…`19f8f19`).
+Same live environment as the container-mode smoke above (containers
+`pluton-project-mvbcakle23bcab26-{manager,worker}` up; run `run_mvbdxegw64ba23de` completed).
+Scratch helpers (seed/dump `.mjs`) live under `.pluton-tmp/` and are never committed.
+
+### `pluton attach` — `[x]` argv + session ensure; interactive leg NOT RUN
+
+`node bin/pluton.js attach manager --json` in `smoke-docker/`:
+
+```json
+{ "museId": "manager",
+  "containerName": "pluton-project-mvbcakle23bcab26-manager",
+  "sessionName": "pluton_smoke-docker_manager",
+  "sessionCreated": true,
+  "argv": ["docker", "exec", "-it", "pluton-project-mvbcakle23bcab26-manager",
+           "tmux", "attach-session", "-t", "=pluton_smoke-docker_manager"],
+  "attached": false, "exitCode": null }
+```
+
+The session itself is proven inside the container:
+
+```
+docker exec pluton-project-mvbcakle23bcab26-manager tmux list-windows -t '=pluton_smoke-docker_manager'
+→ 0: shell* (1 panes) [80x24] [layout b25d,80x24,0,0,0] @0 (active)   (has-session exit 0)
+```
+
+- `--json` resolves the Muse → container → tmux session, ensures the session exists, and returns
+  the exact spawn argv without spawning (`attached: false`, `exitCode: null` by design).
+- **NOT RUN:** the interactive `docker exec -it … tmux attach-session` leg itself — this harness
+  has no real TTY to attach from; the recorded argv is exactly what a real terminal would exec.
+
+### `pluton integrate` — `[x]` PASS (after one live finding, fixed in `19f8f19`)
+
+First live attempt reported `already_integrated` with the base commit `025d1b1` — the worker's
+`README.md` edit was still uncommitted in its task checkout (HEAD == base). Workers leave their
+checkout dirty on purpose (the manager reviews the diff; `pluton verify` checks the working tree),
+and ADR-0009 commits task changes at integration time — but nothing did. **Live finding**:
+`19f8f19` makes `integrate` commit any dirty Pluton-managed task checkout before the
+protected-path diff and the merge.
+
+Re-run against run `run_mvbdxegw64ba23de` (task `task_mvbdxru02820485e`):
+
+- committed the dirty task checkout as `e2b77b0` (`integration.task_committed` event; the task
+  workspace row's `headCommit` updated);
+- merged into `pluton/integration/run_mvbdxegw64ba23de` as `5a75f24` (`integration.task_merged`);
+  `git log`: `5a75f24` → `e2b77b0` → `025d1b1`; `README.md` carries the `## Smoke` section;
+- checks ran **in the integration checkout**: `smoke test` exit 0 (`integration.checks`); artifact
+  written to `.pluton/state/artifacts/integration-run_mvbdxegw64ba23de.json`;
+- re-run → `already_integrated`, `committed: []` — idempotent. The user's repo tree was never
+  touched; work stays on the `pluton/integration/…` branch (main apply is out of scope, ADR-0009).
+
+### `pluton approvals` — `[x]` PASS
+
+Rows seeded via a scratch `.mjs` against the project store (`expires_at` ± minutes), then the real
+CLI:
+
+| step | command | observed |
+|---|---|---|
+| pending | seed +30 min → `approvals list --json` | row visible, `pending`, `expiresInMinutes: 30` |
+| approve | `approvals approve approval_mvbh5tzz3dc0f770 --json` | `approved`, `decidedBy: operator`; `approval.decided` event |
+| audit | `approvals list --all --json` | counts `approved: 1`, row carries `decidedAt` |
+| expiry sweep | seed −5 min → `approvals list --json` | swept to `expired`, `decidedBy: pluton:timeout`; `approval.expired` event |
+| fail-closed | `approvals approve <expired> --json` | exit 1, `ok: false`, `request_conflict` — "already expired" |
+| deny | `approvals deny approval_mvbh6jgv9bce1bd3 --json` | `denied`, `decidedBy: operator`; `approval.decided` event |
+
+A read-only dump of the store's events confirms the audit trail (`approval.decided` ×2,
+`approval.expired` ×1). The approved `muse.create` apply path (create → `syncMuses` → container
+provisioning) is pinned by `tests/integration/cli-approvals.test.ts` (16 tests); the live rows above
+used the generic `approval.request` action, so no Muse was instantiated by this smoke.
+
+### Still open after this slice
+
+- interactive attach (real TTY) — NOT RUN in this harness;
+- Linux-host mount ownership (SECURITY.md §8.9) — unchanged by this slice;
+- `integration.apply` approvals are created by `integrate` when the protected-path gate blocks a
+  merge, but nothing auto-continues the integrate command after approval — re-running `integrate`
+  is the documented flow.

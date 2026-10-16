@@ -1,6 +1,6 @@
 # Pluton-Harness — final delivery report (§17)
 
-Status date: 2026-10-16 · host: Windows 11 + Docker Desktop (WSL2) · Node v24.22.0 · git `main`,
+Status date: 2026-10-17 · host: Windows 11 + Docker Desktop (WSL2) · Node v24.22.0 · git `main`,
 unpushed. This report states exactly what was built, what was executed and observed, and what was
 **not** — per the master prompt's honesty rules. Nothing below is claimed without a file, a commit,
 or a command whose output was observed.
@@ -16,10 +16,15 @@ supervises runs from durable state, and gates completion behind recorded verific
 Delivered and test-verified in this environment: Phases 0–5 complete; Phase 6 (bridge,
 transport, `pluton mcp serve`, run supervisor, `pluton run` wired end to end, live host-mode smoke
 with an OpenCode manager + Qwen worker, engine containers through `docker exec` with an
-engines-profile worker image) and Phase 7 gate (`pluton verify`, verdict logic); Phase 8
+engines-profile worker image) and Phase 7 (`pluton verify` verdict logic plus the integration
+checkout behind `pluton integrate`); Phase 8
 substantially (adversarial review fixes, failure-mode tests, `docs/SECURITY.md`, this report).
-**Not delivered:** `pluton attach`/`integrate` CLI commands, the integration checkout, operator
-apply/deny wiring for specialist proposals, and approval expiry. Container-mode runs are wired,
+The attach/integrate/approvals slice (`60f513f`…`19f8f19`) delivered `pluton attach` (tmux attach
+into a Muse's container), `pluton integrate` (per-run integration checkout, conflict detection,
+protected-path gate — never main) and `pluton approvals` (list/approve/deny with
+operator-configurable expiry), all **live-verified 2026-10-17** on the running container-mode setup
+(one live finding fixed: commit-on-integrate, `19f8f19`) — see `docs/smoke-live-run.md`.
+Container-mode runs are wired,
 unit/integration-verified, and **live-smoked 2026-10-17** (engines image, per-Muse containers, a
 real worker edit closed by `pluton verify`; the smoke found and fixed one engine-session leak,
 `ba68557`) — see `docs/smoke-live-run.md`. The remaining gaps are enumerated in §6 with
@@ -27,8 +32,8 @@ reproducible commands.
 
 ## 2. Evidence base
 
-- Last full local run of this report: `npm run check` → typecheck clean, **425 tests / 32 files
-  green** (27 unit files + 5 integration files).
+- Last full local run of this report: `npm run check` → typecheck clean, **492 tests / 37 files
+  green** (29 unit files + 8 integration files).
 - Host-mode live smoke (2026-10-16/17, `docs/smoke-live-run.md`): OpenCode manager + Qwen worker on a
   real gateway-backed model; run #1 (pre-fix) is kept as the failure of record (run `uncertain`,
   phantom worker "success" with zero edits caught by `pluton verify`); after the fix commit the same
@@ -46,6 +51,15 @@ reproducible commands.
   flakiness, not a Pluton defect). The first attempt failed on an operator key-extraction mistake
   (PowerShell `-match` on a scalar returns a boolean) and Pluton recorded honest
   `unknown_outcome`s — exactly the designed behavior; recorded in the smoke doc.
+- Attach/integrate/approvals live slice (2026-10-17, `docs/smoke-live-run.md`): `pluton attach
+  --json` resolved the Muse container and ensured its tmux session (argv + session ensure proven
+  live; interactive `-it` leg NOT RUN — no real TTY in this harness); `pluton integrate --run`
+  committed a dirty worker checkout (`19f8f19` — a live finding: workers leave their checkout dirty
+  for diff review, so nothing had ever committed task branches), merged it `--no-ff` into
+  `pluton/integration/run_mvbdxegw64ba23de` (`5a75f24` on top of `e2b77b0`), passed the configured
+  check inside the integration checkout and wrote the artifact; `pluton approvals` list/approve/deny
+  ran live against real rows and the overdue sweep flipped one to `expired`
+  (`decided_by: pluton:timeout`), with a decision on it failing closed (`request_conflict`, exit 1).
 - Container-mode adversarial review (independent subagent, against `45f23f6`): one blocker plus four
   major findings, all addressed in `88bd335` with tests — ACP session cwd mapping, read-only-policy
   mounts, docker client connection env, stale-container reuse validation (`SandboxManager.inspect`),
@@ -55,7 +69,11 @@ reproducible commands.
 - Opt-in live-engine suites: `npm run test:live` → **OpenCode 3/3, Qwen 4/4 green** on this host
   (OpenCode v2.0.29; Qwen Code v0.25.2 via `qwen --acp`, backed by the operator's local gateway —
   no new external credentials were provisioned).
-- Milestone commits (newest first): `ba68557` engine-session close on every exit path (container-smoke leak) · `88bd335` container-mode review fixes · `45f23f6` container-mode
+- Milestone commits (newest first): `19f8f19` commit verified task checkouts at integration time
+  (live finding) · `11da6e6` approvals inbox (list/apply/deny/expiry) · `084024b` shared per-Muse
+  container provisioning · `249568d` `pluton integrate` · `eb0018e` approval TTL config · `206f652`
+  store approval expiry + listing · `15f71d3` protected-path matcher · `6bdb64a` workspace merge
+  primitives · `4799244` attach CLI · `60f513f` attach core · `ba68557` engine-session close on every exit path (container-smoke leak) · `88bd335` container-mode review fixes · `45f23f6` container-mode
   `docker exec` engine spawn wiring · `2695e20` per-Muse containers · `1f9521c` engines image profile · `c2d8fcd` review fixes of the smoke fix · `cceec89` live-smoke
   fixes (approval wiring, settled waits, transport drain, durable approval events) · `ca0018d`
   `pluton run` wiring · `77fda33` SECURITY.md · `9a460c9` failure-mode tests ·
@@ -83,13 +101,14 @@ reproducible commands.
 | 6 (containers) | Engines profile in the worker image (`PLUTON_ENGINES=1`, pinned `@opencode/cli@2.0.31` + `@qwen-code/qwen-code@0.25.2`, fail-closed in-image `--version` proof, recorded profile gates dispatch); per-Muse containers (`ensureMuseContainer`: labels, `host.docker.internal:host-gateway`, workspaces + engine-home mounts, durable rows) and the `docker exec` engine spawn seam (`-e NAME`-only env, host→container path rewriting, pinned in-image binaries); `pluton run` container mode fails closed before any run row exists (live-verified) | `docker/worker/Dockerfile`, `src/sandbox/image.ts`, `src/sandbox/muse-containers.ts`, `src/engines/docker-exec.ts`, `src/cli/commands/run.ts` | `1f9521c`, `2695e20`, `45f23f6` |
 | 7 | Verification gate: configured argv-array checks through the bounded runner, deny list, evidence rows + events before any verdict, `pluton verify`, truthful verdict/finalization | `src/verify/runner.ts`, `src/cli/main.ts` | `a97f33a` |
 | 8 | Failure-mode tests (timeout, protocol crash), `docs/SECURITY.md`, this report | `tests/`, `docs/` | `9a460c9`, `77fda33`, this commit |
+| 7/8 (slice) | `pluton attach` (tmux attach into a Muse's container), `pluton integrate` (per-run integration checkout, `--no-ff` merges, protected-path gate, conflict stop/preserve/record, commit-on-integrate), `pluton approvals` (list/approve/deny, `muse.create` apply with team sync + container provisioning, TTL expiry sweep) | `src/cli/commands/{attach,integrate,approvals}.ts`, `src/workspace/manager.ts`, `src/store/store.ts` | `60f513f`→`19f8f19` |
 
 ## 4. Test evidence — what is actually verified
 
 Commands and results observed at the report commit:
 
 1. `npx tsc -p tsconfig.json` — clean.
-2. `npx vitest run` — **423 passed / 32 files** (27 unit, 5 integration). Highlights:
+2. `npx vitest run` — **492 passed / 37 files** (29 unit, 8 integration). Highlights:
    - `tests/unit/tool-bridge.test.ts` (30): permissions enforced server-side, scope per call, audit
      events, waits event-driven, heartbeat re-read for stdio sessions, review regressions
      (junction escape denied, `.PLUTON` denied, oversized tool name audited, subtree dependencies,
@@ -105,6 +124,24 @@ Commands and results observed at the report commit:
      in-image binaries, rewritten engine home, `-e NAME`-only argv, ACP session cwd asserted to be
      the container path); daemon-down and base-image failures close before any run row exists; a
      config without a supervisor Muse fails cleanly with a `--json` envelope.
+   - `tests/integration/cli-attach.test.ts` (7): attach resolves the Muse → container → tmux
+     session, ensures the session through the manager and never spawns in `--json` mode (named
+     window on request); spawns the exact `docker exec` argv and returns the child exit code;
+     typed refusals (local-process naming docker, disabled Muse, unknown muse, missing container →
+     `terminal_unavailable`).
+   - `tests/integration/cli-integrate.test.ts` (11): the integration checkout end to end — `--no-ff`
+     merges, checks in the integration checkout, artifact, idempotent rerun; commit-on-integrate
+     (a dirty verified checkout lands; a clean one makes no empty commit/event; a refusing checkout
+     goes to `failed` and the rest integrate); conflict stop/preserve/record + rerun refusal;
+     protected-path task blocked behind a pending approval then merged once approved; task
+     selection and refusals (not-completed refs, no completed tasks, missing checkout).
+   - `tests/integration/cli-approvals.test.ts` (16): the approvals inbox end to end — default
+     list vs `--all` + counts + `--run` filter; overdue sweep to `expired` (+event, hidden from the
+     default list); approve/deny with operator stamp + `approval.decided`; deciding again or
+     deciding a swept row conflicts; `muse.create` apply (host sync, deny untouched, malformed
+     scope loud, docker-mode provisioning through the shared helper, unreachable sandbox →
+     `containerWarning` never a failed decision); un-park rules (resumes after the last pending,
+     a recorded `run.finished` parks with its outcome); idempotent `--request-id` retries.
    - `tests/unit/docker-exec.test.ts` (9): the `docker exec` spawn seam — argv shape, values never in
      argv (`-e NAME` pairs only), host-shaped platform vars (PATH/SystemRoot/APPDATA) never crossing
      into the container while the docker CLI itself still gets them plus the connection env
@@ -151,6 +188,9 @@ Commands and results observed at the report commit:
 | `pluton run` end-to-end: manager plans → dispatch → verify closes | `src/cli/commands/run.ts`, `src/orchestrator/supervisor.ts` | `cli-run` integration tests (4, incl. container mode through the real `docker exec` seam); host-mode live smoke (`docs/smoke-live-run.md`) — run closed `completed` only via `pluton verify`; container-mode fail-closed live-verified (typed `sandbox_unavailable`, 0 durable rows) |
 | Container isolation: engines in per-Muse containers; env values never in argv | `src/sandbox/muse-containers.ts`, `src/engines/docker-exec.ts` | `docker-exec` unit tests (9), `muse-containers` tests (10) + `sandbox.test.ts` additions, container-mode `cli-run` integration tests (reuse validation via `SandboxManager.inspect`); **live container-mode E2E ran 2026-10-17 — PASS** (`docs/smoke-live-run.md`: engines image, per-Muse containers, real worker edit closed by `pluton verify`; live argv spot-check shows `-e NAME` pairs only) |
 | Isolated per-task checkouts; never touch user tree; no destructive git; no auto-merge to main | `src/workspace/manager.ts` | supervisor checkout test asserts root branch still `main`; removal guards |
+| `pluton attach` — operator terminal into a Muse's container session | `src/cli/commands/attach.ts`, `src/terminal/` | `cli-attach` tests (7, incl. exact `docker exec -it` argv and typed refusals); **live**: `attach --json` ensured the session inside `pluton-project-mvbcakle23bcab26-manager` (`tmux list-windows` → `0: shell*`) — interactive `-it` leg NOT RUN, no real TTY in this harness (§7) |
+| `pluton integrate` — verified work lands on a reviewable branch, never main | `src/cli/commands/integrate.ts`, `src/workspace/manager.ts` | `cli-integrate` tests (11: `--no-ff` merge, commit-on-integrate, conflict stop/preserve/record, protected gate, idempotent rerun); **live PASS** on `run_mvbdxegw64ba23de` (`docs/smoke-live-run.md`: dirty checkout committed `e2b77b0`, merged `5a75f24`, check passed in the integration checkout, artifact written) |
+| Approvals inbox: list/apply/deny with fail-closed expiry | `src/cli/commands/approvals.ts`, `src/store/store.ts` | `cli-approvals` tests (16: sweep+events, `muse.create` apply + provisioning, un-park rules, idempotent request-ids); **live**: pending → `approved`/`denied` (operator stamp), overdue → `expired` (`pluton:timeout`), deciding it → `request_conflict` exit 1 |
 | Secrets never in yaml/db/events/logs/argv | ADR-0008, `redactDeep`, doctor presence-only | store/doctor tests; SECURITY.md §6 |
 | argv arrays only; timeouts; bounded outputs | `src/util/exec.ts` | `util.test.ts`; runner caps + truncation markers |
 | ADRs 0001–0011; 5+ RE deliverables; THIRD_PARTY_NOTICES; no affiliation claims; UNLICENSED | `docs/adr/` (11), `docs/reverse-engineering/` (8), root notices | files present; README/notices state independence |
@@ -159,23 +199,30 @@ Commands and results observed at the report commit:
 
 Honest list; none of these are simulated or stubbed-green:
 
-1. **`pluton attach` and `pluton integrate`** — terminal attach UX and the integration checkout with
-   conflict detection are planned, not built. ADR-0005/0009 describe the intended behavior.
-2. **Operator apply/deny for specialist proposals** — proposals are validated, capped, deduplicated
-   and recorded as pending approvals; no CLI applies them into a live team yet.
-3. **Approval expiry** — no timeout-to-denied transition exists (SECURITY.md §8.3).
+1. **Interactive `pluton attach` is not live-proven.** The resolution, session-ensure and exact
+   `docker exec -it` argv are live-verified; the interactive attach leg itself was NOT RUN because
+   this harness has no real TTY (§7). Terminal attach remains an operator convenience, never a
+   security boundary (ADR-0005).
+2. **`integration.apply` has no auto-continue.** When `integrate` blocks a merge on a protected
+   path, it records an `integration.apply` approval with the configured TTL; after approving,
+   the operator re-runs `integrate` (the documented flow — the run loop does not resume the
+   command).
+3. **Approval expiry is sweep-driven, not timer-driven.** The TTL is enforced when
+   `pluton approvals list/approve/deny` runs (overdue pendings flip to `expired`, fail-closed like
+   a denial); a pending approval nobody looks at stays pending until the next sweep
+   (SECURITY.md §8.3).
 4. **Network policy `restricted`** is accepted in config but not enforced beyond container defaults
    (SECURITY.md §8.5).
-5. **Git conflict detection** — needed by `integrate`; not implemented.
-6. **Container-mode supervised run** — wired and covered in-process (unit + integration through the
+5. **Container-mode supervised run** — wired and covered in-process (unit + integration through the
    real `docker exec` seam), fail-closed path live-verified, and the **full live E2E executed
    2026-10-17 — PASS**: engines image with the in-image version proof, per-Muse containers on a real
    daemon, `host.docker.internal` reachability proven with an authenticated model call, bind-mount
    writes as uid 10001, a real worker edit closed by `pluton verify` `completed` / `success`
    (`docs/smoke-live-run.md`). The smoke found and fixed one leak (`ba68557` — the manager engine
-   session was never closed). Still unproven: container behavior on Linux hosts (mount
-   ownership/uid alignment, SECURITY.md §8.9) — the live evidence is Windows Docker Desktop.
-7. **Re-dispatch after the verification gate** — dependents blocked behind an unverified (or failed)
+   session was never closed). The attach/integrate/approvals live slice ran on the same setup.
+   Still unproven: container behavior on Linux hosts (mount ownership/uid alignment,
+   SECURITY.md §8.9) — the live evidence is Windows Docker Desktop.
+6. **Re-dispatch after the verification gate** — dependents blocked behind an unverified (or failed)
    dependency keep the run open; the record now names them (`blockedTasks` in the run summary and
    `run.finished`), but no re-admission policy exists yet.
 
@@ -183,6 +230,7 @@ Honest list; none of these are simulated or stubbed-green:
 
 | Item | Command | Why not run |
 |---|---|---|
+| Interactive `pluton attach` (real TTY) | `node bin/pluton.js attach <muse>` in a real terminal | this harness has no real TTY to attach from; the resolution, session-ensure and exact `docker exec -it` argv are live-proven (`docs/smoke-live-run.md`) |
 | Docker E2E re-run at this report | `PLUTON_E2E_DOCKER=1 npm run test:e2e` (after `pluton sandbox build-image`) | green on this host earlier in the session; not re-executed at the exact report commit |
 | Live engine re-run at this report | `npm run test:live` | green earlier (3/3, 4/4); not re-executed at the exact report commit |
 
@@ -204,7 +252,7 @@ Everything else in §4 was executed with the reported result.
 ```
 node --version                # ≥ 24
 npm install
-npm run check                 # tsc + 425 tests
+npm run check                 # tsc + 492 tests
 node bin/pluton.js doctor     # host readiness — run inside a project (create one: node bin/pluton.js init)
 # optional, needs Docker Desktop:
 pluton sandbox build-image && PLUTON_E2E_DOCKER=1 npm run test:e2e
@@ -221,6 +269,6 @@ is safe to back up as a file.
 Every test count, image digest, engine version and green/red result in this report was produced by
 commands on this host in this session; things that were not run are listed as NOT RUN in §7, and
 things that do not exist are listed in §6. Where the implementation is weaker than the ambition
-(live engine wiring, integration checkout, approval lifecycle), the gap is named here and in
-`docs/ROADMAP.md` rather than papered over. `docs/SECURITY.md` lists what the security model does
+(live engine wiring, interactive attach, network policy, Linux-host container behavior), the gap is
+named here and in `docs/ROADMAP.md` rather than papered over. `docs/SECURITY.md` lists what the security model does
 **not** protect with the same precision as what it does.

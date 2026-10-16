@@ -131,8 +131,11 @@ Stated plainly so nobody over-reads the guarantees above:
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never
    logged, but the host itself is trusted.
-3. **Approvals have no expiry.** A pending approval stays pending until the
-   operator decides; there is no automatic timeout-to-denied path yet.
+3. **Approval expiry is sweep-driven, not timer-driven.** Pending approvals carry an
+   operator-configurable TTL (`runtime.approval_timeout_minutes`, default 60, `0` = never); the
+   sweep runs when `pluton approvals list/approve/deny` executes and flips overdue pendings to
+   `expired` (fail-closed like a denial, `decided_by: pluton:timeout`). No background timer exists:
+   a pending approval nobody looks at stays `pending` in the store until the next sweep.
 4. **Container hardening is Docker's defaults plus the configured resource
    limits.** No custom seccomp/AppArmor profile, no read-only root filesystem
    guarantee for the worker image beyond what the Dockerfile sets.

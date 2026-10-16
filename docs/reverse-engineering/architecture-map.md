@@ -113,10 +113,10 @@ Pluton-Harness as built in this repository (own work, see `docs/adr/`).
 
 ```
 CLI (argv in / JSON out)                      src/cli/
-  │  commands: init, doctor, muse, engine, status, task, graph, version
-  │  stubs (explicit not_implemented): run, attach, verify, integrate
+  │  commands: init, doctor, muse, engine, status, task, graph, version, sandbox, mcp serve,
+  │            run, verify, attach, integrate, approvals (all implemented; --json everywhere)
   ▼
-Supervisor (run loop; single writer)          [planned — Phase 4/6]
+Supervisor (run loop; single writer)          [implemented — Phase 6]
   │  owns the run lifecycle; uses KeyedMutex per Muse  src/orchestrator/mutex.ts [implemented]
   ▼
 Orchestrator                                  src/orchestrator/
@@ -124,10 +124,10 @@ Orchestrator                                  src/orchestrator/
   │  scheduler: listReadyTasks (dep-complete queued tasks)             [implemented]
   ▼
 Engines                    Sandbox            Terminals        Workspaces
-  src/engines/ (contract   [planned P5]       [planned P5]     [planned P5]
-  + mock; opencode P4)     Docker container   tmux per Muse    per-task checkout
+  src/engines/ (contract   [implemented]      [implemented]    [implemented]
+  + mock; opencode, qwen)  Docker container   tmux per Muse    per-task checkout
   ▼
-Verification / Integration                    [planned — Phase 7]
+Verification / Integration                    [implemented — Phase 7]
   ▼
 Durable store — ONE SQLite DB per project     src/store/  [implemented]
   db.ts (WAL, FK on, BEGIN IMMEDIATE) · migrations.ts (forward-only)
@@ -138,16 +138,18 @@ Durable store — ONE SQLite DB per project     src/store/  [implemented]
 Data flow for a run (target, with current implementation coverage):
 
 1. `pluton run "<goal>"` → `run.create` request → **receipt** written, run row created in one tx
-   (**store layer implemented**; CLI verb still a stub).
-2. Manager Muse plans (engine adapter — **Phase 4**) → `admitTask` per unit (**implemented**) →
+   (**implemented** — `pluton run` is wired end to end and live-smoked).
+2. Manager Muse plans (engine adapter — **implemented**) → `admitTask` per unit (**implemented**) →
    dependency edges + `task.admitted` events, budget-checked.
-3. Task dispatch: checkout provisioned (**P5**), container running (**P5**), prompt sent through the
-   engine adapter (**P4**), events normalized and recorded (**store side implemented**).
-4. Child completion → exactly one wake receipt for the parent (ADR-0007; **P6**).
+3. Task dispatch: checkout provisioned (**implemented**), container running (**implemented**), prompt
+   sent through the engine adapter (**implemented**), events normalized and recorded
+   (**store side implemented**).
+4. Child completion → exactly one wake receipt for the parent (ADR-0007; **implemented**).
 5. Verification checks run in the task checkout, results recorded; a run is never marked completed
-   when required checks failed (ADR-0006; **P7**).
+   when required checks failed (ADR-0006; **implemented**).
 6. Integration through a Pluton-owned checkout; conflicts stop and preserve both branches; the
-   user's working tree is never touched (ADR-0005/0009; **P7**).
+   user's working tree is never touched (ADR-0005/0009; **implemented** — `pluton integrate`,
+   live-verified).
 
 Separate state axes (never compressed into one status string): **run state**, **task state**,
 **engine process state**, **sandbox state** — all defined in `src/domain/state.ts` with the same
@@ -166,7 +168,7 @@ Trust boundaries (ADR-0004/0005/0008/0010):
 - Secrets: presence-only auth checks, redaction before any event/log/DB write
   (`src/util/redact.ts`), env allowlist per process.
 
-## 5. Status snapshot (updated 2026-10-16, commit c53d9c8)
+## 5. Status snapshot (updated 2026-10-17, commit 19f8f19)
 
 | Area | Status | Evidence |
 |---|---|---|
@@ -176,16 +178,17 @@ Trust boundaries (ADR-0004/0005/0008/0010):
 | Durable store + migrations | Implemented + tested | `src/store/`, `tests/unit/store.test.ts` |
 | Idempotent receipts | Implemented + tested | duplicate/conflict/rollback/reopen tests |
 | Task-graph admission + budgets | Implemented + tested | `src/orchestrator/task-graph.ts` |
-| Per-Muse serialization | Primitive implemented | `src/orchestrator/mutex.ts` |
-| Engine adapters (real) | Not implemented | Phase 4; only the mock adapter exists |
-| Sandbox / tmux / checkouts | Not implemented | Phase 5 (Docker daemon unavailable at build time) |
-| Manager flow / tool bridge | Not implemented | Phase 6 |
-| Verification / integration | Not implemented | Phase 7 |
+| Per-Muse serialization | Implemented + tested | `src/orchestrator/mutex.ts`, supervisor serialization test |
+| Engine adapters (real) | Implemented + live-verified | OpenCode 3/3 + Qwen 4/4 (`npm run test:live`) |
+| Sandbox / tmux / checkouts | Implemented + live-verified | Docker E2E 5/5; container-mode run PASS 2026-10-17 |
+| Manager flow / tool bridge | Implemented + live-verified | `src/tools/`, supervisor tests + host/container live smokes |
+| Verification / integration | Implemented + live-verified | `pluton verify`; `pluton integrate` live PASS 2026-10-17 |
+| Attach / approvals | Implemented + live-verified | `pluton attach` (argv + session ensure live); `pluton approvals` list/approve/deny + expiry sweep live |
 | Machine event streaming | Open (no decision) | see `implementation-decisions.md` O1 |
 
-Test evidence for the claims above: `npm run check` (tsc + vitest) green with 8 files / 68 tests on
-2026-10-16; Docker-dependent suites are **NOT RUN** (daemon down) and are opt-in via
-`npm run test:e2e`.
+Test evidence for the claims above: `npm run check` (tsc + vitest) green with 37 files / 492 tests on
+2026-10-17; Docker-dependent suites ran live on this host (`PLUTON_E2E_DOCKER=1 npm run test:e2e`
+5/5) and the live smokes are recorded in `docs/smoke-live-run.md`.
 
 ## 6. Keeping this map honest
 
