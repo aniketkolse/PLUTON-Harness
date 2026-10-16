@@ -91,6 +91,14 @@ export function matchModelChoice(option: AcpSelectOption, want: string): AcpOpti
 
 export function toAcpMcpServers(specs: McpServerSpec[] | undefined): unknown[] {
   return (specs ?? []).map((spec) => {
+    if (spec.kind === 'http') {
+      return {
+        type: 'http',
+        name: spec.name,
+        url: spec.url,
+        headers: Object.entries(spec.headers ?? {}).map(([name, value]) => ({ name, value })),
+      }
+    }
     const [command, ...args] = spec.command
     if (!command) throw new ValidationError(`MCP server '${spec.name}' has an empty command argv`)
     return {

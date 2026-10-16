@@ -43,12 +43,25 @@ export interface EngineAuthStatus {
   hint: string
 }
 
-export interface McpServerSpec {
-  name: string
-  /** argv to launch a stdio MCP server. */
-  command: string[]
-  env?: Record<string, string>
-}
+/**
+ * Pluton tool-bridge MCP server as delivered to an engine (ACP `mcpServers`).
+ * - `stdio`: the engine spawns the server; argv arrays only, never a shell string.
+ * - `http`: the engine connects to a URL; auth rides in headers (never argv/env).
+ */
+export type McpServerSpec =
+  | {
+      kind: 'stdio'
+      name: string
+      /** argv to launch a stdio MCP server. */
+      command: string[]
+      env?: Record<string, string>
+    }
+  | {
+      kind: 'http'
+      name: string
+      url: string
+      headers?: Record<string, string>
+    }
 
 export interface StartSessionRequest {
   muse: {

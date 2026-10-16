@@ -342,7 +342,7 @@ describe('qwen adapter: session lifecycle', () => {
     const { adapter } = makeAdapter(agent)
     const session = await adapter.startSession(
       sessionRequest({
-        mcpServers: [{ name: 'pluton-tools', command: ['node', 'server.js', '--flag'], env: { TOKEN_X: 'not-a-secret' } }],
+        mcpServers: [{ kind: 'stdio', name: 'pluton-tools', command: ['node', 'server.js', '--flag'], env: { TOKEN_X: 'not-a-secret' } }],
       }),
     )
     const newSession = agent.received.find((m) => m.method === 'session/new')

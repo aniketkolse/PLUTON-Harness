@@ -223,7 +223,7 @@ describe('opencode adapter: session lifecycle', () => {
     const session = await adapter.startSession(
       sessionRequest({
         mcpServers: [
-          { name: 'pluton-tools', command: ['node', 'server.js', '--flag'], env: { TOKEN_X: 'not-a-secret' } },
+          { kind: 'stdio', name: 'pluton-tools', command: ['node', 'server.js', '--flag'], env: { TOKEN_X: 'not-a-secret' } },
         ],
       }),
     )
@@ -423,7 +423,7 @@ describe('opencode adapter: pure helpers', () => {
   })
 
   it('toAcpMcpServers rejects an empty argv instead of sending a broken server', () => {
-    expect(() => toAcpMcpServers([{ name: 'x', command: [] }])).toThrowError(ValidationError)
+    expect(() => toAcpMcpServers([{ kind: 'stdio', name: 'x', command: [] }])).toThrowError(ValidationError)
   })
 
   it('readModelOption understands flat and grouped value lists', () => {
