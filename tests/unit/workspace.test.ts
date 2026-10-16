@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -39,6 +41,14 @@ async function makeRepo(): Promise<string> {
 
 function makeManager(workspacesRoot: string) {
   return new GitWorkspaceManager({ workspacesRoot })
+}
+
+/** Let a spawned helper process die before temp-dir cleanup runs. */
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = once(child, 'exit')
+  child.kill()
+  await exited
 }
 
 describe('checkoutBranchName', () => {
@@ -102,6 +112,79 @@ describe('GitWorkspaceManager (real git)', () => {
     expect(readFileSync(join(info2.path, 'README.md'), 'utf8').replace(/\r\n/g, '\n')).toBe('hello\n')
   })
 
+  it('rejects a destName that resolves to the workspaces root itself', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+
+    for (const destName of ['', '.']) {
+      await expect(
+        manager.createCheckout({
+          repoPath: repo,
+          kind: 'task-checkout',
+          runId: 'run_abc123ff',
+          slug: 'root guard',
+          destName,
+        }),
+      ).rejects.toThrowError(/destName must name a subdirectory of the workspaces root/)
+    }
+
+    // Nothing was cloned into the workspaces root itself.
+    expect(readdirSync(root)).toEqual([])
+    expect(existsSync(join(root, '.git'))).toBe(false)
+  })
+
+  it('removes the half-built clone when the source has no commit to base on', async () => {
+    const source = tempDir('pluton-ws-empty-')
+    await git(['init', '-b', 'main'], source)
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+
+    const dest = join(root, 'unborn-head')
+    await expect(
+      manager.createCheckout({
+        repoPath: source,
+        kind: 'task-checkout',
+        runId: 'run_abc123ff',
+        destName: 'unborn-head',
+      }),
+    ).rejects.toThrowError(/could not read HEAD/)
+    expect(existsSync(dest)).toBe(false)
+  })
+
+  it('removes the clone when the expected checkout branch was not created', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = new GitWorkspaceManager({
+      workspacesRoot: root,
+      runFn: async (argv, options) => {
+        if (argv[1] === 'rev-parse' && argv[2] === '--verify') {
+          return {
+            argv,
+            exitCode: 1,
+            timedOut: false,
+            stdout: '',
+            stderr: 'fatal: needed a single revision',
+            truncated: false,
+            durationMs: 1,
+          }
+        }
+        return run(argv, options)
+      },
+    })
+
+    const dest = join(root, 'missing-branch')
+    await expect(
+      manager.createCheckout({
+        repoPath: repo,
+        kind: 'task-checkout',
+        runId: 'run_abc123ff',
+        destName: 'missing-branch',
+      }),
+    ).rejects.toThrowError(/branch 'pluton\/run_abc123ff\/task' was not created/)
+    expect(existsSync(dest)).toBe(false)
+  })
+
   it('captures diffs (modified + untracked) and commits inside the checkout', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
@@ -127,7 +210,48 @@ describe('GitWorkspaceManager (real git)', () => {
     expect(nothing.commit).toBeNull()
   })
 
-  it('falls back to a full clone when --local hardlinks are unsupported', async () => {
+  it('throws a typed error when git status fails during diff capture instead of dropping untracked files', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = new GitWorkspaceManager({
+      workspacesRoot: root,
+      runFn: async (argv, options) => {
+        if (argv[1] === 'status') {
+          return {
+            argv,
+            exitCode: 128,
+            timedOut: false,
+            stdout: '',
+            stderr: 'fatal: index file corrupt',
+            truncated: false,
+            durationMs: 1,
+          }
+        }
+        return run(argv, options)
+      },
+    })
+    const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'status fail' })
+    writeFileSync(join(info.path, 'untracked.txt'), 'new\n')
+
+    const error = await manager.captureDiff(info.path).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(WorkspaceError)
+    const workspaceError = error as WorkspaceError
+    expect(workspaceError.message).toMatch(/git status failed/)
+    expect(workspaceError.details).toMatchObject({ path: info.path })
+  })
+
+  // Real-world wording varies: git says "failed to copy"/"hardlink" when the
+  // --local object copy aborts, "failed to link"/"could not create link" on
+  // link() failures, and "cross-device"/EXDEV when the copy crosses mounts.
+  it.each([
+    'fatal: failed to copy objects (hardlink not supported)',
+    'error: failed to link objects/ab/cdef -> objects/ab/cdef: Operation not permitted',
+    "fatal: could not create link 'src' -> 'dst': Invalid cross-device link",
+    'fatal: copy-fd: Invalid cross-device link (EXDEV)',
+  ])('falls back to a full clone when --local aborts with a hardlink-style error: %s', async (stderr) => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
     const cloneCalls: string[][] = []
@@ -141,7 +265,7 @@ describe('GitWorkspaceManager (real git)', () => {
             exitCode: 128,
             timedOut: false,
             stdout: '',
-            stderr: 'fatal: failed to copy objects (hardlink not supported)',
+            stderr,
             truncated: false,
             durationMs: 1,
           }
@@ -156,34 +280,61 @@ describe('GitWorkspaceManager (real git)', () => {
     expect(existsSync(join(info.path, 'README.md'))).toBe(true)
   })
 
-  it('reports a hard clone failure instead of pretending', async () => {
+  it('does not attempt a fallback for unrelated clone failures', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
+    const cloneCalls: string[][] = []
     const manager = new GitWorkspaceManager({
       workspacesRoot: root,
-      runFn: async (argv) => ({
-        argv,
-        exitCode: 128,
-        timedOut: false,
-        stdout: '',
-        stderr: 'fatal: repository not found',
-        truncated: false,
-        durationMs: 1,
-      }),
+      runFn: async (argv, options) => {
+        if (argv.includes('clone')) {
+          cloneCalls.push(argv)
+          return {
+            argv,
+            exitCode: 128,
+            timedOut: false,
+            stdout: '',
+            stderr: 'fatal: repository not found',
+            truncated: false,
+            durationMs: 1,
+          }
+        }
+        return run(argv, options)
+      },
     })
     await expect(
       manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'fail' }),
     ).rejects.toThrowError(/git clone --local failed/)
+    expect(cloneCalls).toHaveLength(1)
   })
 
-  it('refuses to overwrite an existing checkout directory', async () => {
+  it('refuses to overwrite an existing checkout directory and points at destName', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
     const manager = makeManager(root)
     await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'dup' })
-    await expect(
-      manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'dup' }),
-    ).rejects.toThrowError(/already exists/)
+    const clash = manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'dup' })
+    await expect(clash).rejects.toThrowError(WorkspaceError)
+    await expect(clash).rejects.toThrowError(/already exists/)
+    await expect(clash).rejects.toThrowError(/unique destName/)
+  })
+
+  it('rejects with a typed error when the checkout index is corrupt (real git failure)', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'corrupt index' })
+    writeFileSync(join(info.path, '.git', 'index'), 'garbage bytes, not a git index')
+
+    const error = await manager.captureDiff(info.path).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(WorkspaceError)
+    // On this host git fails the corrupt index for `git diff HEAD` first
+    // (captureDiff runs diff before status), so this pins the typed rejection;
+    // the status-only branch is pinned by the injected-failure test above.
+    expect((error as Error).message).toMatch(/git (diff|status) failed/)
   })
 })
 
@@ -211,5 +362,43 @@ describe('GitWorkspaceManager removal guards', () => {
     // Managed checkout: removed.
     manager.removeCheckout(info.path)
     expect(existsSync(info.path)).toBe(false)
+  })
+
+  // Windows-only: a process's working directory holds a directory handle, so
+  // rmSync fails with EPERM/EBUSY while a live child has its cwd inside the
+  // checkout — the same shape as a sandbox still binding a mounted checkout.
+  // POSIX permits removing a directory that is some process's cwd, so there
+  // this failure is not inducible from Node and the case is skipped.
+  it.runIf(process.platform === 'win32')('wraps filesystem removal failures in a typed WorkspaceError', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'busy' })
+
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], {
+      cwd: info.path,
+      stdio: 'ignore',
+    })
+    await once(child, 'spawn')
+    try {
+      let error: unknown = null
+      try {
+        manager.removeCheckout(info.path)
+      } catch (e) {
+        error = e
+      }
+      expect(error).toBeInstanceOf(WorkspaceError)
+      const workspaceError = error as WorkspaceError
+      expect(workspaceError.message).toMatch(/failed to remove checkout/)
+      expect(workspaceError.details).toMatchObject({ path: info.path })
+      expect(String((workspaceError.details as { code: unknown }).code)).toMatch(/EBUSY|EPERM|ENOTEMPTY/)
+    } finally {
+      await stopChild(child)
+      try {
+        rmSync(info.path, { recursive: true, force: true })
+      } catch {
+        // afterAll retries once the child is gone.
+      }
+    }
   })
 })

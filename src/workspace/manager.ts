@@ -114,17 +114,32 @@ export class GitWorkspaceManager {
 
     const destName = req.destName ?? slugify(req.slug ?? req.runId)
     const dest = resolve(join(this.workspacesRoot, destName))
+    if (dest === this.workspacesRoot) {
+      // '', '.' and similar resolve to the root itself; cloning there would
+      // swallow the workspaces root and break every later checkout.
+      throw new WorkspaceError(
+        `destName must name a subdirectory of the workspaces root (got '${destName}', which resolves to ${dest})`,
+        { details: { destName, workspacesRoot: this.workspacesRoot } },
+      )
+    }
     this.assertInsideRoot(dest, 'create checkout')
     if (existsSync(dest)) {
-      throw new WorkspaceError(`checkout directory already exists: ${dest} (refusing to overwrite)`)
+      throw new WorkspaceError(
+        `checkout directory already exists: ${dest} (refusing to overwrite); ` +
+          'per-task checkouts must pass a unique destName (e.g. the task id)',
+      )
     }
     mkdirSync(resolve(this.workspacesRoot), { recursive: true })
 
     const local = await this.git(['clone', '--local', repo, dest])
     if (local.exitCode !== 0 || local.timedOut) {
-      // Hardlinks (--local) are unsupported on some filesystems (e.g. across
-      // drives/shares). Fall back to a full clone — correct, just slower.
-      const hardlinkIssue = /hardlink|different filesystems|failed to copy/i.test(local.stderr)
+      // Defensive only: git usually falls back to copying internally when
+      // --local hardlinks fail, so this outer retry rarely fires — it catches
+      // aborts worded as a link/copy/filesystem complaint.
+      const hardlinkIssue =
+        /hardlink|different filesystems|failed to copy|failed to link|could not create link|cross-device|EXDEV/i.test(
+          local.stderr,
+        )
       if (local.timedOut) {
         throw new WorkspaceError(`git clone timed out after ${this.timeoutMs}ms for ${repo}`)
       }
@@ -144,29 +159,47 @@ export class GitWorkspaceManager {
       }
     }
 
-    const head = await this.git(['rev-parse', 'HEAD'], dest)
-    if (head.exitCode !== 0) {
-      throw new WorkspaceError(`could not read HEAD of fresh clone: ${firstLine(head.stderr, 300)}`)
-    }
-    const baseCommit = head.stdout.trim()
+    try {
+      const head = await this.git(['rev-parse', 'HEAD'], dest)
+      if (head.exitCode !== 0) {
+        throw new WorkspaceError(`could not read HEAD of fresh clone: ${firstLine(head.stderr, 300)}`, {
+          details: { repo, dest, stderr: head.stderr.slice(0, 2_000) },
+        })
+      }
+      const baseCommit = head.stdout.trim()
 
-    const createBranch = await this.git(['checkout', '-b', branch], dest)
-    if (createBranch.exitCode !== 0) {
-      throw new WorkspaceError(
-        `could not create branch '${branch}': ${firstLine(createBranch.stderr, 300)}`,
-        { details: { branch, dest, stderr: createBranch.stderr.slice(0, 2_000) } },
-      )
-    }
+      const createBranch = await this.git(['checkout', '-b', branch], dest)
+      if (createBranch.exitCode !== 0) {
+        throw new WorkspaceError(
+          `could not create branch '${branch}': ${firstLine(createBranch.stderr, 300)}`,
+          { details: { branch, dest, stderr: createBranch.stderr.slice(0, 2_000) } },
+        )
+      }
+      // Cheap verify: the branch must really exist, even on paths where the
+      // `checkout -b` step is skipped (e.g. the clone already sat on it).
+      const verifyBranch = await this.git(['rev-parse', '--verify', `refs/heads/${branch}`], dest)
+      if (verifyBranch.exitCode !== 0) {
+        throw new WorkspaceError(`branch '${branch}' was not created in ${dest}`, {
+          details: { branch, dest, stderr: verifyBranch.stderr.slice(0, 2_000) },
+        })
+      }
 
-    const marker: MarkerFile = {
-      managed: true,
-      kind: req.kind,
-      branch,
-      baseCommit,
-      createdAt: new Date().toISOString(),
+      const marker: MarkerFile = {
+        managed: true,
+        kind: req.kind,
+        branch,
+        baseCommit,
+        createdAt: new Date().toISOString(),
+      }
+      writeFileSync(this.markerPath(dest), `${JSON.stringify(marker, null, 2)}\n`, 'utf8')
+      return { path: dest, branch, baseCommit }
+    } catch (error) {
+      // The clone is unmarked at this point: nothing else (not even
+      // removeCheckout) could ever clean it up, so remove it before
+      // propagating the original failure.
+      rmSync(dest, { recursive: true, force: true })
+      throw error
     }
-    writeFileSync(this.markerPath(dest), `${JSON.stringify(marker, null, 2)}\n`, 'utf8')
-    return { path: dest, branch, baseCommit }
   }
 
   /** Branch, HEAD and porcelain status of a managed checkout. */
@@ -199,14 +232,16 @@ export class GitWorkspaceManager {
     const diff = await this.git(['diff', 'HEAD'], abs)
     if (diff.exitCode !== 0) throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(diff.stderr, 300)}`)
     const porcelain = await this.git(['status', '--porcelain'], abs)
-    const untracked =
-      porcelain.exitCode === 0
-        ? porcelain.stdout
-            .split(/\r?\n/)
-            .filter((l) => l.startsWith('??'))
-            .map((l) => l.slice(3).trim())
-            .filter((l) => l !== '')
-        : []
+    if (porcelain.exitCode !== 0) {
+      throw new WorkspaceError(`git status failed in ${abs}: ${firstLine(porcelain.stderr, 300)}`, {
+        details: { path: abs, stderr: porcelain.stderr.slice(0, 2_000) },
+      })
+    }
+    const untracked = porcelain.stdout
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith('??'))
+      .map((l) => l.slice(3).trim())
+      .filter((l) => l !== '')
     return { diff: diff.stdout, untracked, truncated: diff.truncated }
   }
 
@@ -236,6 +271,12 @@ export class GitWorkspaceManager {
    * Remove a managed checkout. Refuses (never forces) when the marker is
    * missing or the path is outside the workspaces root — a user directory must
    * never be deleted by this code path.
+   *
+   * Phase 6 hook: callers must first clear the workspace store registry entry
+   * and any live sandbox reference before removing; this method stays
+   * registry-unaware on purpose (no store dependency, stable signature).
+   * Raw filesystem failures (Windows EBUSY/ENOTEMPTY from a checkout that is
+   * still mounted/bound or held open) surface as typed WorkspaceErrors.
    */
   removeCheckout(checkoutPath: string): void {
     const abs = resolve(checkoutPath)
@@ -247,6 +288,14 @@ export class GitWorkspaceManager {
         `refusing to remove '${abs}': no Pluton workspace marker found (only Pluton-created checkouts may be removed)`,
       )
     }
-    rmSync(abs, { recursive: true, force: true })
+    try {
+      rmSync(abs, { recursive: true, force: true })
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? 'unknown'
+      throw new WorkspaceError(
+        `failed to remove checkout '${abs}': ${error instanceof Error ? error.message : String(error)}`,
+        { details: { path: abs, code }, cause: error },
+      )
+    }
   }
 }
