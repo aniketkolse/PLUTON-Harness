@@ -23,8 +23,8 @@ import {
   WorkerImageManager,
   type WorkerImageProbe,
 } from '../../sandbox/image.ts'
-import { ensureMuseContainer, HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
-import { sandboxContainerName, type SandboxManager, type SandboxMount } from '../../sandbox/types.ts'
+import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
+import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
@@ -32,6 +32,7 @@ import { PLUTON_VERSION } from '../../version.ts'
 import { GitWorkspaceManager } from '../../workspace/manager.ts'
 import type { ProjectContext } from '../context.ts'
 import { resolveMuseByRef } from './mcp.ts'
+import { museContainerMounts, provisionMuseContainer } from './muse-provision.ts'
 
 /**
  * `pluton run` — the CLI entry into supervised execution (Phase 6, ADR-0006/0007).
@@ -82,11 +83,6 @@ export interface RunSummary {
   blockedTasks: string[]
   verificationPending: boolean
 }
-
-/** Container paths for the mounts every Muse container receives (prepareContainerMode). */
-const CONTAINER_WORKSPACES_PATH = '/pluton/workspaces'
-const CONTAINER_ENGINE_HOME_PATH = '/pluton/engine-home'
-const CONTAINER_PROJECT_PATH = '/pluton/project'
 
 /** Engine binaries pinned by the worker image's `engines` profile (docker/worker/Dockerfile). */
 const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
@@ -148,11 +144,9 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
 /**
  * Container mode: fail closed before any run row exists — daemon probe, worker
  * image readiness (the `engines` profile is required), then one long-lived
- * container and a `docker exec` spawn context per enabled Muse. Every
- * container mounts the workspaces root (task checkouts) and its own engine
- * home; muses whose sessions run with the project root as workdir (every
- * policy except isolated-task-checkout) additionally get the project tree
- * read-only.
+ * container and a `docker exec` spawn context per enabled Muse. Mount
+ * construction and provisioning live in `muse-provision.ts` (shared with the
+ * approvals inbox); the once-per-run probe/readiness checks stay here.
  */
 async function prepareContainerMode(
   ctx: ProjectContext,
@@ -184,16 +178,12 @@ async function prepareContainerMode(
   const byMuse = new Map<string, DockerExecContext>()
   for (const muse of store.listMuses()) {
     if (!muse.enabled) continue
-    const mounts: SandboxMount[] = [
-      { hostPath: workspacesRoot, containerPath: CONTAINER_WORKSPACES_PATH },
-      { hostPath: muse.engineHome, containerPath: CONTAINER_ENGINE_HOME_PATH },
-      ...(muse.workspacePolicy !== 'isolated-task-checkout'
-        ? [{ hostPath: ctx.rootDir, containerPath: CONTAINER_PROJECT_PATH, readOnly: true }]
-        : []),
-    ]
-    await ensureMuseContainer(manager, store, {
+    const mounts = museContainerMounts({ muse, rootDir: ctx.rootDir, workspacesRoot })
+    await provisionMuseContainer({
+      manager,
+      store,
       projectId,
-      museId: muse.id,
+      muse,
       image: imageTag,
       ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
       limits: {
@@ -202,7 +192,8 @@ async function prepareContainerMode(
         pids: CONTAINER_PIDS_LIMIT,
       },
       network: runtime.network_policy,
-      mounts,
+      rootDir: ctx.rootDir,
+      workspacesRoot,
     })
     byMuse.set(muse.id, {
       containerName: sandboxContainerName(projectId, muse.id),
