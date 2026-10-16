@@ -49,6 +49,7 @@ const LIMITS: ToolBridgeLimits = {
   maxToolResultChars: 120_000,
   defaultWaitSeconds: 5,
   waitHeartbeatSeconds: 15,
+  approvalTtlMinutes: 60,
 }
 
 interface World {

@@ -9,7 +9,7 @@ import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
 import { notifyTaskSettled, taskAncestorIds, WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
-import { PlutonToolBridge, type ToolBridgeLimits } from '../../src/tools/bridge.ts'
+import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../src/tools/bridge.ts'
 import { wakeupChannelFor } from '../../src/tools/handlers.ts'
 import { McpStdioServer } from '../../src/tools/mcp-server.ts'
 
@@ -132,6 +132,7 @@ const BASE_LIMITS: ToolBridgeLimits = {
   maxToolResultChars: 120_000,
   defaultWaitSeconds: 5,
   waitHeartbeatSeconds: 15,
+  approvalTtlMinutes: 60,
 }
 
 function makeBridge(
@@ -193,6 +194,23 @@ function forceVerify(store: Store, taskId: string): void {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+describe('toolBridgeLimitsFromRuntime', () => {
+  const RUNTIME = {
+    max_child_tasks_per_task: 5,
+    max_team_size: 8,
+    max_prompt_chars: 60_000,
+    max_tool_result_chars: 120_000,
+    heartbeat_seconds: 30,
+    approval_timeout_minutes: 60,
+  }
+
+  it('carries the operator-configurable approval TTL, including 0 = never', () => {
+    expect(toolBridgeLimitsFromRuntime(RUNTIME).approvalTtlMinutes).toBe(60)
+    expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, approval_timeout_minutes: 0 }).approvalTtlMinutes).toBe(0)
+    expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, approval_timeout_minutes: 10_080 }).approvalTtlMinutes).toBe(10_080)
+  })
+})
 
 describe('PlutonToolBridge — identity and permissions', () => {
   it('exposes only the tools the caller has permission for', () => {
@@ -478,6 +496,39 @@ describe('PlutonToolBridge — team and approvals', () => {
 
     const again = await manager.call('run.stop', { reason: 'operator decision' })
     expect(again).toMatchObject({ ok: false, error: { code: 'request_conflict' } })
+  })
+
+  it('stamps approval rows with the configured TTL (60m default, 0 = never expires)', async () => {
+    const fx = makeFixture()
+    const before = Date.now()
+    const manager = makeBridge(fx, 'manager')
+    fx.store.setRunState(fx.run.id, 'active')
+
+    const asked = await manager.call('approval.request', { action: 'install:tooling', reason: 'needs a new tool' })
+    expect(asked.ok).toBe(true)
+    const approval = fx.store.getApproval((asked.data as { approvalId: string }).approvalId)
+    expect(approval.expiresAt).not.toBeNull()
+    // Wall-clock tolerance: creation time is the bridge's `now`, asserted within 5s of now + 60m.
+    expect(Math.abs(Date.parse(approval.expiresAt ?? '') - (before + 60 * 60_000))).toBeLessThan(5_000)
+
+    const noTtl = makeBridge(fx, 'manager', null, { approvalTtlMinutes: 0 })
+    const never = await noTtl.call('approval.request', { action: 'install:other', reason: 'never expires' })
+    expect(never.ok).toBe(true)
+    expect(fx.store.getApproval((never.data as { approvalId: string }).approvalId).expiresAt).toBeNull()
+
+    // The specialist-proposal path carries the same TTL.
+    const proposal = await manager.call('muse.propose_create', {
+      museId: 'specialist-ttl',
+      displayName: 'Specialist TTL',
+      role: 'custom',
+      engine: 'mock',
+      model: 'mock/model-a',
+      reason: 'prove the TTL rides every approval',
+    })
+    expect(proposal.ok).toBe(true)
+    const proposalRow = fx.store.getApproval((proposal.data as { proposalId: string }).proposalId)
+    expect(proposalRow.expiresAt).not.toBeNull()
+    expect(Math.abs(Date.parse(proposalRow.expiresAt ?? '') - (before + 60 * 60_000))).toBeLessThan(5_000)
   })
 })
 

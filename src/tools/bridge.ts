@@ -35,11 +35,14 @@ export interface ToolBridgeLimits {
    * standalone bridge process (stdio child) falls back to this cadence.
    */
   waitHeartbeatSeconds: number
+  /** runtime.approval_timeout_minutes: pending approvals expire after this TTL (0 = never). */
+  approvalTtlMinutes: number
 }
 
 export const DEFAULT_TOOL_RESULT_CHARS = 120_000
 export const DEFAULT_WAIT_SECONDS = 120
 export const DEFAULT_WAIT_HEARTBEAT_SECONDS = 15
+export const DEFAULT_APPROVAL_TTL_MINUTES = 60
 
 /** Map the validated runtime config onto bridge limits (single source of truth). */
 export function toolBridgeLimitsFromRuntime(runtime: {
@@ -48,6 +51,7 @@ export function toolBridgeLimitsFromRuntime(runtime: {
   max_prompt_chars: number
   max_tool_result_chars: number
   heartbeat_seconds: number
+  approval_timeout_minutes: number
 }): ToolBridgeLimits {
   return {
     maxChildrenPerTask: runtime.max_child_tasks_per_task,
@@ -56,6 +60,7 @@ export function toolBridgeLimitsFromRuntime(runtime: {
     maxToolResultChars: runtime.max_tool_result_chars,
     defaultWaitSeconds: DEFAULT_WAIT_SECONDS,
     waitHeartbeatSeconds: runtime.heartbeat_seconds,
+    approvalTtlMinutes: runtime.approval_timeout_minutes,
   }
 }
 

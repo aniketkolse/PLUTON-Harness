@@ -185,6 +185,16 @@ function assertDependenciesVisible(env: ToolEnv, dependsOn: string[] | undefined
   }
 }
 
+/**
+ * Approval expiry stamp from the operator's `runtime.approval_timeout_minutes`
+ * (0 = approvals never expire). One helper so every creation site — specialist
+ * proposals and generic approval requests — rides the same TTL.
+ */
+function approvalExpiresAt(nowMs: number, ttlMinutes: number): string | null {
+  if (ttlMinutes <= 0) return null
+  return new Date(nowMs + ttlMinutes * 60_000).toISOString()
+}
+
 export const TOOL_HANDLERS: ToolHandlers = {
   'task.create': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['task.create'].parse(args)
@@ -407,6 +417,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       action: 'muse.create',
       reason: a.reason,
       scope: { museId: a.museId, displayName: a.displayName, role: a.role, engine: a.engine, model: a.model },
+      expiresAt: approvalExpiresAt(env.now(), env.limits.approvalTtlMinutes),
     })
     env.store.appendEvent({
       projectId: env.projectId,
@@ -445,6 +456,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       action: a.action,
       reason: a.reason,
       scope: a.scope ?? {},
+      expiresAt: approvalExpiresAt(env.now(), env.limits.approvalTtlMinutes),
     })
     env.store.appendEvent({
       projectId: env.projectId,

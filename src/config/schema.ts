@@ -58,6 +58,8 @@ export const runtimeConfigSchema = z
     max_event_payload_chars: z.number().int().min(1_000).max(1_000_000).default(8_000),
     max_tool_result_chars: z.number().int().min(1_000).max(4_000_000).default(120_000),
     heartbeat_seconds: z.number().int().min(2).max(600).default(30),
+    /** Minutes until a pending approval expires and is swept to `expired`; 0 = approvals never expire. */
+    approval_timeout_minutes: z.number().int().min(0).max(10_080).default(60),
   })
   .strict()
   .prefault({})

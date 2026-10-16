@@ -28,9 +28,25 @@ describe('validateConfig', () => {
     const loaded = validateConfig(minimal(), ROOT, PATH)
     expect(loaded.config.project.name).toBe('demo')
     expect(loaded.config.runtime.max_concurrent_workers).toBe(3)
+    expect(loaded.config.runtime.approval_timeout_minutes).toBe(60)
     expect(loaded.config.sandbox.kind).toBe('docker')
     expect(loaded.config.git.require_approval_for_main_branch_integration).toBe(true)
     expect(loaded.config.muses).toEqual({})
+  })
+
+  it('accepts an explicit approval timeout: 0 (never expires) and the maximum', () => {
+    const never = validateConfig(minimal({}, { runtime: { approval_timeout_minutes: 0 } }), ROOT, PATH)
+    expect(never.config.runtime.approval_timeout_minutes).toBe(0)
+    const max = validateConfig(minimal({}, { runtime: { approval_timeout_minutes: 10_080 } }), ROOT, PATH)
+    expect(max.config.runtime.approval_timeout_minutes).toBe(10_080)
+  })
+
+  it('rejects an out-of-range approval timeout', () => {
+    for (const bad of [-1, 10_081, 1.5]) {
+      expect(() => validateConfig(minimal({}, { runtime: { approval_timeout_minutes: bad } }), ROOT, PATH)).toThrow(
+        ConfigError,
+      )
+    }
   })
 
   it("accepts repository '.' (the project root itself) — regression: assertInside used to reject rel === ''", () => {
