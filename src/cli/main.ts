@@ -17,7 +17,9 @@ import { registerBuiltinEngines } from '../engines/registry.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
+import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { requireProject } from './context.ts'
+import { attachMuse } from './commands/attach.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { mcpServe } from './commands/mcp.ts'
@@ -741,11 +743,45 @@ program
   )
 
 // ---------------------------------------------------------------------------
+// attach
+// ---------------------------------------------------------------------------
+
+program
+  .command('attach')
+  .description(
+    "attach this terminal to a Muse's tmux session inside its container (interactive; --json resolves the target without attaching)",
+  )
+  .argument('<muse>', 'muse id, slug or unique id suffix')
+  .option('--window <name>', 'attach to (or create) a named tmux window')
+  .action(async (museArg: string, opts: { window?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = await attachMuse(
+        ctx,
+        { museRef: museArg, ...(opts.window !== undefined ? { windowName: opts.window } : {}) },
+        json ? {} : { spawnAttach: inheritStdioSpawn },
+      )
+      const containerSession = `${result.containerName}:${result.sessionName}`
+      const windowSuffix = result.windowName !== null ? ` (window ${result.windowName})` : ''
+      const human = result.attached
+        ? [
+            `attached to ${result.museId} → ${containerSession}${windowSuffix}`,
+            ...(result.exitCode !== 0 ? [`exit ${String(result.exitCode)}`] : []),
+          ].join('\n')
+        : `target ${containerSession}${windowSuffix}\nargv: ${result.argv.join(' ')}`
+      emitOk(io, json, human, result)
+      // Mirror the attach child's exit code (plan mode: 0); runCommand would
+      // clobber a process.exitCode set here, so the body returns the code.
+      return result.exitCode ?? 0
+    })
+  })
+
+// ---------------------------------------------------------------------------
 // Planned commands — explicit, stable `not_implemented` failures.
 // ---------------------------------------------------------------------------
 
 for (const [name, planned] of [
-  ['attach', 'attach to a Muse terminal (tmux in its container)'],
   ['integrate', 'integrate verified task branches through the integration checkout'],
 ] as const) {
   program
