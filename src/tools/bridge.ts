@@ -29,10 +29,35 @@ export interface ToolBridgeLimits {
   maxToolResultChars: number
   /** Default task.wait timeout when the caller does not pass one. */
   defaultWaitSeconds: number
+  /**
+   * Longest single wakeup wait inside task.wait before durable state is
+   * re-read. In-process runtimes wake immediately via the shared registry; a
+   * standalone bridge process (stdio child) falls back to this cadence.
+   */
+  waitHeartbeatSeconds: number
 }
 
 export const DEFAULT_TOOL_RESULT_CHARS = 120_000
 export const DEFAULT_WAIT_SECONDS = 120
+export const DEFAULT_WAIT_HEARTBEAT_SECONDS = 15
+
+/** Map the validated runtime config onto bridge limits (single source of truth). */
+export function toolBridgeLimitsFromRuntime(runtime: {
+  max_child_tasks_per_task: number
+  max_team_size: number
+  max_prompt_chars: number
+  max_tool_result_chars: number
+  heartbeat_seconds: number
+}): ToolBridgeLimits {
+  return {
+    maxChildrenPerTask: runtime.max_child_tasks_per_task,
+    maxBriefChars: runtime.max_prompt_chars,
+    maxTeamSize: runtime.max_team_size,
+    maxToolResultChars: runtime.max_tool_result_chars,
+    defaultWaitSeconds: DEFAULT_WAIT_SECONDS,
+    waitHeartbeatSeconds: runtime.heartbeat_seconds,
+  }
+}
 
 export interface PlutonToolBridgeOptions {
   store: Store

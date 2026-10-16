@@ -9,13 +9,14 @@
  *   scripts fail with a stable `not_implemented` code instead of a usage error.
  */
 import { Command } from 'commander'
-import { NotImplementedError, ValidationError } from '../domain/errors.ts'
+import { InternalError, NotImplementedError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { requireProject } from './context.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
+import { mcpServe } from './commands/mcp.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
 import { DEFAULT_WORKER_IMAGE_TAG } from '../sandbox/image.ts'
@@ -523,6 +524,37 @@ program
         store.close()
       }
     })
+  })
+
+// ---------------------------------------------------------------------------
+// mcp — the restricted tool bridge as a standalone stdio server (ADR-0007).
+// stdout is the MCP protocol channel here: no emitOk/runCommand, no tables.
+// ---------------------------------------------------------------------------
+
+const mcpCmd = program
+  .command('mcp')
+  .description('engine-facing restricted tool bridge (internal; stdout carries the protocol)')
+
+mcpCmd
+  .command('serve')
+  .description('serve Pluton tools over stdio for one engine session (--run/--muse, optional --task)')
+  .requiredOption('--run <id>', 'run id (full or unique suffix)')
+  .requiredOption('--muse <id>', 'calling Muse id or slug')
+  .option('--task <id>', 'task id for a task-scoped session (omit for manager scope)')
+  .action(async (opts: { run: string; muse: string; task?: string }) => {
+    try {
+      const ctx = requireProject(process.cwd())
+      await mcpServe(ctx, {
+        runRef: opts.run,
+        museRef: opts.muse,
+        ...(opts.task !== undefined ? { taskRef: opts.task } : {}),
+      })
+    } catch (e) {
+      const err =
+        e instanceof PlutonError ? e : new InternalError(e instanceof Error ? e.message : String(e))
+      process.stderr.write(`pluton mcp serve: ${err.code}: ${err.message}\n`)
+      process.exitCode = 1
+    }
   })
 
 // ---------------------------------------------------------------------------

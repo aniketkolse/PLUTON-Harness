@@ -242,8 +242,11 @@ export const TOOL_HANDLERS: ToolHandlers = {
         }
       }
       // Event-driven: the runtime notifies the registry on terminal transitions;
-      // a wakeup (or timeout) simply makes us re-read durable task state.
-      await env.wakeups.waitFor(channel, remaining)
+      // a wakeup (or a heartbeat slice) simply makes us re-read durable task
+      // state. The slice keeps a standalone (stdio) bridge honest when nobody
+      // shares its in-process registry: it re-checks every heartbeat instead of
+      // sleeping until the deadline.
+      await env.wakeups.waitFor(channel, Math.min(remaining, env.limits.waitHeartbeatSeconds * 1_000))
     }
   },
 

@@ -130,6 +130,7 @@ const BASE_LIMITS: ToolBridgeLimits = {
   maxTeamSize: 6,
   maxToolResultChars: 120_000,
   defaultWaitSeconds: 5,
+  waitHeartbeatSeconds: 15,
 }
 
 function makeBridge(
@@ -340,6 +341,22 @@ describe('PlutonToolBridge — task.wait', () => {
     expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
     expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
     expect(Date.now() - started).toBeLessThan(4_000)
+  })
+
+  it('re-checks durable state every heartbeat when nobody shares the registry (stdio bridge)', async () => {
+    const fx = makeFixture()
+    // No registry reads: another process changes durable state mid-wait.
+    const ownRegistry = new WakeupRegistry()
+    const manager = makeBridge(fx, 'manager', null, { waitHeartbeatSeconds: 1 }, ownRegistry)
+    const taskId = await createTask(manager)
+    const started = Date.now()
+    const waiting = manager.call('task.wait', { taskIds: [taskId], timeoutSeconds: 60 })
+    await delay(200)
+    forceComplete(fx.store, taskId) // same as a sibling process finishing the task
+    const res = await waiting
+    expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
+    expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
+    expect(Date.now() - started).toBeLessThan(10_000)
   })
 })
 
