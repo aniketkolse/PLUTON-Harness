@@ -33,5 +33,20 @@ cycles, duplicate wakeups and hidden team growth are exactly the failure modes t
 
 ## Evidence
 
-- Prompt §1.4 and §5; runtime enforcement implemented in `src/orchestration/` (Phase 3/6) with
-  dedicated tests for cycles, ancestor-delegation, depth and caps.
+- Prompt §1.4 and §5.
+- Enforced in `src/orchestrator/task-graph.ts` (depth/fan-out/task-cap/dependency/cycle admission)
+  and the restricted bridge in `src/tools/`: `catalog.ts` (schema + permission per tool),
+  `bridge.ts` (server-side identity/permission enforcement, per-call audit events, bounded results),
+  `handlers.ts` (ancestor-assignee delegation rule, task-subtree visibility, cancel/stop transitions),
+  `mcp-server.ts` (MCP stdio protocol layer) — with conformance tests in
+  `tests/unit/tool-bridge.test.ts` (permissions, scopes, timeouts, bounding, MCP integration),
+  `tests/unit/mcp-server.test.ts` and `tests/unit/wakeups.test.ts` (one wakeup per completed child,
+  consume-once).
+- `muse.propose_create` is operator-gated in this build: it validates team-size/role/engine/model
+  limits and records a pending approval row (plus a `muse.proposal_recorded` event); nothing is
+  instantiated silently, and applying an approved proposal is pending the run loop.
+- Engine-side tool consumption recon (OpenCode v2 `mcp.servers.*` shape and Code-Mode visibility,
+  Qwen approval-gated project scope, recommended host-side Streamable HTTP endpoint with per-Muse
+  bearer tokens, stdio fallback) recorded in
+  `docs/reverse-engineering/engine-mcp-integration.md`; container→host reachability is a Phase 6
+  test item.

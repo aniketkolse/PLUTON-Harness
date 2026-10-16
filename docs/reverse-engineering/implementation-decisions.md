@@ -210,6 +210,7 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 - **Prior art:** OpenMausBot's gate process validates policy before spawning anything, filters calls and catalogs, trims and spills oversized results, and fails closed on corrupt policy (`omb-mcp`: `server/mcp-gate.ts:184-186, 246-301`).
 - **Closing action:** a design note plus tests: corrupt policy never becomes pass-through; deny wins; every bridge call is authorized server-side (ADR-0007); redaction of diagnostics.
 - **Status:** open; ADR-0001 defers `@modelcontextprotocol/sdk` to implementation time; ROADMAP Phase 6 not started.
+- **Engine wiring evidence:** `docs/reverse-engineering/engine-mcp-integration.md` (2026-10-16) — live-verified MCP configuration, tool naming, and approval gates for OpenCode v2.0.30 and Qwen Code 0.25.2.
 
 ### O5. Doc-drift enforcement mechanism
 

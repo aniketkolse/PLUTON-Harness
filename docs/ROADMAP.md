@@ -115,12 +115,18 @@ References (read-only, recorded commits):
       green on this host with `PLUTON_E2E_DOCKER=1` after `pluton sandbox build-image`; skips cleanly
       (0 run, exit 0) where no daemon/image is available — never silently passes
 
-## Phase 6 — Manager and team execution `[ ]`
+## Phase 6 — Manager and team execution `[~]`
 
-- [ ] Default team template (manager/researcher/worker-a/worker-b/qa/reviewer)
-- [ ] Restricted Pluton tool bridge (MCP stdio) with per-call authorization
+- [x] Default team template (manager/researcher/worker-a/worker-b/qa/reviewer) —
+      `templates/teams/full-stack.yaml` with mixed engines (worker-b on `qwen`), validated by
+      `tests/unit/init-templates.test.ts`
+- [x] Restricted Pluton tool bridge (MCP stdio) with per-call authorization — `src/tools/`
+      (MCP protocol layer, catalog, authorization bridge, handlers) + `src/orchestrator/wakeups.ts`;
+      57 unit tests across `mcp-server`, `tool-bridge`, `wakeups`
+- [~] Dynamic specialist proposals with hard limits + audit records — `muse.propose_create` validates
+      team-size/role/engine/model and records a pending operator approval (nothing instantiated
+      silently); the operator-side apply/deny wiring lands with the run loop
 - [ ] Manager plan → validate → dispatch → collect → report flow (plan-first policy)
-- [ ] Dynamic specialist proposals with hard limits + audit records
 - [ ] Real goal through lifecycle with ≥2 engines and independent workspaces
 
 ## Phase 7 — Verification and integration `[ ]`
@@ -141,7 +147,7 @@ References (read-only, recorded commits):
 
 ## Delivered vs planned (live status — updated at session end)
 
-_Phases 0–5 complete (commits `1bd251e` … `13b3859`). Live status: 231 tests / 18 files green
+_Phases 0–5 complete; Phase 6 in progress. Live status: 331 tests / 22 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
@@ -151,6 +157,11 @@ errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task 
 with a stable `not_implemented` code. Live engine suites are opt-in (`npm run test:live`; OpenCode
 3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
 (`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
-Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`) 5/5 green — container lifecycle + tmux roundtrip;
-`pluton doctor` fully green with tmux verified inside the image. Next: Phase 6 (manager flow +
-restricted Pluton tool bridge over MCP stdio), then Phases 7–8._
+Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`) 5/5 green; `pluton doctor` fully green with tmux
+verified inside the image. A full post-Phase-5 code review produced 16 findings — all addressed with
+regression tests (container-name uniqueness under truncation, tmux duplicate-window handling,
+probe failure-vs-missing classification, checkout cleanup/typed failures, store upsert races,
+window-id-targeted kills). Phase 6 bridge core is in: MCP stdio server, restricted tool catalog with
+per-call server-side authorization + audit events, exactly-once wakeup registry, and engine-side
+transport recon (`docs/reverse-engineering/engine-mcp-integration.md`). Next: the manager run loop
+(plan → validate → dispatch → collect), then Phases 7–8._
