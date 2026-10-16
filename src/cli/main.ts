@@ -19,6 +19,7 @@ import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { requireProject } from './context.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachMuse } from './commands/attach.ts'
+import { chatRun } from './commands/chat.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { integrateRun } from './commands/integrate.ts'
@@ -287,6 +288,34 @@ museCmd
       })
     },
   )
+
+museCmd
+  .command('chat <muse>')
+  .description('open an interactive chat TUI with a specific Muse')
+  .option('--resume <id>', 'resume an existing chat session by id')
+  .option('--continue', 'continue the latest chat session with this Muse')
+  .action(async (museArg: string, opts: { resume?: string; continue?: boolean }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    if (json) {
+      await runCommand(io, json, async () => {
+        const ctx = requireProject(process.cwd())
+        const { plan } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue, json: true })
+        emitOk(io, json, `chat plan resolved for muse ${plan.museSlug} (${plan.sessionId})`, plan)
+        return 0
+      })
+      return
+    }
+
+    try {
+      const ctx = requireProject(process.cwd())
+      const { exitCode } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue })
+      process.exitCode = exitCode
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      io.err(msg)
+      process.exitCode = 1
+    }
+  })
 
 const museModelCmd = museCmd.command('model').description('model catalogue of a Muse\'s engine')
 
@@ -741,6 +770,38 @@ program
       })
     },
   )
+
+// ---------------------------------------------------------------------------
+// chat — interactive operator chat TUI (ADR-0012)
+// ---------------------------------------------------------------------------
+
+program
+  .command('chat [muse]')
+  .description('open an interactive chat TUI with an operator Muse (default: supervisor)')
+  .option('--resume <id>', 'resume an existing chat session by id')
+  .option('--continue', 'continue the latest chat session with this Muse')
+  .action(async (museArg: string | undefined, opts: { resume?: string; continue?: boolean }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    if (json) {
+      await runCommand(io, json, async () => {
+        const ctx = requireProject(process.cwd())
+        const { plan } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue, json: true })
+        emitOk(io, json, `chat plan resolved for muse ${plan.museSlug} (${plan.sessionId})`, plan)
+        return 0
+      })
+      return
+    }
+
+    try {
+      const ctx = requireProject(process.cwd())
+      const { exitCode } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue })
+      process.exitCode = exitCode
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      io.err(msg)
+      process.exitCode = 1
+    }
+  })
 
 // ---------------------------------------------------------------------------
 // attach

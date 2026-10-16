@@ -148,12 +148,13 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
  * construction and provisioning live in `muse-provision.ts` (shared with the
  * approvals inbox); the once-per-run probe/readiness checks stay here.
  */
-async function prepareContainerMode(
+export async function prepareContainerMode(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
   manager: SandboxManager,
   imageProbeOverride: ((rootDir: string) => Promise<WorkerImageProbe>) | undefined,
+  opts?: { museIds?: string[] },
 ): Promise<Map<string, DockerExecContext>> {
   const probe = await manager.probe()
   if (!probe.available) {
@@ -176,8 +177,10 @@ async function prepareContainerMode(
   const runtime = ctx.loaded.config.runtime
   const workspacesRoot = workspaceDir(ctx.rootDir)
   const byMuse = new Map<string, DockerExecContext>()
+  const allowed = opts?.museIds ? new Set(opts.museIds) : null
   for (const muse of store.listMuses()) {
     if (!muse.enabled) continue
+    if (allowed !== null && !allowed.has(muse.id)) continue
     const mounts = museContainerMounts({ muse, rootDir: ctx.rootDir, workspacesRoot })
     await provisionMuseContainer({
       manager,
@@ -209,7 +212,7 @@ async function prepareContainerMode(
  * as the process spawn, Linux platform env construction (the engine process
  * runs inside the container, never on the host).
  */
-function containerAdapterFor(
+export function containerAdapterFor(
   muse: MuseRecord,
   contexts: Map<string, DockerExecContext>,
   dockerSpawn: AcpSpawnFn | undefined,

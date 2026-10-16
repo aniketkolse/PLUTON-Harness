@@ -268,6 +268,22 @@ export class ChatSession {
           pastes: [],
         }
 
+        if (fullText.startsWith('/')) {
+          if (fullText === '/exit' || fullText === '/quit') {
+            void this.exit(0)
+            return
+          }
+          if (fullText === '/help') {
+            this.commitLine(
+              this.theme.paint(
+                'dim',
+                'Available commands:\n  /help - Show this help\n  /exit, /quit - Exit chat\n  Ctrl+D - Exit chat\n  Ctrl+C - Clear input\n  Escape - Interrupt turn',
+              ),
+            )
+            return
+          }
+        }
+
         if (this.viewState.busy) {
           this.viewState.queue.push(fullText)
           this.commitLine(this.theme.paint('dim', `queued: ${fullText}`))

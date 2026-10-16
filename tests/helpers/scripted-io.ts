@@ -9,6 +9,7 @@ export class ScriptedIo implements ChatIo {
   frames: Array<{ lines: string[]; cursor: { row: number; col: number } }> = []
   private keyHandler: ((input: string, key: Key) => void) | null = null
   private resizeHandler: (() => void) | null = null
+  private bufferedKeys: Array<{ input: string; key: Key }> = []
   started = false
   stopped = false
 
@@ -26,6 +27,10 @@ export class ScriptedIo implements ChatIo {
 
   onKey(handler: (input: string, key: Key) => void): void {
     this.keyHandler = handler
+    while (this.bufferedKeys.length > 0) {
+      const { input, key } = this.bufferedKeys.shift()!
+      handler(input, key)
+    }
   }
 
   onResize(handler: () => void): void {
@@ -42,15 +47,22 @@ export class ScriptedIo implements ChatIo {
 
   // Scripting helpers
   press(name: string, opts: { ctrl?: boolean; shift?: boolean; meta?: boolean } = {}): void {
-    if (!this.keyHandler) throw new Error('no key handler registered')
     const key: Key = { name, ...opts }
+    if (!this.keyHandler) {
+      this.bufferedKeys.push({ input: '', key })
+      return
+    }
     this.keyHandler('', key)
   }
 
   type(text: string): void {
-    if (!this.keyHandler) throw new Error('no key handler registered')
     for (const char of text) {
-      this.keyHandler(char, { name: char })
+      const key: Key = { name: char }
+      if (!this.keyHandler) {
+        this.bufferedKeys.push({ input: char, key })
+      } else {
+        this.keyHandler(char, key)
+      }
     }
   }
 
