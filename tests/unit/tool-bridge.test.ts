@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,7 +7,7 @@ import type { RunRecord } from '../../src/domain/models.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
-import { WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
+import { notifyTaskTerminal, taskAncestorIds, WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
 import { PlutonToolBridge, type ToolBridgeLimits } from '../../src/tools/bridge.ts'
 import { wakeupChannelFor } from '../../src/tools/handlers.ts'
 import { McpStdioServer } from '../../src/tools/mcp-server.ts'
@@ -486,5 +486,150 @@ describe('PlutonToolBridge — MCP protocol integration', () => {
     ) as { result: { isError: boolean; content: { type: string; text: string }[] } }
     expect(call.result.isError).toBe(false)
     expect(call.result.content[0]?.text ?? '').toContain('"count"')
+  })
+})
+
+describe('PlutonToolBridge — review hardening', () => {
+  it('answers (not rejects) and records the denial when a tool name is oversized', async () => {
+    const fx = makeFixture()
+    const res = await makeBridge(fx, 'manager').call('x'.repeat(9_000), {})
+    expect(res).toMatchObject({ ok: false, error: { code: 'not_found' } })
+    expect((res.error as { message: string }).message.length).toBeLessThan(500)
+    expect(eventTypes(fx.store, fx.run.id, 'tool.denied')).toBe(1)
+  })
+
+  it('refuses reads through a link that escapes the root', async (ctx) => {
+    const fx = makeFixture()
+    const outside = mkdtempSync(join(tmpdir(), 'pluton-outside-'))
+    tmpDirs.push(outside)
+    writeFileSync(join(outside, 'secret.txt'), 'OUTSIDE-SECRET')
+    const link = join(fx.rootDir, 'link')
+    try {
+      if (process.platform === 'win32') symlinkSync(outside, link, 'junction')
+      else symlinkSync(outside, link)
+    } catch {
+      ctx.skip() // no link support in this environment
+      return
+    }
+    const res = await makeBridge(fx, 'manager').call('project.read', { path: 'link/secret.txt' })
+    expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect(JSON.stringify(res)).not.toContain('OUTSIDE-SECRET')
+  })
+
+  it('refuses case variants of refused areas (.PLUTON)', async () => {
+    const fx = makeFixture()
+    mkdirSync(join(fx.rootDir, '.PLUTON', 'state'), { recursive: true })
+    writeFileSync(join(fx.rootDir, '.PLUTON', 'state', 'secret.txt'), 'CASE-SECRET')
+    const res = await makeBridge(fx, 'manager').call('project.read', { path: '.PLUTON/state/secret.txt' })
+    expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+  })
+
+  it('rejects dependencies outside the caller subtree', async () => {
+    const fx = makeFixture()
+    const t = await createTask(makeBridge(fx, 'manager')) // assigned worker-a
+    const tBridge = makeBridge(fx, 'worker-a', t)
+    const cRes = await tBridge.call('task.delegate', { ...CREATE_ARGS, assigneeMuseId: 'manager', title: 'C' })
+    expect(cRes.ok).toBe(true)
+    const c = (cRes.data as { task: { id: string } }).task.id
+    const cBridge = makeBridge(fx, 'manager', c)
+    const denied = await cBridge.call('task.delegate', {
+      ...CREATE_ARGS,
+      assigneeMuseId: 'worker-b',
+      title: 'G',
+      dependsOn: [t], // an ancestor of C: outside C's visible subtree
+    })
+    expect(denied).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    const ok = await cBridge.call('task.delegate', { ...CREATE_ARGS, assigneeMuseId: 'worker-b', title: 'G' })
+    expect(ok.ok).toBe(true)
+  })
+
+  it('rejects delegation from a terminal task', async () => {
+    const fx = makeFixture()
+    const t = await createTask(makeBridge(fx, 'manager'))
+    forceComplete(fx.store, t)
+    const res = await makeBridge(fx, 'worker-a', t).call('task.delegate', {
+      ...CREATE_ARGS,
+      assigneeMuseId: 'manager',
+      title: 'C',
+    })
+    expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((res.error as { message: string }).message).toMatch(/terminal task cannot delegate/)
+  })
+
+  it('rejects a duplicate pending proposal and caps pending approvals', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const propose = (museId: string) =>
+      manager.call('muse.propose_create', {
+        museId,
+        displayName: museId,
+        role: 'custom',
+        engine: 'mock',
+        model: 'mock/model-a',
+        reason: 'r',
+      })
+    expect((await propose('specialist-x')).ok).toBe(true)
+    const duplicate = await propose('specialist-x')
+    expect(duplicate).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((duplicate.error as { message: string }).message).toMatch(/already exists/)
+    expect((await propose('specialist-y')).ok).toBe(true)
+    expect((await propose('specialist-z')).ok).toBe(true)
+    const over = await propose('specialist-w')
+    expect(over).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((over.error as { message: string }).message).toMatch(/pending approvals/)
+  })
+
+  it('caps pending approvals asked through approval.request', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    for (const action of ['tool:one', 'tool:two', 'tool:three']) {
+      expect((await manager.call('approval.request', { action, reason: 'r' })).ok).toBe(true)
+    }
+    const over = await manager.call('approval.request', { action: 'tool:four', reason: 'r' })
+    expect(over).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+  })
+
+  it('refuses to pass a malformed base commit to git', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const taskId = await createTask(manager)
+    const ws = fx.store.createWorkspace({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId,
+      museId: 'worker-a',
+      kind: 'task-checkout',
+      path: join(fx.rootDir, 'ws-1'),
+      branch: 'pluton/task/branch',
+      baseCommit: '--output=evil',
+    })
+    expect(ws.state).toBe('active')
+    const res = await manager.call('diff.inspect', { taskId })
+    expect(res).toMatchObject({ ok: false, error: { code: 'validation_failed' } })
+  })
+
+  it('wakes a waiter on any ancestor channel (supervisor notify contract)', async () => {
+    const fx = makeFixture()
+    const registry = new WakeupRegistry()
+    const t = await createTask(makeBridge(fx, 'manager', null, {}, registry)) // T ← worker-a
+    const tBridge = makeBridge(fx, 'worker-a', t, {}, registry)
+    const cRes = await tBridge.call('task.delegate', { ...CREATE_ARGS, assigneeMuseId: 'manager', title: 'C' })
+    expect(cRes.ok).toBe(true)
+    const c = (cRes.data as { task: { id: string } }).task.id
+    const cBridge = makeBridge(fx, 'manager', c, {}, registry)
+    const gRes = await cBridge.call('task.delegate', { ...CREATE_ARGS, assigneeMuseId: 'worker-b', title: 'G' })
+    expect(gRes.ok).toBe(true)
+    const g = (gRes.data as { task: { id: string } }).task.id
+
+    // T's session waits on its grandchild G; the supervisor's notify path must
+    // reach T's channel even though it only ever completed G.
+    const waiting = tBridge.call('task.wait', { taskIds: [g], timeoutSeconds: 10 })
+    await delay(50)
+    forceComplete(fx.store, g)
+    const gTask = fx.store.getTask(g)
+    notifyTaskTerminal(registry, fx.run.id, gTask, taskAncestorIds(fx.store, gTask))
+    const res = await waiting
+    expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
+    expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
   })
 })

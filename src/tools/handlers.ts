@@ -1,10 +1,10 @@
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { ConflictError, ExternalToolError, NotFoundError, PolicyDeniedError, ValidationError } from '../domain/errors.ts'
 import type { JsonValue, MuseRecord, TaskRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
-import type { WakeupRegistry } from '../orchestrator/wakeups.ts'
+import { wakeupChannelFor, type WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { Store } from '../store/store.ts'
 import { firstLine, run } from '../util/exec.ts'
 import { TOOL_SCHEMAS, type PlutonToolName } from './catalog.ts'
@@ -32,16 +32,19 @@ export interface ToolEnv {
 export type ToolHandler = (env: ToolEnv, args: unknown) => Promise<JsonValue>
 export type ToolHandlers = Record<PlutonToolName, ToolHandler>
 
-/** The wakeup channel a caller waits on: its own task, or the run-level manager channel. */
-export function wakeupChannelFor(callerTaskId: string | null, runId: string): string {
-  return callerTaskId ?? `manager:${runId}`
-}
+// The caller's wakeup channel helper lives with the registry (single source of
+// truth); re-exported here so existing imports from this module keep working.
+export { wakeupChannelFor }
 
 const READ_FILE_CAP_BYTES = 512_000
 const LISTING_CAP = 200
 const REFUSED_SEGMENTS = new Set(['.pluton', '.git', 'node_modules'])
 const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set(['completed', 'failed', 'cancelled', 'uncertain'])
 const GIT_TIMEOUT_MS = 30_000
+/** Bounded pending approvals per run: a model loop must not grow the table without bound. */
+const MAX_PENDING_APPROVALS = 3
+/** A workspace base commit must be a plain hex object id before it reaches git. */
+const BASE_COMMIT_RE = /^[0-9a-fA-F]{7,64}$/
 
 type TaskSummary = {
   id: string
@@ -113,18 +116,45 @@ function assertInsideRoot(rootDir: string, path: string): void {
   throw new ExternalToolError('path guard', `stored path escapes the project root: ${path}`, { path })
 }
 
+/**
+ * Refused-area check on a path relative to the (canonical) project root.
+ * Case-insensitive on purpose: on case-insensitive filesystems `.PLUTON` and
+ * `.pluton` are the same directory, so the refusal must not depend on spelling.
+ */
 function refusedRelativePath(rel: string): string | null {
   const segments = rel.split(/[\\/]+/).filter((s) => s.length > 0)
   for (const segment of segments) {
-    if (REFUSED_SEGMENTS.has(segment)) return segment
+    if (REFUSED_SEGMENTS.has(segment.toLowerCase())) return segment
   }
   return null
+}
+
+function scopeMuseId(scope: JsonValue): string | null {
+  if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
+  const value = (scope as Record<string, JsonValue>)['museId']
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * A task-scoped session may only depend on tasks inside its own subtree:
+ * anything else is a reference to state it cannot see (rejected, not filtered).
+ */
+function assertDependenciesVisible(env: ToolEnv, dependsOn: string[] | undefined): void {
+  if (!dependsOn || dependsOn.length === 0) return
+  const byId = tasksById(env)
+  for (const depId of dependsOn) {
+    const dep = byId.get(depId)
+    if (dep && !isVisible(env, dep, byId)) {
+      throw new PolicyDeniedError(`dependency '${depId}' is outside your scope`)
+    }
+  }
 }
 
 export const TOOL_HANDLERS: ToolHandlers = {
   'task.create': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['task.create'].parse(args)
     const assignee = resolveMuse(env, a.assigneeMuseId)
+    assertDependenciesVisible(env, a.dependsOn)
     const task = admitTask(
       env.store,
       {
@@ -148,6 +178,12 @@ export const TOOL_HANDLERS: ToolHandlers = {
     }
     const assignee = resolveMuse(env, a.assigneeMuseId)
     const caller = env.store.getTask(env.callerTaskId)
+    if (TERMINAL_TASK_STATES.has(caller.state)) {
+      throw new PolicyDeniedError(
+        `calling task '${caller.id}' is already ${caller.state}; a terminal task cannot delegate new work`,
+      )
+    }
+    assertDependenciesVisible(env, a.dependsOn)
     const byId = tasksById(env)
     // Delegation must never cycle back up the task chain: reject assigning the
     // child to any Muse that already owns an ancestor (including the caller's
@@ -297,6 +333,18 @@ export const TOOL_HANDLERS: ToolHandlers = {
         `team size limit reached: ${enabled.length} enabled Muses, max_team_size ${env.limits.maxTeamSize}`,
       )
     }
+    const pending = env.store.listApprovals(env.runId).filter((x) => x.status === 'pending')
+    const duplicate = pending.find((x) => x.action === 'muse.create' && scopeMuseId(x.scope) === a.museId)
+    if (duplicate) {
+      throw new PolicyDeniedError(
+        `a pending proposal for Muse '${a.museId}' already exists (${duplicate.id}); wait for the operator decision`,
+      )
+    }
+    if (pending.length >= MAX_PENDING_APPROVALS) {
+      throw new PolicyDeniedError(
+        `run ${env.runId} already has ${String(pending.length)} pending approvals (limit ${String(MAX_PENDING_APPROVALS)}); resolve them before asking for more`,
+      )
+    }
     const enginesInUse = new Set(enabled.map((m) => m.engineKind))
     const addsEngine = !enginesInUse.has(a.engine)
     const approval = env.store.createApproval({
@@ -331,6 +379,12 @@ export const TOOL_HANDLERS: ToolHandlers = {
     if (TERMINAL_RUN_STATES.has(record.state)) {
       throw new ConflictError(`run '${record.id}' is already ${record.state}`, { runId: record.id, state: record.state })
     }
+    const pendingCount = env.store.listApprovals(env.runId).filter((x) => x.status === 'pending').length
+    if (pendingCount >= MAX_PENDING_APPROVALS) {
+      throw new PolicyDeniedError(
+        `run ${env.runId} already has ${String(pendingCount)} pending approvals (limit ${String(MAX_PENDING_APPROVALS)}); resolve them before asking for more`,
+      )
+    }
     const approval = env.store.createApproval({
       projectId: env.projectId,
       runId: env.runId,
@@ -361,12 +415,16 @@ export const TOOL_HANDLERS: ToolHandlers = {
       return { taskId: task.id, workspace: null, note: 'no active checkout for this task yet' }
     }
     assertInsideRoot(env.rootDir, ws.path)
+    // A revision must never be parsed as a git option (`--output=…` etc.).
+    if (!BASE_COMMIT_RE.test(ws.baseCommit)) {
+      throw new ValidationError(`workspace ${ws.id} has a malformed base commit; refusing to pass it to git`)
+    }
     const maxBytes = a.maxBytes ?? 20_000
     const opts = { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: maxBytes }
     const [status, diff, log] = await Promise.all([
       run(['git', '-C', ws.path, 'status', '--porcelain=v1', '-b'], opts),
-      run(['git', '-C', ws.path, 'diff', '--stat', ws.baseCommit], opts),
-      run(['git', '-C', ws.path, 'log', '--oneline', '--no-decorate', `${ws.baseCommit}..HEAD`], opts),
+      run(['git', '-C', ws.path, 'diff', '--stat', '--end-of-options', ws.baseCommit], opts),
+      run(['git', '-C', ws.path, 'log', '--oneline', '--no-decorate', '--end-of-options', `${ws.baseCommit}..HEAD`], opts),
     ])
     if (status.exitCode !== 0) {
       throw new ExternalToolError('git status', firstLine(status.stderr, 300) || `exit ${String(status.exitCode)}`, {
@@ -402,14 +460,33 @@ export const TOOL_HANDLERS: ToolHandlers = {
     if (refused !== null) {
       throw new PolicyDeniedError(`'${relFromRoot}' is inside a refused area ('${refused}') and can never be read through Pluton tools`)
     }
-    const st = await stat(abs).catch(() => null)
+    // Canonicalize through the real filesystem before trusting the path:
+    // junctions/symlinks (`link -> C:\elsewhere`), case variants (`.PLUTON`)
+    // and 8.3 aliases (`PLUTON~1`) must not smuggle anything out of the root or
+    // into a refused area. Both sides are realpath'd so the comparison is
+    // apples-to-apples; the lexical checks above stay as the cheap pre-filter.
+    const canonicalRoot = await realpath(root)
+    const canonical = await realpath(abs).catch(() => null)
+    if (canonical === null) throw new NotFoundError('path', rel === '' ? '.' : rel)
+    const canonicalRel = relative(canonicalRoot, canonical)
+    if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
+      throw new PolicyDeniedError(`path resolves outside the project root (via a link): '${rel}'`)
+    }
+    const refusedCanonical = refusedRelativePath(canonicalRel)
+    if (refusedCanonical !== null) {
+      throw new PolicyDeniedError(
+        `'${canonicalRel}' is inside a refused area ('${refusedCanonical}') and can never be read through Pluton tools`,
+      )
+    }
+    const display = canonicalRel === '' ? '.' : canonicalRel
+    const st = await stat(canonical).catch(() => null)
     if (st === null) throw new NotFoundError('path', rel === '' ? '.' : rel)
     if (st.isDirectory()) {
-      const entries = (await readdir(abs, { withFileTypes: true }))
-        .filter((e) => !REFUSED_SEGMENTS.has(e.name))
+      const entries = (await readdir(canonical, { withFileTypes: true }))
+        .filter((e) => !REFUSED_SEGMENTS.has(e.name.toLowerCase()))
         .sort((x, y) => x.name.localeCompare(y.name))
       return {
-        path: relFromRoot === '' ? '.' : relFromRoot,
+        path: display,
         type: 'directory',
         entries: entries.slice(0, LISTING_CAP).map((e) => ({
           name: e.name,
@@ -419,22 +496,50 @@ export const TOOL_HANDLERS: ToolHandlers = {
       }
     }
     if (!st.isFile()) {
-      return { path: relFromRoot, type: 'other', note: 'not a regular file or directory' }
+      return { path: display, type: 'other', note: 'not a regular file or directory' }
     }
     if (st.size > READ_FILE_CAP_BYTES) {
       return {
-        path: relFromRoot,
+        path: display,
         type: 'file',
         bytes: st.size,
         tooLarge: true,
         note: `file exceeds the ${READ_FILE_CAP_BYTES}-byte read cap`,
       }
     }
-    const buf = await readFile(abs)
-    if (buf.subarray(0, 8_192).includes(0)) {
-      return { path: relFromRoot, type: 'file', bytes: st.size, binary: true }
+    // Read through a handle with a hard bound: a file that grows between the
+    // size check and the read cannot exceed the cap (no stat/read TOCTOU).
+    const handle = await open(canonical, 'r')
+    try {
+      const fst = await handle.stat()
+      if (!fst.isFile() || fst.size > READ_FILE_CAP_BYTES) {
+        return {
+          path: display,
+          type: 'file',
+          bytes: fst.size,
+          tooLarge: true,
+          note: `file exceeds the ${READ_FILE_CAP_BYTES}-byte read cap`,
+        }
+      }
+      const buf = Buffer.allocUnsafe(READ_FILE_CAP_BYTES + 1)
+      const read = await handle.read(buf, 0, buf.length, 0)
+      if (read.bytesRead > READ_FILE_CAP_BYTES) {
+        return {
+          path: display,
+          type: 'file',
+          bytes: read.bytesRead,
+          tooLarge: true,
+          note: `file exceeds the ${READ_FILE_CAP_BYTES}-byte read cap`,
+        }
+      }
+      const data = buf.subarray(0, read.bytesRead)
+      if (data.subarray(0, 8_192).includes(0)) {
+        return { path: display, type: 'file', bytes: read.bytesRead, binary: true }
+      }
+      return { path: display, type: 'file', bytes: read.bytesRead, text: data.toString('utf8') }
+    } finally {
+      await handle.close().catch(() => {})
     }
-    return { path: relFromRoot, type: 'file', bytes: st.size, text: buf.toString('utf8') }
   },
 
   'run.stop': async (env, args): Promise<JsonValue> => {

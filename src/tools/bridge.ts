@@ -127,26 +127,30 @@ export class PlutonToolBridge implements McpToolHost {
 
   async call(name: string, args: unknown): Promise<McpToolCallResult> {
     const started = this.env.now()
+    // Bound the model-controlled name BEFORE anything is audited: an oversized
+    // name must never make an event payload throw and silently drop the denial
+    // record (the store caps event payloads).
+    const displayName = name.length > 200 ? `${name.slice(0, 200)}…` : name
     const def = getToolDef(name)
     if (!def) {
-      this.audit('tool.denied', { tool: name, reason: 'unknown_tool' })
-      return this.failure('not_found', `unknown Pluton tool '${name}'`)
+      this.audit('tool.denied', { tool: displayName, reason: 'unknown_tool' })
+      return this.failure('not_found', `unknown Pluton tool '${displayName}'`)
     }
     if (!this.permissions.includes(def.permission)) {
-      this.audit('tool.denied', { tool: name, reason: 'permission_missing', permission: def.permission })
+      this.audit('tool.denied', { tool: def.name, reason: 'permission_missing', permission: def.permission })
       return this.failure(
         'policy_denied',
-        `muse '${this.env.callerMuseId}' lacks permission '${def.permission}' for tool '${name}'`,
+        `muse '${this.env.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
       )
     }
     try {
       const data = await TOOL_HANDLERS[def.name](this.env, args)
       const result: McpToolCallResult = { ok: true, data: this.bound(data) }
-      this.audit('tool.call', { tool: name, ok: true, mutating: def.mutating, durationMs: this.env.now() - started })
+      this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.env.now() - started })
       return result
     } catch (e) {
       this.audit('tool.call', {
-        tool: name,
+        tool: def.name,
         ok: false,
         mutating: def.mutating,
         errorCode: e instanceof ZodError ? 'invalid_arguments' : e instanceof PlutonError ? e.code : 'internal_error',
@@ -155,7 +159,7 @@ export class PlutonToolBridge implements McpToolHost {
       if (e instanceof ZodError) {
         return this.failure(
           'invalid_arguments',
-          `invalid arguments for '${name}': ${e.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`.slice(0, 2_000),
+          `invalid arguments for '${def.name}': ${e.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`.slice(0, 2_000),
           { issues: e.issues.slice(0, 20).map((i) => ({ path: i.path.join('.'), message: i.message })) },
         )
       }

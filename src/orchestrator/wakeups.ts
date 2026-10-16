@@ -1,4 +1,6 @@
 import type { TaskState } from '../domain/state.ts'
+import type { TaskRecord } from '../domain/models.ts'
+import type { Store } from '../store/store.ts'
 
 /**
  * In-process wakeup registry (prompt §4/§7): a completed child task wakes its
@@ -20,6 +22,42 @@ export interface Wakeup {
 export interface WakeupRegistryOptions {
   /** Injectable clock (tests); defaults to Date.now. */
   now?: () => number
+}
+
+/** The wakeup channel a caller waits on: its own task, or the run-level manager channel. */
+export function wakeupChannelFor(callerTaskId: string | null, runId: string): string {
+  return callerTaskId ?? `manager:${runId}`
+}
+
+/**
+ * Wake every possible waiter after a terminal transition: the manager channel
+ * and each ancestor task's channel (a task-scoped caller may be waiting on any
+ * descendant). The registry dedupes per (channel, child) pair, so notifying
+ * overlapping keys is harmless. Keying matches `wakeupChannelFor`: a task's
+ * channel is the bare task id, the manager's channel is `manager:<runId>`.
+ */
+export function notifyTaskTerminal(
+  wakeups: WakeupRegistry,
+  runId: string,
+  task: TaskRecord,
+  ancestors: string[],
+): void {
+  wakeups.notify(wakeupChannelFor(null, runId), task.id, task.state)
+  for (const ancestorId of ancestors) wakeups.notify(ancestorId, task.id, task.state)
+}
+
+/** Ancestor task ids of a task (nearest first), cycle-guarded and bounded by the graph. */
+export function taskAncestorIds(store: Store, task: TaskRecord): string[] {
+  const ids: string[] = []
+  const seen = new Set<string>([task.id])
+  let parentId = task.parentTaskId
+  while (parentId !== null && !seen.has(parentId)) {
+    seen.add(parentId)
+    ids.push(parentId)
+    const parent = store.getTaskOrNull(parentId)
+    parentId = parent?.parentTaskId ?? null
+  }
+  return ids
 }
 
 /** One pending waitFor() call. */
@@ -46,24 +84,29 @@ export class WakeupRegistry {
     this.now = opts?.now ?? Date.now
   }
 
-  /** Record a child reaching a terminal state. One wakeup per child is ever delivered. */
-  notify(parentTaskId: string, childTaskId: string, childState: TaskState): void {
-    const key = pairKey(parentTaskId, childTaskId)
+  /**
+   * Record a child reaching a terminal state against a channel key. One wakeup
+   * per (channel, child) pair is ever delivered. The producer chooses the keys:
+   * the run supervisor notifies the manager channel (`manager:<runId>`) and
+   * every ancestor task's channel, so a waiter on any ancestor is woken.
+   */
+  notify(channelKey: string, childTaskId: string, childState: TaskState): void {
+    const key = pairKey(channelKey, childTaskId)
     if (this.delivered.has(key)) return
     this.delivered.add(key)
-    const wakeup: Wakeup = { parentTaskId, childTaskId, childState, at: this.now() }
+    const wakeup: Wakeup = { parentTaskId: channelKey, childTaskId, childState, at: this.now() }
 
-    const list = this.waiters.get(parentTaskId)
+    const list = this.waiters.get(channelKey)
     const waiter = list?.shift()
-    if (list && list.length === 0) this.waiters.delete(parentTaskId)
+    if (list && list.length === 0) this.waiters.delete(channelKey)
     if (waiter) {
       clearTimeout(waiter.timer)
       waiter.resolve([wakeup])
       return
     }
-    const buffered = this.buffer.get(parentTaskId) ?? []
+    const buffered = this.buffer.get(channelKey) ?? []
     buffered.push(wakeup)
-    this.buffer.set(parentTaskId, buffered)
+    this.buffer.set(channelKey, buffered)
   }
 
   /** Drain buffered wakeups for the parent (consume-once). */
