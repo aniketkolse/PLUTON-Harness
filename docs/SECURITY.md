@@ -120,13 +120,13 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
 
 Stated plainly so nobody over-reads the guarantees above:
 
-1. **No live container-mode run has been executed end to end.** A host-mode
-   live run with real networked engines through the HTTP transport executed on
-   2026-10-16/17 (`docs/smoke-live-run.md`); the container-mode path (per-Muse
-   containers, `docker exec` spawns) has in-process unit/integration coverage
-   plus a live-verified fail-closed path, but its full live sequence was NOT RUN
-   on this host (no Docker daemon there at the time) — see
-   `docs/delivery-report.md` §7.
+1. **Container-mode live evidence is Windows-Docker-Desktop-only.** A host-mode
+   live run executed 2026-10-16/17, and a full container-mode live run (engines
+   image, per-Muse containers, `docker exec` spawns, real worker edit closed by
+   the verification gate) executed 2026-10-17 — both in
+   `docs/smoke-live-run.md`. That smoke found and fixed one engine-session leak
+   (`ba68557`). Linux-host container behavior (mount ownership, uid alignment)
+   remains unproven — see gap 9 below.
 2. **HTTP transport authentication is a bearer token over loopback.** Any
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never
@@ -150,8 +150,9 @@ Stated plainly so nobody over-reads the guarantees above:
 9. **Bind-mount ownership is untested on Linux hosts.** The container user is
    `10001:10001`; on Linux, host-owned engine homes and task checkouts may be
    unwritable from inside the container unless ownership is aligned (uid remap
-   or chown). Docker Desktop presents mounts broadly writable, which can mask
-   the problem — the container-mode E2E that would prove this is NOT RUN.
+   or chown). The 2026-10-17 container-mode live E2E proved writes work on
+   Windows Docker Desktop, whose mounts are broadly writable — which is exactly
+   why the Linux case stays open, not proven.
 10. **Engine-side output is redacted by key, not by value.** An engine that
     echoes a secret into its own output (e.g. a request header it was handed)
     could persist it in event payloads; redaction removes known secret-keyed

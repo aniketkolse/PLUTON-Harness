@@ -112,17 +112,93 @@ Durable evidence (read-only queries of the project store):
 
 ## Container-mode smoke (`sandbox.kind: docker`) — 2026-10-17
 
-**Status: procedure ready, live E2E NOT RUN — no Docker daemon on this host
-(`docker version` → `failed to connect to the docker API at
-npipe:////./pipe/dockerDesktopLinuxEngine`).** Everything below marked `[ ]`
-requires the daemon and is deliberately left unclaimed.
+**Status: RUN — PASS** (Docker Desktop 29.8.2, linux/amd64). Implementation
+under test: Tasks 5–7 of the run-wiring plan plus the adversarial-review fixes
+(`1f9521c`, `2695e20`, `45f23f6`, `88bd335`). One real leak was found and fixed
+(`ba68557`); the first attempt failed on an operator scripting mistake (not a
+Pluton defect) — both recorded below.
 
-Scratch project: `.pluton-tmp/smoke-docker/` (gitignored; seeded, same two
-Muses as `smoke-host`, `sandbox.kind: docker`). Implementation under test:
-Tasks 5–7 of the run-wiring plan plus the adversarial-review fixes
-(`1f9521c`, `2695e20`, `45f23f6`, `88bd335`).
+Scratch project: `.pluton-tmp/smoke-docker/` (gitignored; same two Muses as
+`smoke-host`, `sandbox.kind: docker`), seeded so the configured check FAILS
+first: `test/smoke.test.js` exits 1 until `README.md` contains a `## Smoke`
+section (scratch commit `025d1b1`) — so a green `pluton verify` proves a real
+worker edit rather than a trivial exit 0.
 
-### Verified live without the daemon `[x]`
+### Operator environment
+
+- 9router gateway re-started for this smoke and bound `0.0.0.0:20128` (its
+  loopback-bound predecessor had died; nothing was listening on the port). Key
+  read from the gitignored `.pluton-tmp/keys/engine-keys.env`, never printed.
+- Container → gateway reachability proven from inside the worker container:
+  `host.docker.internal` resolves (192.168.65.254 on Docker Desktop) and a real
+  authenticated `/v1/chat/completions` call returns a streamed completion. The
+  containers also carry the explicit `host.docker.internal:host-gateway`
+  mapping (`src/sandbox/muse-containers.ts`, required by reuse validation).
+
+### Results `[x]`
+
+1. Engines image — PASS:
+   - `docker build --build-arg PLUTON_ENGINES=1 -t pluton-worker:local docker/worker`:
+     the in-build proof printed `opencode v2.0.31` and `0.25.2`.
+   - `docker run --rm pluton-worker:local sh -c "opencode --version && qwen --version"`:
+     `opencode v2.0.31`, `0.25.2`.
+   - `pluton sandbox build-image --engines --json` in `smoke-docker/`:
+     `ok: true`, `profile: engines`, `imageId sha256:3ba7607a…`, `tmux 3.3a`,
+     `node v24.22.0` — the recorded profile gate is satisfied.
+2. Container-mode `pluton run` — PASS (run `run_mvbdxegw64ba23de`): one
+   container per Muse (`pluton-project-mvbcakle23bcab26-manager` / `-worker`,
+   reused from the failed first attempt — the stale-container reuse path
+   exercised live), the manager planned through the tool bridge
+   (`project.read`/`task.create`/`task.wait`/`diff.inspect` tool calls), the
+   worker edited `README.md` in its own task checkout, the task stopped in
+   `verifying` (`task.awaiting_verification`), and the manager settled.
+3. `pluton verify --run run_mvbdxegw64ba23de --json` — PASS: task `completed`
+   (1/1 checks passed), run `completed`, outcome `success`.
+4. Live argv hygiene, both sessions observed mid-run:
+
+   ```
+   docker exec -i -w /pluton/project -e TERM -e XDG_CONFIG_HOME -e XDG_DATA_HOME -e XDG_CACHE_HOME -e HOME pluton-project-…-manager /usr/local/bin/opencode acp --log-level warn
+   docker exec -i -w /pluton/workspaces/task_mvbdxru02820485e -e TERM -e OPENAI_API_KEY -e OPENAI_BASE_URL -e OPENAI_MODEL -e QWEN_DIR -e NO_COLOR -e HOME pluton-project-…-worker /usr/local/bin/qwen --acp
+   ```
+
+   `-e NAME` pairs only — no `=` after any `-e`, so env values (including the
+   API key) never enter argv. Engine binaries are the in-image pins; the
+   manager's cwd is the container path of the read-only project mount and the
+   worker's is the container path of its task checkout (`mapWorkdir`, `88bd335`);
+   qwen's own session log records the same cwd and `authType: openai`.
+
+### Findings
+
+- **Engine sessions leaked on run end (fixed in `ba68557`).** Both finished runs
+  left live `docker exec … opencode acp` processes in the manager container:
+  `runManagerSession()` never closed its session, and a throwing task prompt
+  skipped the per-task close. Both now close in `finally`; two supervisor tests
+  pin manager-session close and close-on-throw → `unknown_outcome` (never
+  claimed as failure). The close mechanism itself was already live-proven —
+  run 2's worker sessions were gone from the process list after their tasks
+  settled.
+- **One stalled model call (engine/gateway flakiness, not a Pluton defect).**
+  qwen wrote its final summary, then a subsequent model request hung with no
+  log activity for ~8 minutes and no error; Pluton's prompt timeout interrupted
+  the session and the task settled with the work already complete (verification
+  passed). The run's ~14-minute wall time is dominated by this stall.
+
+### First attempt — operator script error, not a Pluton defect
+
+The first `pluton run` (run `run_mvbdoxn9aa4372bd`) failed with three
+`unknown_outcome` tasks (`engine_protocol_error: acp 'session/prompt' failed:
+Internal error (code -32603)`). Root cause: the operator's PowerShell key
+extraction — `(Get-Content file) -match '^OPENAI_API_KEY=' -replace …` — on a
+single-line file `-match` returns a BOOLEAN, so `$true -replace …` became the
+literal key `"True"` (4 chars). qwen inside the container correctly got
+`401 Invalid API key` (its own session telemetry records it) and Pluton
+recorded honest unknowns — the system behaved as designed. Retried with
+`Select-String -Pattern '^OPENAI_API_KEY=(.+)$'` extraction: PASS. Lesson: for
+secret extraction in PowerShell use `Select-String` groups, not `-match` on
+scalar input — the gitignored `.pluton-tmp/smoke-env.ps1` loader is the
+supported path for host-mode runs.
+
+### Fail-closed behavior (verified live with no daemon) `[x]`
 
 Fail-closed behavior of container mode (review focus #1: typed error, zero
 containers created, run not started):
@@ -139,59 +215,18 @@ Durable check immediately after (read-only): `runs=0`, `tasks=0`,
 `sandboxes=0` — the failure happened before the run row existed, so no
 half-started run was recorded.
 
-### Not run `[ ]` — exact commands for a host with a daemon
+### Previously unverified — now proven, or explicitly still open
 
-1. Build the engines image and record its digest:
-
-   ```
-   docker build --build-arg PLUTON_ENGINES=1 -t pluton-worker:local docker/worker
-   docker run --rm pluton-worker:local sh -c "opencode --version && qwen --version"
-   node Y:\Pluton\bin\pluton.js sandbox build-image --engines --json   # records image id + profile
-   ```
-
-2. `pluton run` in `.pluton-tmp/smoke-docker/` with engine env present
-   (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` from the gitignored
-   key file — values never printed):
-
-   ```
-   node Y:\Pluton\bin\pluton.js run --goal "make the smoke test say ok" --acceptance "verification passes" --json
-   ```
-
-   Expect: one container per Muse (`pluton-<project>-manager` /
-   `-worker`), engines running via `docker exec`, the manager reaching the
-   tool bridge through `host.docker.internal`, run stopping in `verifying`.
-
-3. `node Y:\Pluton\bin\pluton.js verify --run <id> --json` → task `completed`
-   (1/1 checks), run `completed`/`success`.
-
-4. Argv hygiene spot-check while a session is live (Windows):
-
-   ```
-   Get-CimInstance Win32_Process -Filter "Name='docker.exe'" |
-     Where-Object { $_.CommandLine -match 'exec' } |
-     Select-Object -ExpandProperty CommandLine
-   ```
-
-   Expect `-e NAME` pairs only — no `=` after any `-e` (values stay in the
-   docker CLI environment; pinned by unit tests, not yet observed live).
-
-5. Record results here (and flip the `host.docker.internal` reachability note
-   in `docs/SECURITY.md` §8 if the bridge is reached) — or record another
-   failure honestly.
-
-### Unverified until the above runs
-
-- the `engines` image layer actually installs working `opencode`/`qwen`
-  binaries on linux (Dockerfile pins `@opencode/cli@2.0.31` +
-  `@qwen-code/qwen-code@0.25.2`; the in-image `--version` proof is only run at
-  build time);
-- `--add-host host.docker.internal:host-gateway` plus a bridge bound to
-  `0.0.0.0` is actually reachable from inside the containers on this host;
-- container user `10001:10001` can write into the bind-mounted checkouts and
-  engine homes — git `safe.directory '*'` is set in the image; on Windows
-  Docker Desktop mounts are broadly writable; on Linux hosts the mount
-  ownership must be aligned (uid remap/chown) and this is untested
-  (SECURITY.md §8.9);
-- `docker exec -i` stdio tunneling of ACP sessions against the real CLIs
-  (in-process coverage: `tests/unit/docker-exec.test.ts` + the container-mode
-  integration test in `tests/integration/cli-run.test.ts`).
+- [x] the `engines` image layer installs working `opencode`/`qwen` on linux
+  (in-build proof plus the runtime `--version` run, both recorded above);
+- [x] containers reach the host gateway: Docker Desktop DNS plus the explicit
+  `--add-host host.docker.internal:host-gateway` spec entry, proven with an
+  authenticated model call from inside the worker container;
+- [x] container user `10001:10001` writes into bind-mounted checkouts and
+  engine homes on Windows Docker Desktop (the worker's edit landed and the
+  verification gate ran against it);
+- [x] `docker exec -i` stdio tunneling of ACP sessions against the real CLIs,
+  including the ACP session cwd mapping (live argv + qwen session log above);
+- [ ] on Linux hosts, mount ownership (uid remap/chown) remains untested —
+  Docker Desktop's broad mount permissions can mask the problem
+  (SECURITY.md §8.9).

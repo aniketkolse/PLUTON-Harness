@@ -106,7 +106,8 @@ References (read-only, recorded commits):
 - [x] Engine profile in the worker image: `PLUTON_ENGINES=1` installs pinned `@opencode/cli@2.0.31` +
       `@qwen-code/qwen-code@0.25.2` and proves them with an in-image `--version` at build time (fail-closed);
       the recorded profile gates container-mode dispatch (`pluton sandbox build-image --engines`; legacy
-      records read as `base`; the engines-image E2E build is NOT RUN on this host — no Docker daemon)
+      records read as `base`); the live build executed 2026-10-17 with the in-image `--version` proof
+      (`docs/smoke-live-run.md`)
 - [x] Container lifecycle: non-root, `--cap-drop ALL`, `no-new-privileges`, CPU/mem/PID limits, bounded
       noexec tmpfs, mount policy, env allowlist, network policy, Pluton-owned labels, label-guarded
       stop/remove — `src/sandbox/docker.ts` + conformance tests; `local-process` is acknowledgement-gated
@@ -157,9 +158,11 @@ References (read-only, recorded commits):
       enter argv, host→container path rewriting, in-image binary pins, Linux platform env construction),
       and the tool bridge exposed on the host gateway with per-session bearer tokens. `sandbox.kind: docker`
       (the default) fails closed before any run row exists — live-verified on this host (typed
-      `sandbox_unavailable`, 0 runs / 0 containers / 0 tasks). Container-mode live E2E: procedure ready in
-      `docs/smoke-live-run.md`, NOT RUN (no Docker daemon on this host); `local-process` remains the
-      acknowledgement-gated host-mode path
+      `sandbox_unavailable`, 0 runs / 0 containers / 0 tasks). Container-mode live E2E executed
+      2026-10-17 — PASS (`docs/smoke-live-run.md`: engines image with in-image version proof, per-Muse
+      containers reusing the stale-container path, a real worker edit, `pluton verify` closing the run
+      `completed` / `success`; the smoke found and fixed one engine-session leak, `ba68557`);
+      `local-process` remains the acknowledgement-gated host-mode path
 
 ## Phase 7 — Verification and integration `[~]`
 
@@ -189,7 +192,7 @@ References (read-only, recorded commits):
 ## Delivered vs planned (live status — updated at session end)
 
 _Phases 0–5 complete; Phase 6 in progress (bridge + supervisor + live two-engine goal in; engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring pending).
-Live status: 423 tests / 32 files green
+Live status: 425 tests / 32 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
@@ -215,8 +218,9 @@ through durable evidence. `pluton run` is wired end to end and host-mode live-sm
 OpenCode manager + Qwen worker goal (`docs/smoke-live-run.md`; the run closed `completed` only via
 `pluton verify`). Container mode is wired in the same command (per-Muse containers, `docker exec`
 engine spawns, engines-image gate — `1f9521c`, `2695e20`, `45f23f6`); its fail-closed path is
-live-verified and its full live E2E is recorded NOT RUN (no Docker daemon here; exact commands in the
-smoke doc).
+live-verified and its full live E2E ran 2026-10-17 — PASS (engines image with in-image version
+proof, per-Muse containers, a real worker edit closed by `pluton verify` `completed`/`success`;
+the smoke found and fixed an engine-session leak, `ba68557`; `docs/smoke-live-run.md`).
 Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
 Next (not in this build): `attach`/`integrate`, the integration checkout, and dynamic-specialist
 approval apply/deny + expiry._
