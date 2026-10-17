@@ -219,6 +219,25 @@ describe('renderHeader', () => {
     expect(header).toContain('resumed')
     expect(header).toContain('14 messages')
   })
+
+  it('de-duplicates engine prefix when model already begins with engine/', () => {
+    const header = renderHeader(
+      {
+        projectName: 'my-project',
+        rootDir: '/workspace/my-project',
+        museSlug: 'operator',
+        engine: 'opencode',
+        model: 'opencode/deepseek-v4.1-flash-free',
+        mode: 'container',
+        sessionId: 'chat_12345678',
+        resumed: false,
+        messageCount: 0,
+      },
+      plain,
+    )
+    expect(header).toContain('opencode/deepseek-v4.1-flash-free')
+    expect(header).not.toContain('opencode/opencode/')
+  })
 })
 
 describe('renderNotice', () => {

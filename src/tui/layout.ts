@@ -99,9 +99,12 @@ export function computeLayout(
   const footerRect: Rect = { x: 0, y: footerY, width: columns, height: footerHeight }
 
   // Composer height: clamped between 2 and (compact ? 3 : 5)
+  // For boxed composer (brandHeader), we need 1 top border + content rows + 1 bottom border
   const maxComposerHeight = compactHeight ? 3 : 5
   const draftLines = opts.draftLineCount ?? 1
-  const composerHeight = Math.max(2, Math.min(maxComposerHeight, draftLines))
+  const composerHeight = opts.brandHeader
+    ? Math.max(2, Math.min(maxComposerHeight + 1, draftLines + 1))
+    : Math.max(2, Math.min(maxComposerHeight, draftLines))
 
   const composerY = footerY - composerHeight
   const dividerComposerY = composerY - 1

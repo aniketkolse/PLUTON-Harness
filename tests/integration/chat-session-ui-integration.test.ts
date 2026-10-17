@@ -99,6 +99,17 @@ describe('ChatSession TUI 2.0 Presentation Integration', () => {
     expect(frameText).toMatch(/(?:⛵|\[SHIP\])\s*PLUTON/)
     expect(frameText).toContain('Everything looks clean and ready.')
 
+    // 3. Docked rounded InputBox rendered with borders
+    expect(frameText).toContain('╭')
+    expect(frameText).toContain('╰')
+
+    // 4. Live status bar has Context and Cost telemetry
+    expect(frameText).toContain('Context: 0%')
+    expect(frameText).toContain('$0.00')
+
+    // 5. Zero duplicate session header noise in transcript
+    expect(frameText).not.toContain('session chat_')
+
     // Clean exit
     io.send('/exit')
     await runPromise

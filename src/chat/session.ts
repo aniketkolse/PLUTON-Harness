@@ -32,10 +32,7 @@ import {
 import {
   renderFullScreenFrame,
   renderHeader,
-  renderInput,
   renderNotice,
-  renderStatusLine,
-  renderToolLine,
   type FullScreenFrameOptions,
   type StatusView,
 } from '../tui/render.ts'
@@ -53,6 +50,7 @@ import {
 } from '../tui/approval.ts'
 import type { ApprovalRecord } from '../domain/models.ts'
 import { wrapText } from '../tui/width.ts'
+import { computeLayout } from '../tui/layout.ts'
 import { operatorPreamble } from './prompt.ts'
 import type {
   OrchestraInspectorData,
@@ -69,6 +67,9 @@ import {
 import { renderUserMessage, renderAssistantMessage } from '../ui/messages.ts'
 import { renderToolGroup, type ToolItemData } from '../ui/tools.ts'
 import { getUITheme } from '../ui/theme.ts'
+
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
+const DEFAULT_COST_PER_MILLION_TOKENS = 2.0
 
 /** Map a durable approval record to its UI view data (target only when scope names one). */
 function approvalRecordToView(record: ApprovalRecord): ApprovalViewData {
@@ -116,6 +117,7 @@ export interface ChatSessionDeps {
   pollIntervalMs?: number
   now?: () => number
   initialNotices?: string[]
+  initialInspectorOpen?: boolean
 }
 
 export class ChatSession {
@@ -146,7 +148,7 @@ export class ChatSession {
     this.deps = deps
     this.theme = createTheme()
     this.editor = initialEditor()
-    this.viewState = initialViewState()
+    this.viewState = initialViewState({ inspectorOpen: deps.initialInspectorOpen ?? false })
   }
 
   async start(): Promise<void> {
@@ -191,7 +193,7 @@ export class ChatSession {
       this.theme,
     )
 
-    this.commitLine(header)
+    this.deps.io.commit(header)
 
     if (this.deps.initialNotices) {
       for (const n of this.deps.initialNotices) {
@@ -204,7 +206,7 @@ export class ChatSession {
         if (msg.role === 'user') {
           this.commitLine(this.theme.paint('user', `> ${msg.text}`))
         } else if (msg.role === 'assistant') {
-          const rendered = renderMarkdown(msg.text, this.deps.io.size().columns, this.theme)
+          const rendered = renderMarkdown(msg.text, this.getChatContentWidth(), this.theme)
           for (const l of rendered) {
             this.commitLine(l)
           }
@@ -599,15 +601,25 @@ export class ChatSession {
       },
       this.theme,
     )
-    this.commitLine(header)
+    this.deps.io.commit(header)
     this.scheduleRedraw()
+  }
+
+  private getChatContentWidth(): number {
+    const size = this.deps.io.size()
+    const layout = computeLayout(size.columns, size.rows, {
+      inspectorOpen: this.viewState?.inspectorOpen ?? false,
+      brandHeader: true,
+    })
+    return Math.max(20, layout.chat.width - 2)
   }
 
   private async dispatchTurn(userText: string): Promise<void> {
     this.viewState = beginTurn(this.viewState, userText)
     if (this.transcriptLines.length > 0) this.transcriptLines.push('')
     const uiTheme = getUITheme({ color: this.theme.enabled })
-    const userLines = renderUserMessage(userText, Math.max(20, this.deps.io.size().columns - 4), uiTheme)
+    const chatWidth = this.getChatContentWidth()
+    const userLines = renderUserMessage(userText, chatWidth, uiTheme)
     for (const line of userLines) {
       this.commitLine(line)
     }
@@ -650,7 +662,7 @@ export class ChatSession {
             const lines = renderToolActivity(
               finishedAct,
               this.viewState.toolExpanded,
-              this.deps.io.size().columns,
+              this.getChatContentWidth(),
               this.theme,
             )
             for (const line of lines) {
@@ -666,7 +678,7 @@ export class ChatSession {
             const noticeLines = renderEngineRequestNotice(
               ev.requestId,
               ev.description,
-              this.deps.io.size().columns,
+              this.getChatContentWidth(),
               this.theme,
             )
             for (const line of noticeLines) {
@@ -696,9 +708,10 @@ export class ChatSession {
     if (endRes.assistantText) {
       if (this.transcriptLines.length > 0) this.transcriptLines.push('')
       const uiTheme = getUITheme({ color: this.theme.enabled })
+      const chatWidth = this.getChatContentWidth()
       const asstLines = renderAssistantMessage(
         endRes.assistantText,
-        Math.max(20, this.deps.io.size().columns - 4),
+        chatWidth,
         uiTheme,
       )
       for (const line of asstLines) {
@@ -1004,13 +1017,13 @@ export class ChatSession {
           running: true,
           expanded: this.viewState.toolExpanded,
         },
-        Math.max(20, columns - 4),
+        Math.max(20, this.getChatContentWidth()),
         getUITheme({ color: this.theme.enabled }),
       )
       activeTranscript.push(...lines)
     }
     if (this.viewState.live) {
-      const chatWidth = Math.max(20, Math.round(columns * 0.72))
+      const chatWidth = this.getChatContentWidth()
       const uiTheme = getUITheme({ color: this.theme.enabled })
       const liveMd = renderAssistantMessage(this.viewState.live + ' ▌', chatWidth, uiTheme)
       activeTranscript.push(...liveMd)
@@ -1028,11 +1041,13 @@ export class ChatSession {
     const orchestraData = this.buildOrchestraData()
     const firstApproval = this.firstInboxApproval()
 
-    let contextPct: number | undefined
+    let contextPct = 0
+    let cost = 0.0
     if (this.viewState?.usage) {
       const totalTokens = this.viewState.usage.inputTokens + this.viewState.usage.outputTokens
       if (totalTokens > 0) {
-        contextPct = Math.min(100, Math.round((totalTokens / 200000) * 100))
+        contextPct = Math.min(100, Math.round((totalTokens / DEFAULT_CONTEXT_WINDOW_TOKENS) * 100))
+        cost = Number(((totalTokens / 1_000_000) * DEFAULT_COST_PER_MILLION_TOKENS).toFixed(2))
       }
     }
 
@@ -1058,6 +1073,7 @@ export class ChatSession {
       brandHeader: true,
       mode: 'chat',
       contextPct,
+      cost,
     })
   }
 

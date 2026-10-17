@@ -31,13 +31,13 @@ export interface ChatViewState {
   queue: string[]
 }
 
-export function initialViewState(): ChatViewState {
+export function initialViewState(opts?: { inspectorOpen?: boolean }): ChatViewState {
   return {
     blocks: [],
     live: '',
     busy: false,
     toolExpanded: false,
-    inspectorOpen: true,
+    inspectorOpen: opts?.inspectorOpen ?? false,
     scrollOffset: 0,
     usage: null,
     approvalsPending: 0,

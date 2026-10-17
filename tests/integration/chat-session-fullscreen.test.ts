@@ -97,6 +97,7 @@ describe('ChatSession Full-Screen TUI Integration', () => {
       io,
       session: chatSessionRow,
       mcpServers: [],
+      initialInspectorOpen: true,
     })
 
     await session.start()

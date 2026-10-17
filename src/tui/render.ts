@@ -14,6 +14,7 @@ import {
 } from './approval.ts'
 import { renderHeader as renderUIHeader } from '../ui/header.ts'
 import { renderStatusBar as renderUIStatusBar } from '../ui/status.ts'
+import { renderInputBox } from '../ui/input.ts'
 import { getUITheme } from '../ui/theme.ts'
 
 export interface StatusView {
@@ -152,9 +153,14 @@ export function renderHeader(
   const ship = theme.icon('ship')
   const sessStatus = info.resumed ? 'resumed' : 'new'
   const left = `${theme.paint('header', `${ship} Pluton`)} ${theme.paint('dim', '·')} ${theme.paint('accent', info.projectName)}`
+  let cleanModel = info.model
+  const prefix = `${info.engine}/`
+  while (cleanModel.startsWith(prefix)) {
+    cleanModel = cleanModel.slice(prefix.length)
+  }
   const right = theme.paint(
     'dim',
-    `${info.museSlug} · ${info.engine}/${info.model} · session ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`,
+    `${info.museSlug} · ${info.engine}/${cleanModel} · session ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`,
   )
   return `${left} ${theme.paint('dim', '·')} ${right}`
 }
@@ -403,42 +409,76 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
     }
   }
 
-  // 3. Composer Divider
-  if (layout.twoColumn && layout.dividerVertical) {
-    const divX = layout.dividerVertical.x
-    const leftHz = hz.repeat(Math.max(0, divX - 1))
-    const rightHz = hz.repeat(Math.max(0, columns - divX - 2))
-    screenLines[layout.dividerComposer] = theme.paint(
-      'border',
-      `├${leftHz}${teeUp}${rightHz}┤`,
+  let cursorRow = 0
+  let cursorCol = 0
+
+  if (opts.brandHeader) {
+    const boxRender = renderInputBox(
+      {
+        draft: opts.editor.text,
+        cursorPos: opts.editor.cursor,
+        placeholder: opts.placeholder,
+        focused: true,
+        busy: opts.statusView.busy,
+        maxRows: Math.max(1, layout.composer.height - 1),
+      },
+      columns,
+      uiTheme,
     )
+
+    const boxStartY = layout.dividerComposer
+    const maxRows = layout.composer.height + 1 // divider row + composer rows
+
+    for (let r = 0; r < maxRows; r++) {
+      const targetRow = boxStartY + r
+      if (targetRow >= rows - 1) break // preserve footer
+      if (r < boxRender.lines.length) {
+        screenLines[targetRow] = boxRender.lines[r]!
+      } else {
+        screenLines[targetRow] = ' '.repeat(columns)
+      }
+    }
+
+    cursorRow = boxStartY + boxRender.cursor.row
+    cursorCol = boxRender.cursor.col
   } else {
-    screenLines[layout.dividerComposer] = theme.paint(
-      'border',
-      `├${hz.repeat(Math.max(0, columns - 2))}┤`,
+    // 3. Composer Divider (rule)
+    if (layout.twoColumn && layout.dividerVertical) {
+      const divX = layout.dividerVertical.x
+      const leftHz = hz.repeat(Math.max(0, divX - 1))
+      const rightHz = hz.repeat(Math.max(0, columns - divX - 2))
+      screenLines[layout.dividerComposer] = theme.paint(
+        'border',
+        `├${leftHz}${teeUp}${rightHz}┤`,
+      )
+    } else {
+      screenLines[layout.dividerComposer] = theme.paint(
+        'border',
+        `├${hz.repeat(Math.max(0, columns - 2))}┤`,
+      )
+    }
+
+    // 4. Composer Rendering
+    const promptSymbol = '> '
+    const inputRender = renderInput(
+      opts.editor.text,
+      opts.editor.cursor,
+      columns - 2,
+      theme,
+      { prompt: promptSymbol, ...(opts.placeholder ? { placeholder: opts.placeholder } : {}) },
     )
+
+    const composerStartY = layout.composer.y
+    for (let c = 0; c < layout.composer.height; c++) {
+      const lineIdx = c
+      const composerLine = inputRender.lines[lineIdx] ?? ''
+      screenLines[composerStartY + c] = ` ${composerLine}`
+    }
+
+    // Parking cursor position
+    cursorRow = composerStartY + inputRender.cursor.row
+    cursorCol = 1 + inputRender.cursor.col
   }
-
-  // 4. Composer Rendering
-  const promptSymbol = '> '
-  const inputRender = renderInput(
-    opts.editor.text,
-    opts.editor.cursor,
-    columns - 2,
-    theme,
-    { prompt: promptSymbol, ...(opts.placeholder ? { placeholder: opts.placeholder } : {}) },
-  )
-
-  const composerStartY = layout.composer.y
-  for (let c = 0; c < layout.composer.height; c++) {
-    const lineIdx = c
-    const composerLine = inputRender.lines[lineIdx] ?? ''
-    screenLines[composerStartY + c] = ` ${composerLine}`
-  }
-
-  // Parking cursor position
-  let cursorRow = composerStartY + inputRender.cursor.row
-  let cursorCol = 1 + inputRender.cursor.col
 
   // 5. Overlays: autocomplete (topmost), approval card (pinned), details (modal)
   function drawOverlay(

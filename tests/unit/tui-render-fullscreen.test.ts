@@ -158,4 +158,80 @@ describe('renderFullScreenFrame', () => {
     expect(plain).toContain('Context: 42%')
     expect(plain).toContain('/help')
   })
+
+  it('renders docked rounded input box when brandHeader is true', () => {
+    const frame = renderFullScreenFrame({
+      header: {
+        projectName: 'pluton-harness',
+        rootDir: 'Y:/Pluton',
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'deepseek-v4.1',
+        version: '0.1.0',
+      },
+      transcriptLines: ['Ready.'],
+      editor: { text: '', cursor: 0 },
+      statusView: {
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'deepseek-v4.1',
+        busy: false,
+        run: null,
+        approvalsPending: 0,
+        usage: null,
+      },
+      columns: 129,
+      rows: 48,
+      theme: colored,
+      brandHeader: true,
+      placeholder: 'Ask Pluton to plan, implement, investigate...',
+    })
+
+    const text = frame.lines.join('\n')
+    const plain = stripAnsi(text)
+    // Docked input box must have rounded corners
+    expect(plain).toContain('╭')
+    expect(plain).toContain('╰')
+    expect(plain).toContain('Ask Pluton to plan, implement, investigate...')
+    // Cursor parked inside composer box
+    expect(frame.cursor.row).toBeGreaterThan(40)
+    expect(frame.cursor.col).toBeGreaterThanOrEqual(4)
+  })
+
+  it('renders docked rounded input box with bottom border on multi-line draft', () => {
+    const frame = renderFullScreenFrame({
+      header: {
+        projectName: 'pluton-harness',
+        rootDir: 'Y:/Pluton',
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'deepseek-v4.1',
+        version: '0.1.0',
+      },
+      transcriptLines: ['Ready.'],
+      editor: { text: 'line 1\nline 2\nline 3', cursor: 20 },
+      statusView: {
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'deepseek-v4.1',
+        busy: false,
+        run: null,
+        approvalsPending: 0,
+        usage: null,
+      },
+      columns: 129,
+      rows: 48,
+      theme: colored,
+      brandHeader: true,
+    })
+
+    const text = frame.lines.join('\n')
+    const plain = stripAnsi(text)
+    expect(plain).toContain('╭')
+    expect(plain).toContain('╰')
+    expect(plain).toContain('line 1')
+    expect(plain).toContain('line 2')
+    expect(plain).toContain('line 3')
+    expect(frame.cursor.row).toBeGreaterThan(40)
+  })
 })

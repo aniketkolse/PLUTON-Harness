@@ -118,9 +118,12 @@ export function generateDemoTranscript(width: number, theme: UITheme): string[] 
 }
 
 export async function runTuiDemo(io: ChatIo, theme: UITheme): Promise<void> {
+  let inspectorOpen = false
+
   function renderCurrentFrame(): void {
     const { columns, rows } = io.size()
-    const transcriptLines = generateDemoTranscript(columns >= 120 ? columns - 36 : columns - 4, theme)
+    const contentWidth = inspectorOpen ? columns - 36 : columns - 4
+    const transcriptLines = generateDemoTranscript(contentWidth, theme)
 
     const frame = renderFullScreenFrame({
       header: {
@@ -168,13 +171,13 @@ export async function runTuiDemo(io: ChatIo, theme: UITheme): Promise<void> {
         approvalsPending: 0,
         usage: { inputTokens: 4200, outputTokens: 850 },
       },
-      placeholder: 'Ask Pluton to plan, implement, investigate… (Press Esc or Ctrl+C to exit demo)',
+      placeholder: 'Ask Pluton to plan, implement, investigate…',
       museCount: 2,
       columns,
       rows,
       theme,
       brandHeader: true,
-      inspectorOpen: columns >= 120,
+      inspectorOpen,
       mode: 'chat',
       contextPct: 42,
       cost: 0.04,
@@ -190,6 +193,13 @@ export async function runTuiDemo(io: ChatIo, theme: UITheme): Promise<void> {
 
   return new Promise<void>((resolve) => {
     io.onKey((input, key) => {
+      // Toggle orchestra inspector on Tab
+      if (key?.name === 'tab') {
+        inspectorOpen = !inspectorOpen
+        renderCurrentFrame()
+        return
+      }
+
       // Exit on ESC, Ctrl+C, 'q', or Enter
       if (
         key?.name === 'escape' ||

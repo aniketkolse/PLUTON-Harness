@@ -190,13 +190,25 @@ function formatCodeBlock(
   const topBorder = theme.paint('border', `${tl}${title}${hz.repeat(topPad)}${tr}`)
 
   const rows: string[] = [topBorder]
+  const normalizedLang = lang.trim().toLowerCase().split(/\s+/)[0] ?? ''
+  const isDiff = normalizedLang === 'diff' || normalizedLang === 'patch'
 
   for (const line of lines) {
     // Truncate or wrap line inside code box
     const cleanLine = line.replace(/\t/g, '  ')
     const padded = cleanLine.padEnd(innerWidth).slice(0, innerWidth)
+    let contentRole: 'code' | 'success' | 'error' | 'focus' = 'code'
+    if (isDiff) {
+      if (cleanLine.startsWith('+')) {
+        contentRole = 'success'
+      } else if (cleanLine.startsWith('-')) {
+        contentRole = 'error'
+      } else if (cleanLine.startsWith('@@')) {
+        contentRole = 'focus'
+      }
+    }
     rows.push(
-      `${theme.paint('border', vt)} ${theme.paint('code', padded)} ${theme.paint('border', vt)}`,
+      `${theme.paint('border', vt)} ${theme.paint(contentRole, padded)} ${theme.paint('border', vt)}`,
     )
   }
 

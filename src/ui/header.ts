@@ -25,7 +25,6 @@ export function renderHeader(
 ): string[] {
   const isNarrow = width < 80 || rows < 24
   const hrChar = theme.box.horizontal
-  const vrChar = theme.box.vertical
 
   if (isNarrow) {
     const shipIcon = theme.unicode ? '⚓' : '[SHIP]'
@@ -44,7 +43,7 @@ export function renderHeader(
   const projectSuffix = props.projectName ? ` · ${props.projectName}` : ''
   const rightLine1 = `${theme.paint('accentLight', 'PLUTON')} ${theme.paint('textMuted', `v${props.version}${projectSuffix}`)}`
   const engineLabel = props.engine.charAt(0).toUpperCase() + props.engine.slice(1)
-  const museSuffix = props.museSlug ? ` (${props.museSlug})` : ''
+  const museSuffix = props.museSlug && props.museSlug !== 'manager' ? ` (${props.museSlug})` : ''
   const rightLine2 = `${theme.paint('textPrimary', 'Agentic Coding Harness')} ${theme.paint('textMuted', '·')} ${theme.paint('info', engineLabel)}${theme.paint('dim', museSuffix)}`
   const rightLine3 = theme.paint('link', props.rootDir)
 
@@ -53,7 +52,7 @@ export function renderHeader(
   // We have leftBanner (6 lines).
   // Vertically center the right lines in the 6 lines: start at row 1 (rows 1, 2, 3)
   const rightStart = 1
-  const sep = ` ${theme.paint('border', vrChar)} `
+  const sep = '   '
   const sepWidth = 3
 
   const lines: string[] = []

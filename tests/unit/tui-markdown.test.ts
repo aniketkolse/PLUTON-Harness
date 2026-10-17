@@ -47,4 +47,17 @@ describe('renderMarkdown', () => {
     expect(lines[0]).toContain('First point')
     expect(lines[1]).toContain('Second point')
   })
+
+  it('renders diff code blocks with colored additions and deletions', () => {
+    const md = '```diff\n- if (!claimed) {\n+ if (!!claimed) {\n```'
+    const lines = renderMarkdown(md, 60, colored)
+    const delLine = lines.find((l) => l.includes('if (!claimed)'))!
+    const addLine = lines.find((l) => l.includes('if (!!claimed)'))!
+    expect(delLine).toBeDefined()
+    expect(addLine).toBeDefined()
+    // Deletion should be styled with error/red role
+    expect(delLine).toContain(colored.paint('error', '- if (!claimed) {').slice(0, 4))
+    // Addition should be styled with success/green role
+    expect(addLine).toContain(colored.paint('success', '+ if (!!claimed) {').slice(0, 4))
+  })
 })
