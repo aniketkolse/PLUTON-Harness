@@ -260,8 +260,12 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     const resolved = this.resolveBinary()
     if (!resolved.ok) return { configured: false, hint: resolved.fix }
     const env = buildEngineEnv(configDir, {}, this.opts.platform ?? process.platform)
+    // On Windows, the OS credential store hangs when USERPROFILE is diverted from the active user account
+    if ((this.opts.platform ?? process.platform) === 'win32' && process.env['USERPROFILE']) {
+      env['USERPROFILE'] = process.env['USERPROFILE']
+    }
     const out = await this.runFn([resolved.binary.path, 'auth', 'list'], {
-      timeoutMs: 20_000,
+      timeoutMs: 5_000,
       env,
       envMode: 'explicit',
       maxOutputBytes: 128 * 1024,
