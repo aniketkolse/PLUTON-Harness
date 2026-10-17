@@ -18,7 +18,7 @@ describe('renderApprovalCard', () => {
 
     const lines = renderApprovalCard(data, 60, plain)
     expect(lines.length).toBeGreaterThanOrEqual(6)
-    expect(lines[0]).toContain('ACTION NEEDS YOUR APPROVAL')
+    expect(lines[0]).toContain('APPROVAL REQUIRED')
     expect(lines.some((l) => l.includes('worker-a'))).toBe(true)
     expect(lines.some((l) => l.includes('run shell command'))).toBe(true)
     expect(lines.some((l) => l.includes('project workspace'))).toBe(true)
@@ -34,7 +34,7 @@ describe('renderApprovalCard', () => {
       reason: 'destructive action',
     }
     const lines = renderApprovalCard(data, 60, colored)
-    expect(stripAnsi(lines[0]!)).toContain('ACTION NEEDS YOUR APPROVAL')
+    expect(stripAnsi(lines[0]!)).toContain('APPROVAL REQUIRED')
     expect(lines[0]).toContain('\x1b[') // colored box
   })
 })

@@ -22,10 +22,20 @@ export type ThemeRole =
   | 'header'
   | 'badge'
 
+export type ThemeIcon =
+  | 'check'
+  | 'cross'
+  | 'bullet'
+  | 'running'
+  | 'idle'
+  | 'arrowRight'
+  | 'arrowDown'
+  | 'ship'
+
 export interface Theme {
   enabled: boolean
   paint(role: ThemeRole, text: string): string
-  icon(name: 'check' | 'cross' | 'bullet' | 'running' | 'idle' | 'arrowRight' | 'arrowDown'): string
+  icon(name: ThemeIcon): string
 }
 
 const CODES: Record<ThemeRole, { open: string; close: string }> = {
@@ -56,6 +66,7 @@ const UNICODE_ICONS = {
   idle: '○',
   arrowRight: '▸',
   arrowDown: '▾',
+  ship: '⛵',
 }
 
 const ASCII_ICONS = {
@@ -66,6 +77,7 @@ const ASCII_ICONS = {
   idle: 'o',
   arrowRight: '>',
   arrowDown: 'v',
+  ship: '~^~',
 }
 
 export function createTheme(opts: { color?: boolean } = {}): Theme {
@@ -89,7 +101,7 @@ export function createTheme(opts: { color?: boolean } = {}): Theme {
       if (!code) return text
       return `${code.open}${text}${code.close}`
     },
-    icon(name: 'check' | 'cross' | 'bullet' | 'running' | 'idle' | 'arrowRight' | 'arrowDown'): string {
+    icon(name: ThemeIcon): string {
       return enabled ? UNICODE_ICONS[name] : ASCII_ICONS[name]
     },
   }

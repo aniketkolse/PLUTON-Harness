@@ -7,6 +7,11 @@ import type { Theme } from './theme.ts'
 import { displayWidth, truncateToWidth, wrapText } from './width.ts'
 import { computeLayout } from './layout.ts'
 import { renderOrchestraInspector, type OrchestraInspectorData } from './orchestra.ts'
+import {
+  renderApprovalCard,
+  renderApprovalDetails,
+  type ApprovalViewData,
+} from './approval.ts'
 
 export interface StatusView {
   museSlug: string
@@ -57,12 +62,21 @@ export function renderInput(
   cursor: number,
   width: number,
   theme: Theme,
-  opts: { prompt: string },
+  opts: { prompt: string; placeholder?: string },
 ): InputRender {
   const prompt = opts.prompt
   const promptWidth = displayWidth(prompt)
   const indent = ' '.repeat(promptWidth)
   const maxContentWidth = Math.max(1, width - promptWidth)
+
+  // Empty draft: show the placeholder as a dim ghost, cursor parked after the prompt.
+  if (text.length === 0 && opts.placeholder) {
+    const ghost = prompt + theme.paint('dim', opts.placeholder)
+    return {
+      lines: [truncateToWidth(ghost, width)],
+      cursor: { row: 0, col: promptWidth },
+    }
+  }
 
   // Clamp cursor
   const clampedCursor = Math.max(0, Math.min(cursor, text.length))
@@ -132,19 +146,14 @@ export function renderHeader(
   },
   theme: Theme,
 ): string {
-  const title = `Pluton Chat — ${info.projectName}`
-  const loc = `(${info.rootDir})`
-  const muse = `Muse: ${info.museSlug} [${info.engine} / ${info.model}] (mode: ${info.mode})`
+  const ship = theme.icon('ship')
   const sessStatus = info.resumed ? 'resumed' : 'new'
-  const session = `Session: ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`
-  const help = `Type /help for slash commands, or Ctrl+C to exit.`
-
-  return [
-    theme.paint('accent', title) + ' ' + theme.paint('dim', loc),
-    theme.paint('dim', muse),
-    theme.paint('dim', session),
-    theme.paint('dim', help),
-  ].join('\n')
+  const left = `${theme.paint('header', `${ship} Pluton`)} ${theme.paint('dim', '·')} ${theme.paint('accent', info.projectName)}`
+  const right = theme.paint(
+    'dim',
+    `${info.museSlug} · ${info.engine}/${info.model} · session ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`,
+  )
+  return `${left} ${theme.paint('dim', '·')} ${right}`
 }
 
 export function renderToolLine(
@@ -188,6 +197,14 @@ export interface FullScreenFrameOptions {
   }
   statusView: StatusView
   autocomplete?: Array<{ syntax: string; description: string }> | null
+  /** Canonical pinned approval card (real backend record only). */
+  approvalCard?: ApprovalViewData | null
+  /** Read-only approval details overlay; never actionable. */
+  approvalDetails?: ApprovalViewData | null
+  /** Composer placeholder shown when the draft is empty. */
+  placeholder?: string
+  /** Enabled Muse count for the footer (omit when unknown). */
+  museCount?: number
   scrollOffset?: number
   columns: number
   rows: number
@@ -222,11 +239,21 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   const { columns, rows, theme } = opts
   const draftLines = opts.editor.text.split('\n').length
   const autocompleteCount = opts.autocomplete?.length ?? 0
+
+  // The canonical approval card is rendered before layout so its true height can
+  // be reserved; it is pinned above the composer, out of the transcript flow.
+  const approvalLines = opts.approvalCard
+    ? renderApprovalCard(opts.approvalCard, Math.min(columns - 4, 64), theme)
+    : []
+  const detailsHeight = opts.approvalDetails ? 16 : 0
+
   const layout = computeLayout(columns, rows, {
     inspectorOpen: opts.inspectorOpen,
     draftLineCount: draftLines,
     autocompleteOpen: autocompleteCount > 0,
     autocompleteCount,
+    approvalCardHeight: approvalLines.length,
+    detailsHeight,
   })
 
   if (layout.tooSmall) {
@@ -254,37 +281,33 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   const teeUp = theme.enabled ? '┴' : '+'
   const teeCross = theme.enabled ? '┼' : '+'
 
-  // 1. Header Line 0
-  const title = ` PLUTON ─ ${opts.header.projectName} ─ ${shortenPath(opts.header.rootDir)} `
-  const topPad = Math.max(0, columns - 3 - displayWidth(title))
-  screenLines[0] = theme.paint('header', `${tl}${title}${hz.repeat(topPad)}${tr}`)
-
-  // Header Line 1
-  if (layout.header.height > 1) {
-    const runLabel = opts.header.runState ?? (opts.statusView.busy ? 'running' : 'ready')
-    const leftText = ` Muse: ${opts.header.museSlug} · Engine: ${opts.header.engine} · Model: ${opts.header.model} · Run: ${runLabel}`
-    const leftW = displayWidth(leftText)
-    const rightText = opts.statusView.usage
-      ? `${opts.statusView.usage.inputTokens} in / ${opts.statusView.usage.outputTokens} out `
-      : ' '
-    const rightW = displayWidth(rightText)
-    const midPad = Math.max(1, columns - 2 - leftW - rightW)
-    screenLines[1] = `${theme.paint('border', vt)}${theme.paint('accent', leftText)}${' '.repeat(midPad)}${theme.paint('dim', rightText)}${theme.paint('border', vt)}`
+  // 1. Header: one compact brand row — ship mark, wordmark, project — with the
+  // muse/engine on the right. The rule below it is the header divider.
+  const ship = theme.icon('ship')
+  const leftHeader =
+    ` ${theme.paint('focus', ship)} ${theme.paint('header', 'PLUTON')}  ${theme.paint('accent', opts.header.projectName)}`
+  const rightHeader = `${opts.header.museSlug} · ${opts.header.engine} `
+  const headerLeftW = displayWidth(leftHeader)
+  const headerRightW = displayWidth(rightHeader)
+  if (headerLeftW + headerRightW + 2 <= columns) {
+    screenLines[0] = `${leftHeader}${' '.repeat(columns - headerLeftW - headerRightW)}${theme.paint('dim', rightHeader)}`
+  } else {
+    screenLines[0] = truncateToWidth(leftHeader, columns)
   }
 
-  // Header Divider
+  // Header Divider (rule)
   if (layout.twoColumn && layout.dividerVertical) {
     const divX = layout.dividerVertical.x
     const leftHz = hz.repeat(Math.max(0, divX - 1))
-    const rightHz = hz.repeat(Math.max(0, columns - divX - 2))
+    const rightHz = hz.repeat(Math.max(0, columns - divX - 1))
     screenLines[layout.dividerHeader] = theme.paint(
       'border',
-      `├${leftHz}${teeDown}${rightHz}┤`,
+      `${hz}${leftHz}${teeDown}${rightHz}`,
     )
   } else {
     screenLines[layout.dividerHeader] = theme.paint(
       'border',
-      `├${hz.repeat(Math.max(0, columns - 2))}┤`,
+      hz.repeat(columns),
     )
   }
 
@@ -355,7 +378,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
     opts.editor.cursor,
     columns - 2,
     theme,
-    { prompt: promptSymbol },
+    { prompt: promptSymbol, ...(opts.placeholder ? { placeholder: opts.placeholder } : {}) },
   )
 
   const composerStartY = layout.composer.y
@@ -369,24 +392,45 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   let cursorRow = composerStartY + inputRender.cursor.row
   let cursorCol = 1 + inputRender.cursor.col
 
-  // 5. Autocomplete Overlay (if open)
-  if (layout.autocomplete && opts.autocomplete && opts.autocomplete.length > 0) {
-    const auto = opts.autocomplete.slice(0, layout.autocomplete.height)
-    for (let a = 0; a < auto.length; a++) {
-      const item = auto[a]!
-      const itemRow = layout.autocomplete.y + a
-      const itemText = `  ${theme.paint('focus', item.syntax.padEnd(16))} ${theme.paint('dim', item.description)}`
-      screenLines[itemRow] = truncateToWidth(itemText, layout.autocomplete.width)
+  // 5. Overlays: autocomplete (topmost), approval card (pinned), details (modal)
+  function drawOverlay(
+    rect: { x: number; y: number; width: number; height: number },
+    lines: string[],
+  ): void {
+    for (let i = 0; i < lines.length && i < rect.height; i++) {
+      const row = rect.y + i
+      if (row < 0 || row >= rows) continue
+      const line = truncateToWidth(lines[i] ?? '', rect.width)
+      screenLines[row] = ` ${line}`
     }
   }
 
-  // 6. Footer Line
+  if (layout.autocomplete && opts.autocomplete && opts.autocomplete.length > 0) {
+    const auto = opts.autocomplete.slice(0, layout.autocomplete.height)
+    const autoLines: string[] = []
+    for (const item of auto) {
+      autoLines.push(
+        `  ${theme.paint('focus', item.syntax.padEnd(16))} ${theme.paint('dim', item.description)}`,
+      )
+    }
+    drawOverlay(layout.autocomplete, autoLines)
+  }
+
+  if (layout.approval && approvalLines.length > 0) {
+    drawOverlay(layout.approval, approvalLines)
+  }
+
+  if (layout.details && opts.approvalDetails) {
+    drawOverlay(
+      layout.details,
+      renderApprovalDetails(opts.approvalDetails, layout.details.width, layout.details.height, theme),
+    )
+  }
+
+  // 6. Footer Line: status + contextual hints on the left, real telemetry on the right.
   let statusBadge: string
   if (opts.statusView.approvalsPending > 0) {
-    statusBadge = theme.paint(
-      'approval',
-      `APPROVAL REQUIRED (${opts.statusView.approvalsPending})`,
-    )
+    statusBadge = theme.paint('approval', `APPROVAL REQUIRED (${opts.statusView.approvalsPending})`)
   } else if (opts.statusView.busy) {
     statusBadge = theme.paint('warn', 'RUNNING')
   } else {
@@ -395,11 +439,34 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
 
   const hints =
     opts.statusView.approvalsPending > 0
-      ? 'A approve once · D deny · V details · Esc stop'
-      : 'Enter send · Shift+Enter newline · / commands · Ctrl+P palette · Tab inspector · Esc stop'
+      ? 'A approve once · D deny · V details'
+      : opts.statusView.busy
+        ? 'Esc interrupt · Ctrl+J newline'
+        : 'Enter send · / commands · Ctrl+P palette · ? help'
 
-  const footerText = `${statusBadge} · ${theme.paint('dim', hints)}`
-  screenLines[layout.footer.y] = truncateToWidth(footerText, columns)
+  const runPart = opts.statusView.run
+    ? ` ${theme.paint('dim', '·')} ${theme.paint('accent', `run ${opts.statusView.run.id} (${opts.statusView.run.state})`)}`
+    : ''
+
+  const rightParts: string[] = [opts.statusView.model]
+  if (opts.museCount !== undefined) {
+    rightParts.push(`${String(opts.museCount)} muse${opts.museCount === 1 ? '' : 's'}`)
+  }
+  if (opts.statusView.usage) {
+    rightParts.push(
+      `${String(opts.statusView.usage.inputTokens)}↑ ${String(opts.statusView.usage.outputTokens)}↓`,
+    )
+  }
+  const rightFooter = `${rightParts.join(' · ')} `
+
+  const leftPlain = statusBadge.length > 0 ? `${statusBadge} ${theme.paint('dim', '·')} ${theme.paint('dim', hints)}${runPart}` : ''
+  const footerLeftW = displayWidth(leftPlain)
+  const footerRightW = displayWidth(rightFooter)
+  if (footerLeftW + footerRightW + 2 <= columns) {
+    screenLines[layout.footer.y] = `${leftPlain}${' '.repeat(columns - footerLeftW - footerRightW)}${theme.paint('dim', rightFooter)}`
+  } else {
+    screenLines[layout.footer.y] = truncateToWidth(leftPlain, columns)
+  }
 
   // Ensure every screen line is strictly bounded by columns width
   for (let r = 0; r < rows; r++) {

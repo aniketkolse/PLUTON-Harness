@@ -124,8 +124,16 @@ export function renderToolActivity(
     statusBadge = theme.paint('warn', `RUNNING (${elapsedSec}s)`)
   }
 
+  const hasDistinctSummary =
+    Boolean(act.summary) &&
+    act.summary.trim() !== '' &&
+    act.summary.trim().toLowerCase() !== act.name.trim().toLowerCase() &&
+    act.summary.trim().toLowerCase() !== 'tool'
+
   const expandIcon = expanded ? theme.icon('arrowDown') : icon
-  const headerLeft = `${expandIcon} ${theme.paint('tool', act.name)} — ${act.summary}`
+  const headerLeft = hasDistinctSummary
+    ? `${expandIcon} ${theme.paint('tool', act.name)} — ${act.summary}`
+    : `${expandIcon} ${theme.paint('tool', act.name)}`
   const badgeWidth = displayWidth(statusBadge)
   const availForLeft = Math.max(10, maxWidth - badgeWidth - 2)
   const leftTruncated = truncateToWidth(headerLeft, availForLeft)
@@ -145,9 +153,18 @@ export function renderToolActivity(
     }
 
     if (act.output) {
-      const sanitized = sanitizeToolOutput(act.output)
+      let outputText = act.output
+      try {
+        const parsed = JSON.parse(act.output)
+        if (typeof parsed === 'object' && parsed !== null) {
+          outputText = JSON.stringify(parsed, null, 2)
+        }
+      } catch {
+        // plain text
+      }
+      const sanitized = sanitizeToolOutput(outputText)
       const outputLines = sanitized.split('\n')
-      const maxDisplay = 10
+      const maxDisplay = 15
       const displayLines = outputLines.slice(0, maxDisplay)
       for (const ol of displayLines) {
         const wrapped = wrapText(ol, Math.max(10, maxWidth - 4))

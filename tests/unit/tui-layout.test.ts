@@ -16,7 +16,7 @@ describe('computeLayout', () => {
     expect(layout.inspector).not.toBeNull()
     expect(layout.inspector!.width).toBeGreaterThanOrEqual(30)
     expect(layout.chat.width + layout.inspector!.width + 1).toBe(140)
-    expect(layout.header.height).toBe(2)
+    expect(layout.header.height).toBe(1)
     expect(layout.footer.height).toBe(1)
   })
 

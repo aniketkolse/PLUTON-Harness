@@ -33,6 +33,7 @@ export class TerminalHost implements ChatIo {
   private pendingFrame: { lines: string[]; cursor: { row: number; col: number } } | null = null
   private throttleTimer: NodeJS.Timeout | null = null
   private started = false
+  private cleanupListener: (() => void) | null = null
 
   private readonly keyHandlers: Array<(input: string, key: Key) => void> = []
   private readonly resizeHandlers: Array<() => void> = []
@@ -63,6 +64,10 @@ export class TerminalHost implements ChatIo {
   }
 
   commit(text: string): void {
+    if (this.alternateScreen) {
+      // In alternate screen mode, text is incorporated into full-screen frames
+      return
+    }
     if (this.liveRows > 0) {
       throw new InternalError('cannot commit to scrollback with active live region (must clear first)')
     }
@@ -95,6 +100,21 @@ export class TerminalHost implements ChatIo {
   }
 
   private renderFrame(frame: { lines: string[]; cursor: { row: number; col: number } }): void {
+    if (this.alternateScreen) {
+      if (frame.lines.length === 0) {
+        this.liveRows = 0
+        this.stdout.write('\x1b[H\x1b[2J')
+        return
+      }
+      const targetRow = Math.max(1, frame.cursor.row + 1)
+      const targetCol = Math.max(1, frame.cursor.col + 1)
+      const content = frame.lines.join('\r\n')
+      const buf = `\x1b[?25l\x1b[H${content}\x1b[J\x1b[${targetRow};${targetCol}H\x1b[?25h`
+      this.stdout.write(buf)
+      this.liveRows = frame.lines.length
+      return
+    }
+
     let buf = ''
     if (this.liveRows > 0) {
       if (this.parkedRow > 0) {
@@ -146,6 +166,13 @@ export class TerminalHost implements ChatIo {
     let enterSeq = '\x1b[?2004h'
     if (this.alternateScreen) {
       enterSeq += '\x1b[?1049h\x1b[2J\x1b[H'
+      this.cleanupListener = () => {
+        this.stop()
+      }
+      process.once('exit', this.cleanupListener)
+      process.once('SIGINT', this.cleanupListener)
+      process.once('SIGTERM', this.cleanupListener)
+      process.once('uncaughtException', this.cleanupListener)
     }
     this.stdout.write(enterSeq)
 
@@ -177,6 +204,14 @@ export class TerminalHost implements ChatIo {
     if (!this.started) return
     this.started = false
 
+    if (this.cleanupListener) {
+      process.removeListener('exit', this.cleanupListener)
+      process.removeListener('SIGINT', this.cleanupListener)
+      process.removeListener('SIGTERM', this.cleanupListener)
+      process.removeListener('uncaughtException', this.cleanupListener)
+      this.cleanupListener = null
+    }
+
     if (this.throttleTimer !== null) {
       clearTimeout(this.throttleTimer)
       this.throttleTimer = null
@@ -193,6 +228,15 @@ export class TerminalHost implements ChatIo {
       exitSeq += '\x1b[?1049l'
     }
     this.stdout.write(exitSeq)
+
+    if ((this.stdin as any)?.isTTY && typeof (this.stdin as any).setRawMode === 'function') {
+      try {
+        ;(this.stdin as any).setRawMode(false)
+        this.stdin.pause()
+      } catch {
+        // best-effort
+      }
+    }
 
     if ((this.stdin as any)?.isTTY && typeof (this.stdin as any).setRawMode === 'function') {
       try {

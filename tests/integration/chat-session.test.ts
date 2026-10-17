@@ -8,6 +8,7 @@ import { Store } from '../../src/store/store.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
 import { ScriptedIo } from '../helpers/scripted-io.ts'
 import { ChatSession } from '../../src/chat/session.ts'
+import { stripAnsi } from '../../src/tui/width.ts'
 import { PERMISSIONS } from '../../src/domain/permissions.ts'
 import type { MuseRecord } from '../../src/domain/models.ts'
 
@@ -84,8 +85,9 @@ describe('ChatSession interactive loop', () => {
     })
 
     await session.start()
-    expect(io.commits.length).toBeGreaterThan(0) // Header committed
-    expect(io.commits[0]).toContain('Pluton Chat')
+    expect(io.commits.length).toBeGreaterThan(0) // Compact header committed
+    expect(io.commits[0]).toContain('Pluton')
+    expect(io.commits[0]).toContain(chatSessionRow.id)
 
     const runPromise = session.run()
 
@@ -95,8 +97,12 @@ describe('ChatSession interactive loop', () => {
     // Allow async turn to process
     await new Promise((r) => setTimeout(r, 20))
 
-    // Check commits: header, user input (> Hello muse), assistant response (Hello operator!)
-    expect(io.commits.some((c) => c.includes('> Hello muse'))).toBe(true)
+    // Check commits: header, user block (You label + text), assistant response (Hello operator!)
+    expect(io.commits.some((c) => c.includes('Hello muse'))).toBe(true)
+    // Turn labels are frame content (full-screen transcript), not stream commits.
+    const frameText = io.frames.map((f) => stripAnsi(f.lines.join('\n'))).join('\n')
+    expect(frameText).toContain('\nYou')
+    expect(frameText).toContain('PLUTON')
     expect(io.commits.some((c) => c.includes('Hello operator!'))).toBe(true)
 
     // Check persisted messages
@@ -325,7 +331,10 @@ describe('ChatSession interactive loop', () => {
     await new Promise((r) => setTimeout(r, 120))
     expect(pollCount).toBeGreaterThan(0)
     expect(io.commits.some((c) => c.includes('Notice from poll'))).toBe(true)
-    expect(io.commits.some((c) => c.includes('Task 1 settled'))).toBe(true)
+    // Run transitions emit exactly one compact system line.
+    expect(io.commits.some((c) => c.includes('run_active'))).toBe(true)
+    // Raw lifecycle events feed the Orchestra inspector, never the transcript.
+    expect(io.commits.some((c) => c.includes('Task 1 settled'))).toBe(false)
 
     io.press('d', { ctrl: true })
     await runPromise

@@ -47,16 +47,87 @@ function modelOptionValue(configOptions: unknown): string | null {
 }
 
 /**
- * Name for a tool event: explicit `name`, then the human `title` (opencode's
- * update frames carry title but not name), then the `kind` category. Start and
- * end events for one tool therefore carry the same name.
+ * Name for a tool event: explicit `_meta.toolName`, then `name`, then the human `title`
+ * (opencode's update frames carry title but not name), then the `kind` category.
  */
 function toolEventName(u: Record<string, unknown>): string {
-  for (const key of ['name', 'title', 'kind'] as const) {
+  for (const key of ['name', 'title'] as const) {
     const value = u[key]
     if (typeof value === 'string' && value !== '') return value
   }
+  const meta = asRecord(u['_meta'])
+  if (typeof meta?.['toolName'] === 'string' && meta['toolName'] !== '') {
+    return meta['toolName']
+  }
+  if (typeof u['kind'] === 'string' && u['kind'] !== '') {
+    return u['kind']
+  }
   return 'tool'
+}
+
+function toolCallId(u: Record<string, unknown>): string | undefined {
+  if (typeof u['toolCallId'] === 'string' && u['toolCallId'] !== '') return u['toolCallId']
+  if (typeof u['id'] === 'string' && u['id'] !== '') return u['id']
+  return undefined
+}
+
+function toolSummary(u: Record<string, unknown>, toolName: string): string | undefined {
+  const title = typeof u['title'] === 'string' ? u['title'] : undefined
+  const clean = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '')
+
+  // If there's a specific path or target in rawInput/locations, prefer that over a generic title
+  const rawInput = asRecord(u['rawInput'] ?? u['input'])
+  if (rawInput) {
+    if (typeof rawInput['file_path'] === 'string' && rawInput['file_path'] !== '') {
+      return rawInput['file_path']
+    }
+    if (typeof rawInput['path'] === 'string' && rawInput['path'] !== '') {
+      return rawInput['path']
+    }
+    if (typeof rawInput['command'] === 'string' && rawInput['command'] !== '') {
+      return rawInput['command']
+    }
+    if (typeof rawInput['query'] === 'string' && rawInput['query'] !== '') {
+      return rawInput['query']
+    }
+    if (typeof rawInput['goal'] === 'string' && rawInput['goal'] !== '') {
+      return rawInput['goal']
+    }
+    if (typeof rawInput['runId'] === 'string' && rawInput['runId'] !== '') {
+      return rawInput['runId']
+    }
+  }
+
+  // Check locations
+  if (Array.isArray(u['locations']) && u['locations'].length > 0) {
+    const loc = asRecord(u['locations'][0])
+    if (typeof loc?.['path'] === 'string' && loc['path'] !== '') {
+      return loc['path']
+    }
+  }
+
+  return title
+}
+
+function toolOutputText(u: Record<string, unknown>): string | undefined {
+  if (typeof u['output'] === 'string' && u['output'] !== '') return u['output']
+  if (Array.isArray(u['content'])) {
+    const parts: string[] = []
+    for (const item of u['content']) {
+      const rec = asRecord(item)
+      if (!rec) continue
+      if (typeof rec['text'] === 'string') {
+        parts.push(rec['text'])
+      } else if (rec['type'] === 'content') {
+        const inner = asRecord(rec['content'])
+        if (typeof inner?.['text'] === 'string') {
+          parts.push(inner['text'])
+        }
+      }
+    }
+    if (parts.length > 0) return parts.join('\n')
+  }
+  return undefined
 }
 
 export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = {}): NormalizedUpdate {
@@ -72,20 +143,53 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
     }
     case 'tool_call': {
       const name = toolEventName(u)
-      const summary = typeof u['title'] === 'string' ? u['title'] : undefined
-      const events: EngineEvent[] = [{ kind: 'tool', name, phase: 'start', summary }]
+      const callId = toolCallId(u)
+      const summary = toolSummary(u, name)
+      const input = u['rawInput'] ?? u['input']
+      const events: EngineEvent[] = [
+        {
+          kind: 'tool',
+          name,
+          phase: 'start',
+          ...(callId ? { callId } : {}),
+          ...(summary ? { summary } : {}),
+          ...(input !== undefined ? { input } : {}),
+        },
+      ]
       // Some agents report the call already finished in the creation frame.
       if (u['status'] === 'completed' || u['status'] === 'failed') {
-        events.push({ kind: 'tool', name, phase: 'end', summary, isError: u['status'] === 'failed' })
+        const output = toolOutputText(u)
+        events.push({
+          kind: 'tool',
+          name,
+          phase: 'end',
+          ...(callId ? { callId } : {}),
+          ...(summary ? { summary } : {}),
+          ...(output ? { output } : {}),
+          isError: u['status'] === 'failed',
+        })
       }
       return { events, kind, ignored: false }
     }
     case 'tool_call_update': {
       const status = u['status']
       if (status !== 'completed' && status !== 'failed') return { events: [], kind, ignored: true }
-      const summary = typeof u['title'] === 'string' ? u['title'] : undefined
+      const name = toolEventName(u)
+      const callId = toolCallId(u)
+      const summary = toolSummary(u, name)
+      const output = toolOutputText(u)
       return {
-        events: [{ kind: 'tool', name: toolEventName(u), phase: 'end', summary, isError: status === 'failed' }],
+        events: [
+          {
+            kind: 'tool',
+            name,
+            phase: 'end',
+            ...(callId ? { callId } : {}),
+            ...(summary ? { summary } : {}),
+            ...(output ? { output } : {}),
+            isError: status === 'failed',
+          },
+        ],
         kind,
         ignored: false,
       }

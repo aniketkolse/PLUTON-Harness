@@ -15,6 +15,10 @@ export interface LayoutOptions {
   draftLineCount?: number
   autocompleteOpen?: boolean
   autocompleteCount?: number
+  /** Rows needed by the pinned approval card (0 = closed). */
+  approvalCardHeight?: number
+  /** Rows needed by the read-only approval details overlay (0 = closed). */
+  detailsHeight?: number
 }
 
 export interface ComputedLayout {
@@ -31,6 +35,8 @@ export interface ComputedLayout {
   dividerComposer: number // y row of divider line
   composer: Rect
   autocomplete: Rect | null
+  approval: Rect | null
+  details: Rect | null
   footer: Rect
 }
 
@@ -60,13 +66,15 @@ export function computeLayout(
       dividerComposer: 0,
       composer: { x: 0, y: 0, width: columns, height: 0 },
       autocomplete: null,
+      approval: null,
+      details: null,
       footer: { x: 0, y: 0, width: columns, height: 0 },
     }
   }
 
-  const compactHeight = rows < 24
   const wideWidth = columns >= WIDE_TERMINAL_COLUMNS
   const tallHeight = rows >= TALL_TERMINAL_ROWS
+  const compactHeight = rows < 24
 
   // Inspector is enabled by default on wide + tall terminals, or if explicitly requested and width >= 80
   const inspectorOpen =
@@ -76,8 +84,8 @@ export function computeLayout(
 
   const twoColumn = inspectorOpen && columns >= 80
 
-  // Header height: 2 rows if not compact, 1 row if compact
-  const headerHeight = compactHeight ? 1 : 2
+  // Header: one title row plus the divider rule below it (compact, no box).
+  const headerHeight = 1
   const headerRect: Rect = { x: 0, y: 0, width: columns, height: headerHeight }
   const dividerHeaderY = headerHeight // row index of divider line
 
@@ -123,12 +131,23 @@ export function computeLayout(
     height: composerHeight,
   }
 
+  // Approval card overlay: pinned just above the composer divider (canonical position,
+  // independent of transcript scrolling). Autocomplete stacks above it when both exist.
+  let approvalRect: Rect | null = null
+  if ((opts.approvalCardHeight ?? 0) > 0) {
+    const cardH = Math.min(opts.approvalCardHeight!, Math.max(1, mainHeight))
+    const cardY = Math.max(mainY, dividerComposerY - cardH)
+    const cardWidth = Math.min(columns - 4, 64)
+    approvalRect = { x: 2, y: cardY, width: cardWidth, height: cardH }
+  }
+
   // Autocomplete overlay
   let autocompleteRect: Rect | null = null
   if (opts.autocompleteOpen && (opts.autocompleteCount ?? 0) > 0) {
     const count = Math.min(opts.autocompleteCount ?? 0, 6)
     const autoH = count
-    const autoY = Math.max(mainY, dividerComposerY - autoH)
+    const ceiling = approvalRect ? approvalRect.y : dividerComposerY
+    const autoY = Math.max(mainY, ceiling - autoH)
     const autoWidth = Math.min(columns - 4, 60)
     autocompleteRect = {
       x: 2,
@@ -136,6 +155,15 @@ export function computeLayout(
       width: autoWidth,
       height: autoH,
     }
+  }
+
+  // Approval details overlay (read-only view): centred block over the main area.
+  let detailsRect: Rect | null = null
+  if ((opts.detailsHeight ?? 0) > 0) {
+    const detH = Math.min(opts.detailsHeight!, Math.max(1, mainHeight - 1))
+    const detY = mainY + Math.max(0, Math.floor((mainHeight - detH) / 2))
+    const detWidth = Math.min(columns - 4, 84)
+    detailsRect = { x: 2, y: detY, width: detWidth, height: detH }
   }
 
   return {
@@ -152,6 +180,8 @@ export function computeLayout(
     dividerComposer: dividerComposerY,
     composer: composerRect,
     autocomplete: autocompleteRect,
+    approval: approvalRect,
+    details: detailsRect,
     footer: footerRect,
   }
 }

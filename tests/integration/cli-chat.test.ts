@@ -9,6 +9,7 @@ import { loadConfig } from '../../src/config/load.ts'
 import { NotFoundError, ValidationError } from '../../src/domain/errors.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
 import { ScriptedIo } from '../helpers/scripted-io.ts'
+import { stripAnsi } from '../../src/tui/width.ts'
 import { FakeSandbox } from '../helpers/fake-sandbox.ts'
 import { fakeSpawn } from '../helpers/fake-acp-agent.ts'
 import type { WorkerImageProbe } from '../../src/sandbox/image.ts'
@@ -280,8 +281,12 @@ describe('pluton chat CLI command', () => {
     io.send('Hello from test')
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(io.commits.some((c) => c.includes('> Hello from test'))).toBe(true)
+    expect(io.commits.some((c) => c.includes('Hello from test'))).toBe(true)
     expect(io.commits.some((c) => c.includes('Operator proxy ready.'))).toBe(true)
+    // The You/PLUTON turn labels are rendered in frames, not committed as stream text.
+    const frameText = io.frames.map((f) => stripAnsi(f.lines.join('\n'))).join('\n')
+    expect(frameText).toContain('\nYou')
+    expect(frameText).toContain('PLUTON')
 
     io.send('/exit')
     const { exitCode } = await runPromise

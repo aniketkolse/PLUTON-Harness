@@ -26,7 +26,7 @@ muses:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [task.create, task.delegate, task.inspect, result.collect, approval.request]
+    permissions: [task.create, task.delegate, task.inspect, result.collect, approval.request, project.status, run.list, run.inspect, run.start, approvals.list]
 
   researcher:
     display_name: Researcher

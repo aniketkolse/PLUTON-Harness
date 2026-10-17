@@ -35,6 +35,23 @@ export const COMMAND_REGISTRY: SlashCommandDef[] = [
     argHint: '<goal>',
   },
   {
+    name: 'cancel',
+    syntax: '/cancel [run-id]',
+    description: 'Cancel an active background run',
+    argHint: '[run-id]',
+  },
+  {
+    name: 'models',
+    syntax: '/models',
+    description: 'List available models supported by the engine',
+  },
+  {
+    name: 'model',
+    syntax: '/model [model-id]',
+    description: 'Show current model or switch Muse model',
+    argHint: '[model-id]',
+  },
+  {
     name: 'approvals',
     syntax: '/approvals',
     description: 'List pending operator approval requests',
@@ -91,6 +108,9 @@ export interface SlashContext {
   startRun(goal: string): Promise<string>
   newSession(): Promise<string>
   help(): string
+  models?(): Promise<string>
+  model?(name?: string): Promise<string>
+  cancel?(runId?: string): Promise<string>
 }
 
 export function defaultSlashHelp(): string {
@@ -199,6 +219,24 @@ export async function executeSlash(
         return { output: 'usage: /run <goal>' }
       }
       return { output: await ctx.startRun(parsed.args) }
+
+    case 'cancel':
+      if (!ctx.cancel) {
+        return { output: 'Run cancellation is not supported in this session' }
+      }
+      return { output: await ctx.cancel(parsed.args) }
+
+    case 'models':
+      if (!ctx.models) {
+        return { output: 'Model listing is not supported in this session' }
+      }
+      return { output: await ctx.models() }
+
+    case 'model':
+      if (!ctx.model) {
+        return { output: 'Model switching is not supported in this session' }
+      }
+      return { output: await ctx.model(parsed.args) }
 
     case 'approvals':
       return { output: await ctx.approvalsList() }

@@ -271,7 +271,6 @@ export async function chatRun(
     }
 
     let eventCursor = store.latestEventSeq(projectId)
-    const seenApprovalIds = new Set<string>()
 
     const defaultPoll = async () => {
       const newEvents = store.eventsSince(projectId, eventCursor, 50)
@@ -301,21 +300,25 @@ export async function chatRun(
       const run = runs.length > 0 && runs[0]!.projectId === projectId ? { id: runs[0]!.id, state: runs[0]!.state } : null
 
       const pendingApprovals = store.listApprovalsByProject(projectId, { status: 'pending', limit: 100 })
-      const approvalsPending = pendingApprovals.length
-
-      const notices: string[] = []
-      for (const a of pendingApprovals) {
-        if (!seenApprovalIds.has(a.id)) {
-          seenApprovalIds.add(a.id)
-          notices.push(`approval pending: ${a.id} (${a.action})`)
-        }
-      }
+      // Full records drive the canonical approval card; no raw text notices.
+      const approvals = pendingApprovals.map((a) => ({
+        id: a.id,
+        action: a.action,
+        reason: a.reason,
+        ...(a.requestedByMuseId ? { requestedByMuse: a.requestedByMuseId } : {}),
+        scope: a.scope,
+        status: a.status,
+        runId: a.runId,
+        taskId: a.taskId,
+        expiresAt: a.expiresAt,
+      }))
 
       return {
         events: eventLines,
         run,
-        approvalsPending,
-        notices,
+        approvalsPending: pendingApprovals.length,
+        approvals,
+        notices: [] as string[],
       }
     }
 
@@ -378,6 +381,90 @@ export async function chatRun(
         const res = await runStarter({ goal, acceptance: [], requestId: reqId })
         return `started run ${res.runId}`
       },
+      cancel: async (runId?: string) => {
+        const targetId = (runId ?? '').trim() || activeRunId
+        if (!targetId) {
+          return 'No active run to cancel. Specify a run ID with /cancel <runId>.'
+        }
+        const run = store.getRun(targetId)
+        if (!run) {
+          return `Run '${targetId}' not found.`
+        }
+        if (['completed', 'failed', 'cancelled'].includes(run.state)) {
+          return `Run '${targetId}' is already ${run.state}.`
+        }
+        store.setRunState(targetId, 'cancelled')
+        store.appendEvent({
+          projectId,
+          runId: targetId,
+          type: 'run.cancelled',
+          payload: { reason: 'operator cancelled via /cancel' },
+        })
+        if (activeRunId === targetId) {
+          activeRunId = null
+        }
+        return `Cancelled run ${targetId}.`
+      },
+      models: async () => {
+        const caps = adapter.capabilities()
+        if (!caps.modelList) {
+          return `Engine '${muse.engineKind}' does not support dynamic model listing. Current model: ${muse.model}`
+        }
+        try {
+          const list = await adapter.listModels()
+          if (list.length === 0) {
+            return `No models reported by engine '${muse.engineKind}'. Current model: ${muse.model}`
+          }
+          const lines = [`Available models for engine '${muse.engineKind}':`]
+          for (const m of list) {
+            const isCurrent = m.id === muse.model ? ' (current)' : ''
+            const name = m.label && m.label !== m.id ? ` — ${m.label}` : ''
+            lines.push(`  • ${m.id}${name}${isCurrent}`)
+          }
+          return lines.join('\n')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Failed to list models: ${msg}`
+        }
+      },
+      model: async (targetModel?: string) => {
+        const trimmed = (targetModel ?? '').trim()
+        if (!trimmed) {
+          const currentRun = activeRunId ? store.getRun(activeRunId) : null
+          const activeRunInfo = currentRun
+            ? `\nActive run (${currentRun.id}) model: ${
+                currentRun.managerMuseId ? store.getMuse(currentRun.managerMuseId)?.model ?? 'unknown' : 'none'
+              }`
+            : ''
+          return `Current model for ${muse.slug}: ${muse.model}${activeRunInfo}`
+        }
+
+        const caps = adapter.capabilities()
+        if (caps.modelList) {
+          try {
+            const list = await adapter.listModels()
+            const match = list.find((m) => m.id === trimmed || m.label === trimmed)
+            if (!match && list.length > 0) {
+              const available = list.map((m) => m.id).join(', ')
+              return `Model '${trimmed}' is not supported by engine '${muse.engineKind}'. Available models: ${available}`
+            }
+          } catch {
+            // If listing fails at runtime, proceed with requested model
+          }
+        }
+
+        try {
+          store.updateMuseModel(muse.id, trimmed)
+          muse.model = trimmed
+          if (sessionInstance) {
+            await sessionInstance.switchModel(trimmed)
+          }
+          return `Switched model for ${muse.slug} to ${trimmed}. Subsequent turns will use this model.`
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Failed to switch model: ${msg}`
+        }
+      },
       newSession: async () => {
         store.updateChatSession(currentChatSession.id, { state: 'closed' })
         const next = store.createChatSession({ projectId, museId: muse.id })
@@ -385,6 +472,14 @@ export async function chatRun(
         return `closed previous session and started new session ${next.id}`
       },
       help: () => defaultSlashHelp(),
+    }
+
+    const exposedTools = bridge.listTools()
+    const initialNotices: string[] = []
+    if (exposedTools.length === 0) {
+      initialNotices.push(
+        `Warning: No Pluton operator tools are exposed to muse '${muse.slug}'. To expose operator tools, configure permissions in pluton.yaml: project.status, run.list, run.inspect, run.start, approvals.list`,
+      )
     }
 
     const chatSession = new ChatSession({
@@ -401,6 +496,7 @@ export async function chatRun(
       startRun: runStarter,
       slashContext,
       poll: deps.poll ?? defaultPoll,
+      initialNotices,
     })
     sessionInstance = chatSession
 

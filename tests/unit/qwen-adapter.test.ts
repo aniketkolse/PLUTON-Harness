@@ -379,7 +379,7 @@ describe('qwen adapter: prompts and events', () => {
     const events = await collect(session.sendPrompt({ text: 'write a file' }))
     expect(events.map((e) => e.kind)).toEqual(['status', 'tool', 'usage', 'result'])
     expect(events[0]).toEqual({ kind: 'status', status: 'busy' })
-    expect(events[1]).toEqual({ kind: 'tool', name: 'WriteFile', phase: 'start', summary: 'WriteFile' })
+    expect(events[1]).toMatchObject({ kind: 'tool', name: 'WriteFile', phase: 'start', summary: 'WriteFile' })
     expect(events[2]).toEqual({ kind: 'usage' })
     expect(events[3]).toMatchObject({ kind: 'result', outcome: 'success', summary: 'stopReason: end_turn' })
     // agent_thought_chunk, empty agent_message_chunk, in-progress tool_call_update

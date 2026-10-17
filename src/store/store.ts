@@ -283,6 +283,14 @@ export class Store {
     return row ? rowToMuse(row) : null
   }
 
+  updateMuseModel(id: string, model: string): void {
+    const now = nowIso()
+    const res = this.db.prepare('UPDATE muses SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
+    if (res.changes === 0) {
+      throw new NotFoundError('muse', id)
+    }
+  }
+
   /** Upsert all configured muses; rows absent from the config are disabled (never deleted). */
   syncMuses(projectId: string, specs: MuseSyncSpec[]): { upserted: number; disabled: number } {
     return withTx(this.db, () => {

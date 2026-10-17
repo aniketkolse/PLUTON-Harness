@@ -197,4 +197,36 @@ describe('TerminalHost', () => {
     altHost.stop()
     expect(stdout.written).toContain('\x1b[?1049l')
   })
+
+  it('alternate screen mode: redraw renders absolute full-screen frame from home position', () => {
+    const altStdout = new FakeStdout()
+    const altStdin = new FakeStdin()
+    const altHost = new TerminalHost({
+      stdin: altStdin as any,
+      stdout: altStdout as any,
+      alternateScreen: true,
+      throttleMs: 10,
+    })
+
+    altHost.start()
+    altStdout.clear()
+
+    altHost.redraw({
+      lines: ['HEADER', 'CHAT BODY', 'FOOTER'],
+      cursor: { row: 1, col: 5 },
+    })
+    vi.advanceTimersByTime(10)
+
+    // Hidden cursor -> home -> content \r\n -> clear below -> cursor at (2, 6) -> show cursor
+    expect(altStdout.written).toContain('\x1b[?25l\x1b[H')
+    expect(altStdout.written).toContain('HEADER\r\nCHAT BODY\r\nFOOTER\x1b[J')
+    expect(altStdout.written).toContain('\x1b[2;6H\x1b[?25h')
+
+    // Commit does not write raw text to stdout in alt-screen mode
+    altStdout.clear()
+    altHost.commit('should not write raw text')
+    expect(altStdout.written).toBe('')
+
+    altHost.stop()
+  })
 })

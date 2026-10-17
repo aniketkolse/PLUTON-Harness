@@ -116,6 +116,10 @@ export function renderOrchestraInspector(
       const owner = t.ownerMuseSlug ? ` (${t.ownerMuseSlug})` : ''
       const line = `  ${theme.paint('border', branch)} ${t.title}${theme.paint('dim', owner)} ${stateBadge}`
       addLine(line)
+      if (t.dependencies && t.dependencies.length > 0) {
+        const depLine = `     ${theme.paint('dim', `↳ needs: ${t.dependencies.join(', ')}`)}`
+        addLine(depLine)
+      }
     }
   }
   addEmpty()

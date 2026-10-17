@@ -152,6 +152,14 @@ describe('project + muses', () => {
     expect(store.getMuse('worker-a')?.enabled).toBe(false)
     expect(store.getMuse('worker-a')).not.toBeNull()
   })
+
+  it('updateMuseModel updates the model of an existing muse', () => {
+    const { store } = freshStore('muses-update')
+    seedProject(store)
+    expect(store.getMuse('worker-a')?.model).toBe('mock/model-a')
+    store.updateMuseModel('worker-a', 'claude-3-5-sonnet')
+    expect(store.getMuse('worker-a')?.model).toBe('claude-3-5-sonnet')
+  })
 })
 
 describe('runs + tasks lifecycle', () => {

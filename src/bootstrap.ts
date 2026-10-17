@@ -5,6 +5,7 @@ import { slugify } from './domain/ids.ts'
 import { openDatabase } from './store/db.ts'
 import { migrate } from './store/migrations.ts'
 import { Store, type MuseSyncSpec } from './store/store.ts'
+import { ROLE_DEFAULT_PERMISSIONS } from './domain/permissions.ts'
 
 /**
  * Opens (creating if needed) the project's durable store:
@@ -50,7 +51,7 @@ export function museSpecs(loaded: LoadedConfig): MuseSyncSpec[] {
     model: m.model,
     instructionsFile: m.instructions_file ?? null,
     workspacePolicy: m.workspace_policy,
-    permissions: m.permissions ?? [],
+    permissions: m.permissions ?? (ROLE_DEFAULT_PERMISSIONS[m.role] ? [...ROLE_DEFAULT_PERMISSIONS[m.role]] : []),
     approvalMode: m.approval_mode,
     engineHome: join(engineHomesDir(loaded.rootDir), id),
   }))

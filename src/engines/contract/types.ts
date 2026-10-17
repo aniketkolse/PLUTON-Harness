@@ -97,7 +97,16 @@ export interface EngineSessionInfo {
 export type EngineEvent =
   | { kind: 'status'; status: 'starting' | 'ready' | 'busy' | 'idle'; detail?: string }
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }
+  | {
+      kind: 'tool'
+      name: string
+      phase: 'start' | 'end'
+      callId?: string
+      summary?: string
+      input?: unknown
+      output?: string
+      isError?: boolean
+    }
   | { kind: 'approval_request'; requestId: string; description: string }
   | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
   | {
