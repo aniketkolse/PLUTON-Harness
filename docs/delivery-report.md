@@ -24,6 +24,11 @@ into a Muse's container), `pluton integrate` (per-run integration checkout, conf
 protected-path gate — never main) and `pluton approvals` (list/approve/deny with
 operator-configurable expiry), all **live-verified 2026-10-17** on the running container-mode setup
 (one live finding fixed: commit-on-integrate, `19f8f19`) — see `docs/smoke-live-run.md`.
+The interactive chat TUI slice (ADR-0012, `521cd1d`…`168b2bf`) delivered the zero-dependency inline
+renderer (`src/tui/*`), v3 SQLite chat schema (`chat_sessions`, `chat_messages`), operator tool
+catalog (`project.status`, `run.list`, `run.get`, `run.start`, `approvals.list`), streaming
+`ChatSession` loop with interrupt and background event polling, background run supervisor, slash
+commands + approvals inbox, and bare `pluton` TTY entry.
 Container-mode runs are wired,
 unit/integration-verified, and **live-smoked 2026-10-17** (engines image, per-Muse containers, a
 real worker edit closed by `pluton verify`; the smoke found and fixed one engine-session leak,
@@ -32,8 +37,8 @@ reproducible commands.
 
 ## 2. Evidence base
 
-- Last full local run of this report: `npm run check` → typecheck clean, **492 tests / 37 files
-  green** (29 unit files + 8 integration files).
+- Last full local run of this report: `npm run check` → typecheck clean, **602 tests / 50 files
+  green** (35 unit files + 15 integration files).
 - Host-mode live smoke (2026-10-16/17, `docs/smoke-live-run.md`): OpenCode manager + Qwen worker on a
   real gateway-backed model; run #1 (pre-fix) is kept as the failure of record (run `uncertain`,
   phantom worker "success" with zero edits caught by `pluton verify`); after the fix commit the same
@@ -102,13 +107,20 @@ reproducible commands.
 | 7 | Verification gate: configured argv-array checks through the bounded runner, deny list, evidence rows + events before any verdict, `pluton verify`, truthful verdict/finalization | `src/verify/runner.ts`, `src/cli/main.ts` | `a97f33a` |
 | 8 | Failure-mode tests (timeout, protocol crash), `docs/SECURITY.md`, this report | `tests/`, `docs/` | `9a460c9`, `77fda33`, this commit |
 | 7/8 (slice) | `pluton attach` (tmux attach into a Muse's container), `pluton integrate` (per-run integration checkout, `--no-ff` merges, protected-path gate, conflict stop/preserve/record, commit-on-integrate), `pluton approvals` (list/approve/deny, `muse.create` apply with team sync + container provisioning, TTL expiry sweep) | `src/cli/commands/{attach,integrate,approvals}.ts`, `src/workspace/manager.ts`, `src/store/store.ts` | `60f513f`→`19f8f19` |
+| 8 (chat TUI) | Zero-dep inline terminal renderer (`src/tui/*`), v3 SQLite chat schema (`chat_sessions`, `chat_messages`), operator tool catalog (`src/tools/operator-catalog.ts`), streaming `ChatSession` coordinator (`src/chat/session.ts`), background run driver (`src/cli/commands/run.ts`), slash commands (`src/chat/commands.ts`), and bare `pluton` TTY gate | `src/tui/`, `src/chat/`, `src/store/migrations/0003_chat_sessions.sql`, `src/tools/operator-catalog.ts`, `src/cli/commands/chat.ts` | `521cd1d`→`168b2bf` |
 
 ## 4. Test evidence — what is actually verified
 
 Commands and results observed at the report commit:
 
 1. `npx tsc -p tsconfig.json` — clean.
-2. `npx vitest run` — **492 passed / 37 files** (29 unit, 8 integration). Highlights:
+2. `npx vitest run` — **602 passed / 50 files** (35 unit, 15 integration). Highlights:
+   - `tests/unit/bare-entry.test.ts` (2): bare `pluton` entry gate (`shouldOpenChat`) and non-TTY help output.
+   - `tests/unit/chat-commands.test.ts` (4): slash command parser (`parseSlash`) and execution router (`executeSlash`).
+   - `tests/integration/cli-chat.test.ts` (10): CLI chat command end to end, plan mode, continue/resume validation, and engine session creation.
+   - `tests/integration/cli-chat-run-start.test.ts` (3): operator tool bridge `run.start` triggering real background supervisor execution, and active-run conflict guard.
+   - `tests/integration/chat-session.test.ts` (6): interactive chat loop, streaming turns, Escape interruption, background event notices, slash commands (`/status`, `/approvals`, `/approve`, `/deny`, `/run`, `/new`, `/quit`), and session resumption.
+   - `tests/unit/tui-*.test.ts` (4 suites): terminal width/truncation/wrapping, theme token styling, pure render frame builders, editor state machine with bracketed paste and history.
    - `tests/unit/tool-bridge.test.ts` (30): permissions enforced server-side, scope per call, audit
      events, waits event-driven, heartbeat re-read for stdio sessions, review regressions
      (junction escape denied, `.PLUTON` denied, oversized tool name audited, subtree dependencies,

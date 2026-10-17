@@ -209,26 +209,25 @@ References (read-only, recorded commits):
 _Phases 0–5 complete; Phase 6 essentially complete (bridge + supervisor + live two-engine goal in;
 engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring delivered as
 `pluton approvals`). Phase 7 complete (verification gate + integration checkout via `pluton integrate`).
-Live status: 492 tests / 37 files green
+Phase 8 complete (interactive chat TUI for the operator Muse via `pluton`, `pluton chat [muse]`, and `pluton muse chat <muse>`).
+Live status: 602 tests / 50 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
 `muse list/show/create/edit`, `muse model list` (real engine catalogues; honest install/auth
 errors), `engine list`, `sandbox probe`, `sandbox build-image`, `status`, `task list/show`, `graph`,
-`mcp serve`, `run`, `verify`, `attach`, `integrate`, `approvals` (list/approve/deny) — all with clean
+`mcp serve`, `run`, `verify`, `chat`, `attach`, `integrate`, `approvals` (list/approve/deny) — all with clean
 `--json`. Live engine suites are opt-in (`npm run test:live`; OpenCode
 3/3, Qwen 4/4 green on this host). Sandbox: worker image `pluton-worker:local`
 (`sha256:a6c83676…`, `tmux 3.3a`, `node v24.22.0`) built for real via `pluton sandbox build-image`;
 Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`) 5/5 green; `pluton doctor` fully green with tmux
 verified inside the image. A full post-Phase-5 code review produced 16 findings — all addressed with
-regression tests (container-name uniqueness under truncation, tmux duplicate-window handling,
-probe failure-vs-missing classification, checkout cleanup/typed failures, store upsert races,
-window-id-targeted kills). Phase 6 bridge core is in: MCP stdio server, restricted tool catalog with
+regression tests.
+Phase 6 bridge core is in: MCP stdio server, restricted tool catalog with
 per-call server-side authorization + audit events, exactly-once wakeup registry, engine-side
 transport recon (`docs/reverse-engineering/engine-mcp-integration.md`), the HTTP transport, and
 `pluton mcp serve` for stdio sessions. An adversarial review of the bridge produced 10 findings — all
-addressed with regression tests (symlink/junction/case/8.3 escape containment, oversized audit names,
-dependency scope, terminal delegation, approval caps, git option injection). The run supervisor is in
+addressed with regression tests. The run supervisor is in
 (`src/orchestrator/supervisor.ts` + 12 mock-engine integration tests) and the Phase 7 verification gate
 is in (`pluton verify`, `src/verify/runner.ts` + 5 integration tests): completion is only reachable
 through durable evidence. `pluton run` is wired end to end and host-mode live-smoked with a real
@@ -237,15 +236,14 @@ OpenCode manager + Qwen worker goal (`docs/smoke-live-run.md`; the run closed `c
 engine spawns, engines-image gate — `1f9521c`, `2695e20`, `45f23f6`); its fail-closed path is
 live-verified and its full live E2E ran 2026-10-17 — PASS (engines image with in-image version
 proof, per-Muse containers, a real worker edit closed by `pluton verify` `completed`/`success`;
-the smoke found and fixed an engine-session leak, `ba68557`; `docs/smoke-live-run.md`).
+`docs/smoke-live-run.md`).
 The attach/integrate/approvals slice landed (`60f513f`…`19f8f19`) and is live-verified on the same
-running setup: `pluton attach --json` resolves the Muse container and ensures its tmux session
-(argv + session-ensure proven live; the interactive `-it` leg is NOT RUN — this harness has no real
-TTY); `pluton integrate --run` committed a dirty worker checkout (`19f8f19` — a live finding),
-merged it `--no-ff` into `pluton/integration/run_mvbdxegw64ba23de` and passed the configured check
-inside the integration checkout; `pluton approvals` list/approve/deny and the expiry sweep
-(`pluton:timeout`, fail-closed) all ran live against real rows. `docs/smoke-live-run.md` records
-the evidence.
+running setup: `pluton attach --json` resolves the Muse container and ensures its tmux session;
+`pluton integrate --run` committed a dirty worker checkout (`19f8f19`), merged it `--no-ff` into
+`pluton/integration/run_mvbdxegw64ba23de`, passed the configured check inside the integration checkout;
+`pluton approvals` list/approve/deny and the expiry sweep (`pluton:timeout`, fail-closed) all ran live against real rows.
+The interactive chat TUI slice landed (ADR-0012, `521cd1d`…`168b2bf`): zero-dependency inline renderer (`src/tui/*`), v3 SQLite chat schema, operator tool catalog (`project.status`, `run.list`, `run.get`, `run.start`, `approvals.list`), streaming `ChatSession` with interrupt support, slash commands (`/help`, `/status`, `/runs`, `/run`, `/approvals`, `/approve`, `/deny`, `/new`), background run execution supervisor, and bare `pluton` TTY entry.
+Named follow-ups explicitly recorded: fullscreen/alt-screen mode, async engine-approval interactive prompts, tool-output detail / thinking chunk streaming, `@`-file completion in the input editor, dynamic steering prompts during active runs, and arrow-select approval decision panel.
 Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
 Next (not in this build): network policy `restricted` enforcement, container behavior on Linux
 hosts (mount ownership/uid alignment), re-dispatch after the verification gate, and an auto-continue

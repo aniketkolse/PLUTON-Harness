@@ -311,3 +311,85 @@ used the generic `approval.request` action, so no Muse was instantiated by this 
 - `integration.apply` approvals are created by `integrate` when the protected-path gate blocks a
   merge, but nothing auto-continues the integrate command after approval — re-running `integrate`
   is the documented flow.
+
+## Interactive chat TUI slice — live evidence (2026-10-17)
+
+Implementation under test: Tasks 1–11 of `docs/superpowers/plans/2026-10-17-tui-chat.md`
+(commits `1e906ca`…`168b2bf`).
+Same live environment as the container-mode smoke above (containers
+`pluton-project-mvbcakle23bcab26-{manager,worker}` up in `.pluton-tmp/smoke-docker`;
+9router gateway at `http://127.0.0.1:20128/v1` with `ag/gemini-3.8-flash` via `smoke-env.ps1`).
+
+### Live smoke session (`.pluton-tmp/chat-smoke.mjs`) — `[x]` PASS
+
+Driven headlessly via `ScriptedIo` against the real container-mode OpenCode adapter and
+supervisor background runner:
+
+1. **Header & greeting:**
+   ```
+   Pluton Chat — smoke-docker (Y:\Pluton\.pluton-tmp\smoke-docker)
+   Muse: manager [opencode / opencode/deepseek-v4.1-flash-free] (mode: container)
+   Session: chat_mvc3onbo21f096e4 (new, 0 messages)
+   Type /help for slash commands, or Ctrl+C to exit.
+   ```
+2. **Conversation with operator proxy:**
+   - Prompt: `Hello operator! In one sentence, what is your role?`
+   - Operator Reply: `I'm manager, the operator's proxy in this chat: I inspect state and start runs via the available tools, then report results verbatim — though note I currently only see opencode tools exposed, not any pluton tools.`
+3. **Slash command `/status`:**
+   - Output:
+     ```
+     Project: smoke-docker (project_mvbcakle23bcab26)
+     Operator: manager (opencode/deepseek-v4.1-flash-free)
+     Chat session: chat_mvc3onbo21f096e4 (active)
+     Current run: 49da0ddc  failed             2026-10-17 07:44:51  Add a "## Smoke" section to README.md so the smoke test passes
+     Pending approvals: 1
+     ```
+4. **Slash command `/approvals`:**
+   - Output:
+     ```
+     ID                       ACTION          REQUESTED BY     REASON
+     approval_mvbhy8a0f5c0a03b  approval.request  -                my first approval
+     ```
+5. **Slash command `/run` (Background run execution & live event polling):**
+   - Command: `/run Add a "## Smoke" section to README.md so the smoke test passes`
+   - Started run: `run_mvc3p0ld5722fb47`
+   - Real-time event poll notices streamed to chat:
+     - `run.started (run_mvc3p0ld5722fb47)`
+     - `task.admitted (run_mvc3p0ld5722fb47)`
+     - `task.started (run_mvc3p0ld5722fb47)`
+     - `task.awaiting_verification: success`
+     - `run.finished: verifying`
+   - Run settled in `verifying` state with task `task_mvc3pzz1b8ca1861` (`Add '## Smoke' section to README.md`).
+6. **Task execution & project verification:**
+   - Worker Muse (`qwen` on `ag/gemini-3.8-flash`) executed task in its isolated workspace (`.pluton/workspaces/task_mvc3pzz1b8ca1861/README.md`), adding:
+     ```markdown
+     ## Smoke
+
+     Run `node test/smoke.test.js` to verify that the container-mode smoke check passes.
+     ```
+   - Ran `node Y:\Pluton\bin\pluton.js verify --run run_mvc3p0ld5722fb47 --json`:
+     `1/1 checks passed` (`smoke test` passed, exitCode 0); task & run transitioned to `completed` (`success`).
+7. **Clean exit:**
+   - Slash command `/quit` → exitCode 0, session `chat_mvc3onbo21f096e4` committed with `Goodbye.`
+
+### Real raw-mode interactive TUI leg — NOT RUN
+
+This automated agent harness has no raw-mode TTY.
+To run the interactive TUI directly on an operator workstation:
+```bash
+# Link the pluton binary locally
+npm link
+
+# Inside any initialized Pluton project
+pluton chat
+# or specify the supervisor/operator muse:
+pluton chat manager
+```
+Keybindings in raw mode:
+- `Enter`: submit prompt
+- `Shift+Enter` / `Alt+Enter` / `Ctrl+J`: insert newline
+- `Ctrl+C`: interrupt active turn / prompt to quit (twice to exit)
+- `Ctrl+D`: exit when input buffer is empty
+- `Ctrl+L`: clear and repaint screen
+- `PageUp` / `PageDown`: scroll viewport
+

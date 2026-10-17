@@ -16,7 +16,7 @@ import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks
 import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { inheritStdioSpawn } from '../terminal/attach.ts'
-import { requireProject } from './context.ts'
+import { optionalProject, requireProject } from './context.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachMuse } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
@@ -59,6 +59,34 @@ function jsonMode(cmd: Command): boolean {
   const opts = cmd.optsWithGlobals() as { json?: boolean }
   return opts.json === true || process.env.PLUTON_JSON === '1' || process.env.PLUTON_JSON === 'true'
 }
+
+export function shouldOpenChat(opts: { isTty: boolean; hasProject: boolean }): boolean {
+  return opts.isTty && opts.hasProject
+}
+
+program.action(async (_opts: unknown, cmd: Command) => {
+  const json = jsonMode(cmd)
+  const isTty = process.stdin.isTTY === true && process.stdout.isTTY === true
+  const project = optionalProject(process.cwd())
+  const hasProject = project !== null
+
+  if (json || !shouldOpenChat({ isTty, hasProject }) || project === null) {
+    program.outputHelp()
+    if (!hasProject && isTty && !json) {
+      io.out('\nhint: run `pluton init` to set up a project')
+    }
+    return
+  }
+
+  try {
+    const { exitCode } = await chatRun(project, {})
+    process.exitCode = exitCode
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    io.err(msg)
+    process.exitCode = 1
+  }
+})
 
 // ---------------------------------------------------------------------------
 // version

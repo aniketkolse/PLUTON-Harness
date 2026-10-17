@@ -133,7 +133,8 @@ Stated plainly so nobody over-reads the guarantees above:
    logged, but the host itself is trusted.
 3. **Approval expiry is sweep-driven, not timer-driven.** Pending approvals carry an
    operator-configurable TTL (`runtime.approval_timeout_minutes`, default 60, `0` = never); the
-   sweep runs when `pluton approvals list/approve/deny` executes and flips overdue pendings to
+   sweep runs when `pluton approvals list/approve/deny` (or the chat TUI `/approvals`, `/approve`, `/deny`
+   slash commands) executes and flips overdue pendings to
    `expired` (fail-closed like a denial, `decided_by: pluton:timeout`). No background timer exists:
    a pending approval nobody looks at stays `pending` in the store until the next sweep.
 4. **Container hardening is Docker's defaults plus the configured resource
