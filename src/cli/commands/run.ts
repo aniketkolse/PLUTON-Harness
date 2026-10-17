@@ -26,7 +26,7 @@ import {
 import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
 import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
-import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
+import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
 import { PLUTON_VERSION } from '../../version.ts'
 import { GitWorkspaceManager } from '../../workspace/manager.ts'
@@ -92,7 +92,7 @@ const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
 
 const CONTAINER_PIDS_LIMIT = 512
 
-function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): MuseRecord {
+export function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): MuseRecord {
   if (managerRef !== undefined) return resolveMuseByRef(store, managerRef)
   const found = findManager(ctx.loaded.config)
   if (!found) {
@@ -237,6 +237,209 @@ export function containerAdapterFor(
   })
 }
 
+export function createRunSupervisor(args: {
+  ctx: ProjectContext
+  store: Store
+  projectId: string
+  run: RunRecord
+  limits: ToolBridgeLimits
+  wakeups: WakeupRegistry
+  http: ToolHttpServer
+  bridgeUrl: string
+  containerContexts: Map<string, DockerExecContext> | null
+  deps: RunDeps
+  diagnostic: (line: string) => void
+}): RunSupervisor {
+  const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, containerContexts, deps, diagnostic } = args
+  const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
+  let supervisorAdapterFor = deps.adapterFor
+  if (supervisorAdapterFor === undefined && containerContexts !== null) {
+    const contexts = containerContexts
+    supervisorAdapterFor = (muse: MuseRecord): EngineAdapter =>
+      containerAdapterFor(muse, contexts, deps.dockerSpawn)
+  }
+  const supervisor = new RunSupervisor({
+    store,
+    projectId,
+    rootDir: ctx.rootDir,
+    workspacesRoot: workspaceDir(ctx.rootDir),
+    runId: run.id,
+    limits,
+    maxConcurrentWorkers: settings.maxConcurrentWorkers,
+    defaultTaskTimeoutMs: settings.defaultTaskTimeoutMs,
+    runDeadlineMs: settings.runDeadlineMs,
+    verificationConfigured: ctx.loaded.config.project.verification.length > 0,
+    ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
+    workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),
+    engineEnv: () => ({}),
+    mcpServerFor: (muse, taskId) => {
+      const bridge =
+        taskId === null
+          ? supervisor.managerBridge()
+          : new PlutonToolBridge({
+              store,
+              projectId,
+              rootDir: ctx.rootDir,
+              runId: run.id,
+              callerMuseId: muse.id,
+              callerTaskId: taskId,
+              limits,
+              wakeups,
+            })
+      const { token } = http.register(bridge, {
+        museId: muse.id,
+        taskId,
+        runId: run.id,
+        label: muse.slug,
+      })
+      const spec: McpServerSpec = {
+        kind: 'http',
+        name: 'pluton',
+        url: bridgeUrl,
+        headers: { Authorization: `Bearer ${token}` },
+      }
+      return spec
+    },
+    wakeups,
+    diagnostic,
+  })
+  return supervisor
+}
+
+export interface StartRunOptions {
+  goal: string
+  acceptance: string[]
+  managerRef?: string
+  requestId?: string
+}
+
+/** Create a run (same admission path as runRun) and drive it in the background. */
+export function startRunInBackground(
+  ctx: ProjectContext,
+  store: Store,
+  projectId: string,
+  opts: StartRunOptions,
+  deps: RunDeps,
+  hooks?: { diagnostic?: (line: string) => void },
+): { runId: string; done: Promise<RunSummary> } {
+  const goal = opts.goal.trim()
+  if (goal === '') {
+    throw new ConfigError('--goal is required: describe what the run must achieve')
+  }
+  const manager = resolveManager(ctx, store, opts.managerRef)
+  const runtime = ctx.loaded.config.runtime
+  const budget = runBudgetFromRuntime(runtime)
+
+  if (ctx.loaded.config.sandbox.kind !== 'docker') {
+    createSandboxManager(ctx.loaded.config)
+  }
+
+  const payload: JsonValue = {
+    goal,
+    acceptanceCriteria: opts.acceptance,
+    managerMuseId: manager.id,
+    budget: { ...budget },
+  }
+  const createRun = (): RunRecord =>
+    store.createRun({
+      projectId,
+      goal,
+      origin: 'cli',
+      requestedBy: 'cli',
+      acceptanceCriteria: opts.acceptance,
+      managerMuseId: manager.id,
+      budget,
+    })
+
+  let run: RunRecord
+  let duplicate = false
+  if (opts.requestId !== undefined) {
+    const admitted = store.admitRequest({
+      requestId: opts.requestId,
+      projectId,
+      targetKind: 'run.create',
+      payload,
+      create: () => {
+        const created = createRun()
+        return { targetId: created.id, result: { runId: created.id } }
+      },
+    })
+    duplicate = admitted.duplicate
+    const targetId = admitted.receipt.targetId
+    if (targetId === null) throw new InternalError('run.create receipt has no target id')
+    run = store.getRun(targetId)
+  } else {
+    run = createRun()
+  }
+
+  if (duplicate) {
+    store.appendEvent({
+      projectId,
+      runId: run.id,
+      type: 'run.duplicate_request',
+      payload: { requestId: opts.requestId ?? null },
+    })
+    return {
+      runId: run.id,
+      done: Promise.resolve(summaryFromRecords(store, run)),
+    }
+  }
+
+  const done = (async (): Promise<RunSummary> => {
+    let containerContexts: Map<string, DockerExecContext> | null = null
+    if (ctx.loaded.config.sandbox.kind === 'docker') {
+      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
+      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
+    }
+
+    const limits = toolBridgeLimitsFromRuntime(runtime)
+    const wakeups = new WakeupRegistry()
+    const http = new ToolHttpServer({
+      serverName: 'pluton-tools',
+      serverVersion: PLUTON_VERSION,
+      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+    })
+    const started = await http.start()
+    const bridgeUrl =
+      containerContexts !== null
+        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
+        : `${http.url as string}mcp`
+
+    try {
+      const supervisor = createRunSupervisor({
+        ctx,
+        store,
+        projectId,
+        run,
+        limits,
+        wakeups,
+        http,
+        bridgeUrl,
+        containerContexts,
+        deps,
+        diagnostic: hooks?.diagnostic ?? ((line) => {
+          process.stderr.write(`run ${run.id}: ${line}\n`)
+        }),
+      })
+      const outcome = await supervisor.runToCompletion()
+      return {
+        runId: outcome.runId,
+        state: outcome.state,
+        outcome: outcome.outcome,
+        taskCounts: outcome.taskCounts,
+        managerSummary: outcome.managerSummary,
+        unfinishedTasks: outcome.unfinishedTasks,
+        blockedTasks: outcome.blockedTasks,
+        verificationPending: outcome.state === 'verifying',
+      }
+    } finally {
+      await http.stop()
+    }
+  })()
+
+  return { runId: run.id, done }
+}
+
 export async function runRun(
   ctx: ProjectContext,
   opts: RunCommandOptions,
@@ -332,55 +535,17 @@ export async function runRun(
         ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
         : `${http.url as string}mcp`
     try {
-      let supervisorAdapterFor = deps.adapterFor
-      if (supervisorAdapterFor === undefined && containerContexts !== null) {
-        const contexts = containerContexts
-        supervisorAdapterFor = (muse: MuseRecord): EngineAdapter =>
-          containerAdapterFor(muse, contexts, deps.dockerSpawn)
-      }
-      const supervisor = new RunSupervisor({
+      const supervisor = createRunSupervisor({
+        ctx,
         store,
         projectId,
-        rootDir: ctx.rootDir,
-        workspacesRoot: workspaceDir(ctx.rootDir),
-        runId: run.id,
+        run,
         limits,
-        maxConcurrentWorkers: settings.maxConcurrentWorkers,
-        defaultTaskTimeoutMs: settings.defaultTaskTimeoutMs,
-        runDeadlineMs: settings.runDeadlineMs,
-        verificationConfigured: ctx.loaded.config.project.verification.length > 0,
-        ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
-        workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),
-        engineEnv: () => ({}),
-        mcpServerFor: (muse, taskId) => {
-          const bridge =
-            taskId === null
-              ? supervisor.managerBridge()
-              : new PlutonToolBridge({
-                  store,
-                  projectId,
-                  rootDir: ctx.rootDir,
-                  runId: run.id,
-                  callerMuseId: muse.id,
-                  callerTaskId: taskId,
-                  limits,
-                  wakeups,
-                })
-          const { token } = http.register(bridge, {
-            museId: muse.id,
-            taskId,
-            runId: run.id,
-            label: muse.slug,
-          })
-          const spec: McpServerSpec = {
-            kind: 'http',
-            name: 'pluton',
-            url: bridgeUrl,
-            headers: { Authorization: `Bearer ${token}` },
-          }
-          return spec
-        },
         wakeups,
+        http,
+        bridgeUrl,
+        containerContexts,
+        deps,
         diagnostic: (line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
         },

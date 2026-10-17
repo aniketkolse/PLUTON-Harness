@@ -26,7 +26,7 @@ import { ChatSession, type ChatSessionDeps } from '../../chat/session.ts'
 import { operatorPreamble } from '../../chat/prompt.ts'
 import type { ProjectContext } from '../context.ts'
 import { resolveMuseByRef } from './mcp.ts'
-import { containerAdapterFor, prepareContainerMode } from './run.ts'
+import { containerAdapterFor, prepareContainerMode, startRunInBackground, type RunDeps } from './run.ts'
 
 export interface ChatCommandOptions {
   museRef?: string
@@ -164,6 +164,64 @@ export async function chatRun(
       adapter = deps.adapterFor?.(muse) ?? engineAdapterForMuse(muse)
     }
 
+    let activeRunId: string | null = null
+    let sessionInstance: ChatSession | null = null
+
+    const runStarter = deps.startRun
+      ? async (input: { goal: string; acceptance: string[]; requestId?: string }) => {
+          if (activeRunId !== null) {
+            throw new ValidationError(`a run started from this chat is still active: ${activeRunId}`)
+          }
+          activeRunId = 'pending'
+          try {
+            const res = await deps.startRun!(input)
+            activeRunId = res.runId
+            return res
+          } catch (e) {
+            activeRunId = null
+            throw e
+          }
+        }
+      : async (input: { goal: string; acceptance: string[]; requestId?: string }) => {
+          if (activeRunId !== null) {
+            throw new ValidationError(`a run started from this chat is still active: ${activeRunId}`)
+          }
+          const runDeps: RunDeps = {
+            adapterFor: deps.adapterFor,
+            sandboxManager: deps.sandboxManager,
+            workerImageProbe: deps.workerImageProbe,
+            dockerSpawn: deps.dockerSpawn,
+          }
+          const { runId, done } = startRunInBackground(
+            ctx,
+            store,
+            projectId,
+            {
+              goal: input.goal,
+              acceptance: input.acceptance,
+              ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
+            },
+            runDeps,
+          )
+          activeRunId = runId
+          void done.then(
+            (summary) => {
+              if (activeRunId === runId) {
+                activeRunId = null
+              }
+              sessionInstance?.commitLine(`run ${runId} finished: ${summary.outcome ?? summary.state}`)
+            },
+            (err) => {
+              if (activeRunId === runId) {
+                activeRunId = null
+              }
+              const msg = err instanceof Error ? err.message : String(err)
+              sessionInstance?.commitLine(`run ${runId} failed: ${msg}`)
+            },
+          )
+          return { runId }
+        }
+
     const limits = toolBridgeLimitsFromRuntime(ctx.loaded.config.runtime)
     const bridge = new PlutonToolBridge({
       store,
@@ -171,9 +229,7 @@ export async function chatRun(
       rootDir: ctx.rootDir,
       callerMuseId: muse.id,
       limits,
-      startRun: deps.startRun ?? (async () => {
-        throw new InternalError('no background run supervisor configured')
-      }),
+      startRun: runStarter,
     })
 
     const httpServer = new ToolHttpServer({
@@ -208,6 +264,56 @@ export async function chatRun(
       }
     }
 
+    const existingEvents = store.eventsSince(projectId, 0, 1000)
+    let eventCursor = existingEvents.length > 0 ? existingEvents[existingEvents.length - 1]!.seq : 0
+    const seenApprovalIds = new Set<string>()
+
+    const defaultPoll = async () => {
+      const newEvents = store.eventsSince(projectId, eventCursor, 50)
+      if (newEvents.length > 0) {
+        eventCursor = newEvents[newEvents.length - 1]!.seq
+      }
+      const allowedRegex = /^(run|task|verification|approval)\./
+      const filtered = newEvents.filter((e) => allowedRegex.test(e.type))
+      const eventLines = filtered.slice(0, 20).map((e) => {
+        let detail = ''
+        if (e.payload && typeof e.payload === 'object') {
+          const p = e.payload as Record<string, unknown>
+          if (p.summary) detail = String(p.summary)
+          else if (p.state) detail = String(p.state)
+          else if (p.outcome) detail = String(p.outcome)
+          else if (p.reason) detail = String(p.reason)
+        }
+        const line = detail ? `${e.type}: ${detail}` : `${e.type} (${e.runId ?? e.taskId ?? ''})`
+        return {
+          seq: e.seq,
+          type: e.type,
+          line,
+        }
+      })
+
+      const runs = store.listRuns(1)
+      const run = runs.length > 0 && runs[0]!.projectId === projectId ? { id: runs[0]!.id, state: runs[0]!.state } : null
+
+      const pendingApprovals = store.listApprovalsByProject(projectId, { status: 'pending', limit: 100 })
+      const approvalsPending = pendingApprovals.length
+
+      const notices: string[] = []
+      for (const a of pendingApprovals) {
+        if (!seenApprovalIds.has(a.id)) {
+          seenApprovalIds.add(a.id)
+          notices.push(`approval pending: ${a.id} (${a.action})`)
+        }
+      }
+
+      return {
+        events: eventLines,
+        run,
+        approvalsPending,
+        notices,
+      }
+    }
+
     const chatSession = new ChatSession({
       store,
       projectId,
@@ -219,9 +325,10 @@ export async function chatRun(
       mcpServers,
       instructions,
       resumeToken: session.resumeToken,
-      startRun: deps.startRun,
-      poll: deps.poll,
+      startRun: runStarter,
+      poll: deps.poll ?? defaultPoll,
     })
+    sessionInstance = chatSession
 
     let exitCode = 0
     try {

@@ -399,7 +399,7 @@ export class ChatSession {
     this.deps.io.redraw({ lines: [], cursor: { row: 0, col: 0 } })
   }
 
-  private commitLine(text: string): void {
+  commitLine(text: string): void {
     this.clearLive()
     this.deps.io.commit(text)
   }
