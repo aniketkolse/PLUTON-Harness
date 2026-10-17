@@ -49,4 +49,10 @@ describe('computeLayout', () => {
     expect(layout.autocomplete!.height).toBe(4)
     expect(layout.autocomplete!.y).toBeLessThan(layout.composer.y)
   })
+
+  it('allocates 6 rows for brand header when brandHeader is true and terminal is wide', () => {
+    const layout = computeLayout(129, 48, { brandHeader: true })
+    expect(layout.header.height).toBe(6)
+    expect(layout.dividerHeader).toBe(6)
+  })
 })

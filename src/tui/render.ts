@@ -12,6 +12,9 @@ import {
   renderApprovalDetails,
   type ApprovalViewData,
 } from './approval.ts'
+import { renderHeader as renderUIHeader } from '../ui/header.ts'
+import { renderStatusBar as renderUIStatusBar } from '../ui/status.ts'
+import { getUITheme } from '../ui/theme.ts'
 
 export interface StatusView {
   museSlug: string
@@ -188,6 +191,7 @@ export interface FullScreenFrameOptions {
     engine: string
     model: string
     runState?: string
+    version?: string
   }
   transcriptLines: string[]
   orchestra?: OrchestraInspectorData | null
@@ -210,6 +214,10 @@ export interface FullScreenFrameOptions {
   rows: number
   theme: Theme
   inspectorOpen?: boolean
+  brandHeader?: boolean
+  mode?: string
+  contextPct?: number
+  cost?: number
 }
 
 export function shortenPath(fullPath: string, maxLength = 35): string {
@@ -254,6 +262,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
     autocompleteCount,
     approvalCardHeight: approvalLines.length,
     detailsHeight,
+    brandHeader: opts.brandHeader,
   })
 
   if (layout.tooSmall) {
@@ -281,34 +290,73 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   const teeUp = theme.enabled ? '┴' : '+'
   const teeCross = theme.enabled ? '┼' : '+'
 
-  // 1. Header: one compact brand row — ship mark, wordmark, project — with the
-  // muse/engine on the right. The rule below it is the header divider.
-  const ship = theme.icon('ship')
-  const leftHeader =
-    ` ${theme.paint('focus', ship)} ${theme.paint('header', 'PLUTON')}  ${theme.paint('accent', opts.header.projectName)}`
-  const rightHeader = `${opts.header.museSlug} · ${opts.header.engine} `
-  const headerLeftW = displayWidth(leftHeader)
-  const headerRightW = displayWidth(rightHeader)
-  if (headerLeftW + headerRightW + 2 <= columns) {
-    screenLines[0] = `${leftHeader}${' '.repeat(columns - headerLeftW - headerRightW)}${theme.paint('dim', rightHeader)}`
-  } else {
-    screenLines[0] = truncateToWidth(leftHeader, columns)
-  }
+  const uiTheme = getUITheme({ color: theme.enabled })
 
-  // Header Divider (rule)
-  if (layout.twoColumn && layout.dividerVertical) {
-    const divX = layout.dividerVertical.x
-    const leftHz = hz.repeat(Math.max(0, divX - 1))
-    const rightHz = hz.repeat(Math.max(0, columns - divX - 1))
-    screenLines[layout.dividerHeader] = theme.paint(
-      'border',
-      `${hz}${leftHz}${teeDown}${rightHz}`,
+  // 1. Header: brand banner when brandHeader is requested,
+  // or compact brand row — ship mark, wordmark, project — with muse/engine on right.
+  if (opts.brandHeader) {
+    const hLines = renderUIHeader(
+      {
+        version: opts.header.version ?? '0.1.0',
+        engine: opts.header.engine,
+        model: opts.header.model,
+        rootDir: opts.header.rootDir,
+        museSlug: opts.header.museSlug,
+        projectName: opts.header.projectName,
+      },
+      columns,
+      uiTheme,
+      rows,
     )
+
+    if (columns >= 80 && rows >= 24) {
+      for (let h = 0; h < 6 && h < layout.dividerHeader; h++) {
+        screenLines[h] = hLines[h] ?? ''
+      }
+
+      if (layout.twoColumn && layout.dividerVertical) {
+        const divX = layout.dividerVertical.x
+        const leftHz = hz.repeat(Math.max(0, divX - 1))
+        const rightHz = hz.repeat(Math.max(0, columns - divX - 1))
+        screenLines[layout.dividerHeader] = theme.paint(
+          'border',
+          `${hz}${leftHz}${teeDown}${rightHz}`,
+        )
+      } else {
+        screenLines[layout.dividerHeader] = hLines[6] ?? theme.paint('border', hz.repeat(columns))
+      }
+    } else {
+      screenLines[0] = hLines[0] ?? ''
+      screenLines[layout.dividerHeader] = hLines[1] ?? theme.paint('border', hz.repeat(columns))
+    }
   } else {
-    screenLines[layout.dividerHeader] = theme.paint(
-      'border',
-      hz.repeat(columns),
-    )
+    const ship = theme.icon('ship')
+    const leftHeader =
+      ` ${theme.paint('focus', ship)} ${theme.paint('header', 'PLUTON')}  ${theme.paint('accent', opts.header.projectName)}`
+    const rightHeader = `${opts.header.museSlug} · ${opts.header.engine} `
+    const headerLeftW = displayWidth(leftHeader)
+    const headerRightW = displayWidth(rightHeader)
+    if (headerLeftW + headerRightW + 2 <= columns) {
+      screenLines[0] = `${leftHeader}${' '.repeat(columns - headerLeftW - headerRightW)}${theme.paint('dim', rightHeader)}`
+    } else {
+      screenLines[0] = truncateToWidth(leftHeader, columns)
+    }
+
+    // Header Divider (rule)
+    if (layout.twoColumn && layout.dividerVertical) {
+      const divX = layout.dividerVertical.x
+      const leftHz = hz.repeat(Math.max(0, divX - 1))
+      const rightHz = hz.repeat(Math.max(0, columns - divX - 1))
+      screenLines[layout.dividerHeader] = theme.paint(
+        'border',
+        `${hz}${leftHz}${teeDown}${rightHz}`,
+      )
+    } else {
+      screenLines[layout.dividerHeader] = theme.paint(
+        'border',
+        hz.repeat(columns),
+      )
+    }
   }
 
   // 2. Chat Transcript & Orchestra Main Area
@@ -372,7 +420,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   }
 
   // 4. Composer Rendering
-  const promptSymbol = '❯ '
+  const promptSymbol = '> '
   const inputRender = renderInput(
     opts.editor.text,
     opts.editor.cursor,
@@ -428,44 +476,67 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
   }
 
   // 6. Footer Line: status + contextual hints on the left, real telemetry on the right.
-  let statusBadge: string
-  if (opts.statusView.approvalsPending > 0) {
-    statusBadge = theme.paint('approval', `APPROVAL REQUIRED (${opts.statusView.approvalsPending})`)
-  } else if (opts.statusView.busy) {
-    statusBadge = theme.paint('warn', 'RUNNING')
-  } else {
-    statusBadge = theme.paint('success', 'READY')
-  }
-
-  const hints =
-    opts.statusView.approvalsPending > 0
-      ? 'A approve once · D deny · V details'
-      : opts.statusView.busy
-        ? 'Esc interrupt · Ctrl+J newline'
-        : 'Enter send · / commands · Ctrl+P palette · ? help'
-
-  const runPart = opts.statusView.run
-    ? ` ${theme.paint('dim', '·')} ${theme.paint('accent', `run ${opts.statusView.run.id} (${opts.statusView.run.state})`)}`
-    : ''
-
-  const rightParts: string[] = [opts.statusView.model]
-  if (opts.museCount !== undefined) {
-    rightParts.push(`${String(opts.museCount)} muse${opts.museCount === 1 ? '' : 's'}`)
-  }
-  if (opts.statusView.usage) {
-    rightParts.push(
-      `${String(opts.statusView.usage.inputTokens)}↑ ${String(opts.statusView.usage.outputTokens)}↓`,
+  if (opts.brandHeader) {
+    const state =
+      opts.statusView.approvalsPending > 0
+        ? 'approval'
+        : opts.statusView.busy
+          ? 'running'
+          : 'ready'
+    screenLines[layout.footer.y] = renderUIStatusBar(
+      {
+        state,
+        mode: opts.mode ?? 'chat',
+        model: opts.statusView.model,
+        engine: opts.statusView.engine,
+        contextPct: opts.contextPct,
+        museCount: opts.museCount,
+        cost: opts.cost,
+        busy: opts.statusView.busy,
+      },
+      columns,
+      uiTheme,
     )
-  }
-  const rightFooter = `${rightParts.join(' · ')} `
-
-  const leftPlain = statusBadge.length > 0 ? `${statusBadge} ${theme.paint('dim', '·')} ${theme.paint('dim', hints)}${runPart}` : ''
-  const footerLeftW = displayWidth(leftPlain)
-  const footerRightW = displayWidth(rightFooter)
-  if (footerLeftW + footerRightW + 2 <= columns) {
-    screenLines[layout.footer.y] = `${leftPlain}${' '.repeat(columns - footerLeftW - footerRightW)}${theme.paint('dim', rightFooter)}`
   } else {
-    screenLines[layout.footer.y] = truncateToWidth(leftPlain, columns)
+    let statusBadge: string
+    if (opts.statusView.approvalsPending > 0) {
+      statusBadge = theme.paint('approval', `APPROVAL REQUIRED (${opts.statusView.approvalsPending})`)
+    } else if (opts.statusView.busy) {
+      statusBadge = theme.paint('warn', 'RUNNING')
+    } else {
+      statusBadge = theme.paint('success', 'READY')
+    }
+
+    const hints =
+      opts.statusView.approvalsPending > 0
+        ? 'A approve once · D deny · V details'
+        : opts.statusView.busy
+          ? 'Esc interrupt · Ctrl+J newline'
+          : 'Enter send · / commands · Ctrl+P palette · ? help'
+
+    const runPart = opts.statusView.run
+      ? ` ${theme.paint('dim', '·')} ${theme.paint('accent', `run ${opts.statusView.run.id} (${opts.statusView.run.state})`)}`
+      : ''
+
+    const rightParts: string[] = [opts.statusView.model]
+    if (opts.museCount !== undefined) {
+      rightParts.push(`${String(opts.museCount)} muse${opts.museCount === 1 ? '' : 's'}`)
+    }
+    if (opts.statusView.usage) {
+      rightParts.push(
+        `${String(opts.statusView.usage.inputTokens)}↑ ${String(opts.statusView.usage.outputTokens)}↓`,
+      )
+    }
+    const rightFooter = `${rightParts.join(' · ')} `
+
+    const leftPlain = statusBadge.length > 0 ? `${statusBadge} ${theme.paint('dim', '·')} ${theme.paint('dim', hints)}${runPart}` : ''
+    const footerLeftW = displayWidth(leftPlain)
+    const footerRightW = displayWidth(rightFooter)
+    if (footerLeftW + footerRightW + 2 <= columns) {
+      screenLines[layout.footer.y] = `${leftPlain}${' '.repeat(columns - footerLeftW - footerRightW)}${theme.paint('dim', rightFooter)}`
+    } else {
+      screenLines[layout.footer.y] = truncateToWidth(leftPlain, columns)
+    }
   }
 
   // Ensure every screen line is strictly bounded by columns width

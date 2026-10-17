@@ -9,6 +9,7 @@
 import { join } from 'node:path'
 import { Command } from 'commander'
 import { ConfigError, InternalError, PlutonError, ValidationError } from '../domain/errors.ts'
+import { run as execRun } from '../util/exec.ts'
 import { stateDir } from '../config/load.ts'
 import { TERMINAL_TASK_STATES } from '../domain/state.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
@@ -64,29 +65,48 @@ export function shouldOpenChat(opts: { isTty: boolean; hasProject: boolean }): b
   return opts.isTty && opts.hasProject
 }
 
-program.action(async (_opts: unknown, cmd: Command) => {
-  const json = jsonMode(cmd)
-  const isTty = process.stdin.isTTY === true && process.stdout.isTTY === true
-  const project = optionalProject(process.cwd())
-  const hasProject = project !== null
-
-  if (json || !shouldOpenChat({ isTty, hasProject }) || project === null) {
-    program.outputHelp()
-    if (!hasProject && isTty && !json) {
-      io.out('\nhint: run `pluton init` to set up a project')
+program
+  .option('--demo', 'run interactive failed CI build demo scenario')
+  .action(async (_opts: unknown, cmd: Command) => {
+    const cliOpts = cmd.opts() as { demo?: boolean }
+    if (cliOpts.demo) {
+      const { runTuiDemo } = await import('../ui/demo.ts')
+      const { getUITheme } = await import('../ui/theme.ts')
+      const { TerminalHost } = await import('../tui/terminal.ts')
+      const terminalIo = new TerminalHost({ alternateScreen: true })
+      terminalIo.start()
+      try {
+        const theme = getUITheme({ color: terminalIo.isTty })
+        await runTuiDemo(terminalIo, theme)
+        process.exitCode = 0
+        return
+      } finally {
+        terminalIo.stop()
+      }
     }
-    return
-  }
 
-  try {
-    const { exitCode } = await chatRun(project, {})
-    process.exitCode = exitCode
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    io.err(msg)
-    process.exitCode = 1
-  }
-})
+    const json = jsonMode(cmd)
+    const isTty = process.stdin.isTTY === true && process.stdout.isTTY === true
+    const project = optionalProject(process.cwd())
+    const hasProject = project !== null
+
+    if (json || !shouldOpenChat({ isTty, hasProject }) || project === null) {
+      program.outputHelp()
+      if (!hasProject && isTty && !json) {
+        io.out('\nhint: run `pluton init` to set up a project')
+      }
+      return
+    }
+
+    try {
+      const { exitCode } = await chatRun(project, {})
+      process.exitCode = exitCode
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      io.err(msg)
+      process.exitCode = 1
+    }
+  })
 
 // ---------------------------------------------------------------------------
 // version
@@ -680,7 +700,23 @@ program
             workspaceId: ws !== null ? ws.id : null,
             artifactsDir,
           })
-          const verdict = applyTaskVerificationVerdict(store, task.id)
+          let diffText = ''
+          let changedFiles: string[] = []
+          if (ws !== null) {
+            const diffRes = await execRun(['git', '-C', ws.path, 'diff', `${ws.baseCommit}...HEAD`], {
+              timeoutMs: 15_000,
+              maxOutputBytes: 100_000,
+            }).catch(() => null)
+            if (diffRes && diffRes.exitCode === 0) diffText = diffRes.stdout
+            const nameRes = await execRun(['git', '-C', ws.path, 'diff', '--name-only', `${ws.baseCommit}...HEAD`], {
+              timeoutMs: 10_000,
+              maxOutputBytes: 50_000,
+            }).catch(() => null)
+            if (nameRes && nameRes.exitCode === 0) {
+              changedFiles = nameRes.stdout.split('\n').map((s: string) => s.trim()).filter(Boolean)
+            }
+          }
+          const verdict = applyTaskVerificationVerdict(store, task.id, { diffText, changedFiles })
           taskReports.push({
             taskId: task.id,
             title: task.title,
@@ -808,7 +844,24 @@ program
   .description('open an interactive chat TUI with an operator Muse (default: supervisor)')
   .option('--resume <id>', 'resume an existing chat session by id')
   .option('--continue', 'continue the latest chat session with this Muse')
-  .action(async (museArg: string | undefined, opts: { resume?: string; continue?: boolean }, cmd: Command) => {
+  .option('--demo', 'run interactive failed CI build demo scenario')
+  .action(async (museArg: string | undefined, opts: { resume?: string; continue?: boolean; demo?: boolean }, cmd: Command) => {
+    if (opts.demo) {
+      const { runTuiDemo } = await import('../ui/demo.ts')
+      const { getUITheme } = await import('../ui/theme.ts')
+      const { TerminalHost } = await import('../tui/terminal.ts')
+      const terminalIo = new TerminalHost({ alternateScreen: true })
+      terminalIo.start()
+      try {
+        const theme = getUITheme({ color: terminalIo.isTty })
+        await runTuiDemo(terminalIo, theme)
+        process.exitCode = 0
+        return
+      } finally {
+        terminalIo.stop()
+      }
+    }
+
     const json = jsonMode(cmd)
     if (json) {
       await runCommand(io, json, async () => {

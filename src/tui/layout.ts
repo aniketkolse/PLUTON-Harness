@@ -19,6 +19,8 @@ export interface LayoutOptions {
   approvalCardHeight?: number
   /** Rows needed by the read-only approval details overlay (0 = closed). */
   detailsHeight?: number
+  /** Enable wide brand banner header (6 rows) when terminal is wide enough. */
+  brandHeader?: boolean
 }
 
 export interface ComputedLayout {
@@ -84,8 +86,10 @@ export function computeLayout(
 
   const twoColumn = inspectorOpen && columns >= 80
 
-  // Header: one title row plus the divider rule below it (compact, no box).
-  const headerHeight = 1
+  // Header: brand banner (6 rows) when requested and terminal is wide/tall enough,
+  // or compact 1-row title plus the divider rule below it.
+  const useWideBrand = opts.brandHeader && columns >= 80 && rows >= 24
+  const headerHeight = useWideBrand ? 6 : 1
   const headerRect: Rect = { x: 0, y: 0, width: columns, height: headerHeight }
   const dividerHeaderY = headerHeight // row index of divider line
 

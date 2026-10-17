@@ -34,12 +34,15 @@ import { collectDoctorChecks } from './doctor.ts'
 import { PlanManager } from '../../plan/manager.ts'
 import { renderPlanGraph } from '../../tui/plan-graph.ts'
 import { defaultSlashHelp, type SlashContext } from '../../chat/commands.ts'
+import { runTuiDemo } from '../../ui/demo.ts'
+import { getUITheme } from '../../ui/theme.ts'
 
 export interface ChatCommandOptions {
   museRef?: string
   resume?: string
   continue?: boolean
   json?: boolean
+  demo?: boolean
 }
 
 export interface ChatDeps {
@@ -145,6 +148,18 @@ export async function chatRun(
 
     if (opts.json) {
       return { exitCode: 0, plan: basePlan }
+    }
+
+    if (opts.demo) {
+      const io = deps.io ?? new TerminalHost({ alternateScreen: true })
+      io.start()
+      try {
+        const theme = getUITheme({ color: io.isTty })
+        await runTuiDemo(io, theme)
+        return { exitCode: 0, plan: basePlan }
+      } finally {
+        io.stop()
+      }
     }
 
     const io = deps.io ?? new TerminalHost({ alternateScreen: true })
@@ -532,6 +547,7 @@ export async function chatRun(
                   brief: t.description || t.title,
                   acceptanceCriteria: t.acceptanceCriteria,
                   assigneeMuseId: muse.id,
+                  writeScope: t.writeScope,
                 })
                 idMap.set(t.id, admitted.id)
               }

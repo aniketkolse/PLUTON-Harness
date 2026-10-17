@@ -117,4 +117,45 @@ describe('renderFullScreenFrame', () => {
 
     expect(frame.lines.some((l) => l.includes('Terminal too small'))).toBe(true)
   })
+
+  it('renders pirate ship brand header and live status bar when brandHeader is true', () => {
+    const frame = renderFullScreenFrame({
+      header: {
+        projectName: 'pluton-harness',
+        rootDir: 'Y:/Pluton',
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'claude-3-7-sonnet',
+        version: '0.1.0',
+      },
+      transcriptLines: ['Welcome aboard!'],
+      editor: { text: '', cursor: 0 },
+      statusView: {
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'claude-3-7-sonnet',
+        busy: false,
+        run: null,
+        approvalsPending: 0,
+        usage: null,
+      },
+      columns: 129,
+      rows: 48,
+      theme: colored,
+      brandHeader: true,
+      mode: 'chat',
+      contextPct: 42,
+      cost: 0.04,
+      museCount: 3,
+    })
+
+    expect(frame.lines.length).toBe(48)
+    const text = frame.lines.join('\n')
+    const plain = stripAnsi(text)
+    expect(plain).toContain('PLUTON')
+    expect(plain).toMatch(/☠|X/)
+    expect(plain).toContain('v0.1.0')
+    expect(plain).toContain('Context: 42%')
+    expect(plain).toContain('/help')
+  })
 })

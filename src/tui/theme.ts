@@ -80,6 +80,9 @@ const ASCII_ICONS = {
   ship: '~^~',
 }
 
+export type { UITheme, UIRole, UIIcon, ColorLevel, BoxChars } from '../ui/theme.ts'
+export { PALETTE, getUITheme } from '../ui/theme.ts'
+
 export function createTheme(opts: { color?: boolean } = {}): Theme {
   let enabled: boolean
   if (opts.color !== undefined) {

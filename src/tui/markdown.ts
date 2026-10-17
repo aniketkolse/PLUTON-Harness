@@ -5,12 +5,14 @@
 
 import type { Theme } from './theme.ts'
 import { displayWidth, wrapText } from './width.ts'
+import { sanitizeTerminalText } from './sanitize.ts'
 
 export function renderMarkdown(markdown: string, maxWidth: number, theme: Theme): string[] {
   if (!markdown) return []
   if (maxWidth <= 0) return ['']
 
-  const lines = markdown.split(/\r?\n/)
+  const sanitized = sanitizeTerminalText(markdown)
+  const lines = sanitized.split(/\r?\n/)
   const result: string[] = []
 
   let inCodeBlock = false

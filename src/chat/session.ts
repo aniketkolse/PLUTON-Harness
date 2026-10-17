@@ -621,7 +621,7 @@ export class ChatSession {
         this.viewState = applyEngineEvent(this.viewState, ev)
 
         if (ev.kind === 'tool') {
-          const toolId = ev.callId ?? ev.name
+          const toolId = ev.callId ?? `${ev.name}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
           let act = this.inFlightTools.get(toolId)
           if (!act) {
             act = createToolActivity({
@@ -633,17 +633,7 @@ export class ChatSession {
           }
           if (ev.phase === 'start') {
             this.inFlightTools.set(toolId, act)
-            if (this.viewState.toolExpanded) {
-              const lines = renderToolActivity(
-                act,
-                true,
-                this.deps.io.size().columns,
-                this.theme,
-              )
-              for (const line of lines) {
-                this.commitLine(line)
-              }
-            }
+            // inFlightTools handles live viewport rendering during execution
           } else {
             const finishedAct = updateToolActivity(act, {
               status: ev.isError ? 'failed' : 'succeeded',
@@ -875,12 +865,20 @@ export class ChatSession {
             ownerSlug = assignee?.slug
           }
 
+          let verificationSummary: string | undefined
+          if (t.result && typeof t.result === 'object' && 'verificationSummary' in t.result) {
+            verificationSummary = String((t.result as Record<string, unknown>)['verificationSummary'])
+          }
+
           tasks.push({
             id: t.id,
             title: t.title,
             state: taskState,
             ownerMuseSlug: ownerSlug,
             dependencies: depMap.get(t.id),
+            writeScope: t.writeScope,
+            retries: t.attempt > 0 ? t.attempt : undefined,
+            verificationSummary,
           })
         }
       } catch {
@@ -932,11 +930,24 @@ export class ChatSession {
       summary: e.summary,
     }))
 
+    let usage: OrchestraInspectorData['usage'] = undefined
+    if (this.viewState.run?.id) {
+      const u = this.deps.store.getRunUsage(this.viewState.run.id)
+      if (u.totalInputTokens > 0 || u.totalOutputTokens > 0) {
+        usage = {
+          totalInputTokens: u.totalInputTokens,
+          totalOutputTokens: u.totalOutputTokens,
+          totalCostUsd: u.totalCostUsd,
+        }
+      }
+    }
+
     return {
       muses,
       tasks,
       approvals,
       events,
+      usage,
     }
   }
 
@@ -999,6 +1010,14 @@ export class ChatSession {
     const orchestraData = this.buildOrchestraData()
     const firstApproval = this.firstInboxApproval()
 
+    let contextPct: number | undefined
+    if (this.viewState?.usage) {
+      const totalTokens = this.viewState.usage.inputTokens + this.viewState.usage.outputTokens
+      if (totalTokens > 0) {
+        contextPct = Math.min(100, Math.round((totalTokens / 200000) * 100))
+      }
+    }
+
     return renderFullScreenFrame({
       header,
       transcriptLines: activeTranscript,
@@ -1018,6 +1037,9 @@ export class ChatSession {
       rows,
       theme: this.theme,
       inspectorOpen: this.viewState.inspectorOpen,
+      brandHeader: true,
+      mode: 'chat',
+      contextPct,
     })
   }
 
