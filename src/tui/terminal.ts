@@ -28,6 +28,7 @@ export class TerminalHost implements ChatIo {
   private readonly throttleMs: number
 
   private liveRows = 0
+  private parkedRow = 0
   private pendingFrame: { lines: string[]; cursor: { row: number; col: number } } | null = null
   private throttleTimer: NodeJS.Timeout | null = null
   private started = false
@@ -93,10 +94,8 @@ export class TerminalHost implements ChatIo {
   private renderFrame(frame: { lines: string[]; cursor: { row: number; col: number } }): void {
     let buf = ''
     if (this.liveRows > 0) {
-      if (this.liveRows > 1) {
-        buf += `\x1b[${this.liveRows - 1}A`
-      } else {
-        buf += '\r'
+      if (this.parkedRow > 0) {
+        buf += `\x1b[${this.parkedRow}A`
       }
       buf += '\r\x1b[J'
     }
@@ -104,13 +103,17 @@ export class TerminalHost implements ChatIo {
     if (frame.lines.length > 0) {
       buf += frame.lines.join('\n')
       buf += '\r'
-      if (frame.cursor.row < frame.lines.length - 1) {
-        const up = frame.lines.length - 1 - frame.cursor.row
+      const targetRow = Math.max(0, Math.min(frame.lines.length - 1, frame.cursor.row))
+      if (targetRow < frame.lines.length - 1) {
+        const up = frame.lines.length - 1 - targetRow
         buf += `\x1b[${up}A`
       }
       if (frame.cursor.col > 0) {
         buf += `\x1b[${frame.cursor.col}C`
       }
+      this.parkedRow = targetRow
+    } else {
+      this.parkedRow = 0
     }
 
     this.liveRows = frame.lines.length
@@ -183,6 +186,9 @@ export class TerminalHost implements ChatIo {
     if ((this.stdin as any)?.isTTY && typeof (this.stdin as any).setRawMode === 'function') {
       try {
         ;(this.stdin as any).setRawMode(false)
+        if (typeof (this.stdin as any).pause === 'function') {
+          ;(this.stdin as any).pause()
+        }
       } catch {
         // ignore
       }

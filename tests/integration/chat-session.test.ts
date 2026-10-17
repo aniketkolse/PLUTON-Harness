@@ -208,6 +208,54 @@ describe('ChatSession interactive loop', () => {
     await runPromise
   })
 
+  it('handles Ctrl+C progression: clears buffer, interrupts busy turn, and double-press exits', async () => {
+    const chatSessionRow = store.createChatSession({ projectId, museId: muse.id })
+    const adapter = new MockEngineAdapter({
+      script: [
+        {
+          delayMs: 200,
+          events: [{ kind: 'text', text: 'Processing...' }],
+        },
+      ],
+    })
+
+    const session = new ChatSession({
+      store,
+      projectId,
+      rootDir,
+      muse,
+      adapter,
+      io,
+      session: chatSessionRow,
+      mcpServers: [],
+    })
+
+    await session.start()
+    const runPromise = session.run()
+
+    // 1. Text in buffer -> Ctrl+C clears it
+    io.type('some pending draft')
+    io.press('c', { ctrl: true })
+    const lastFrame = io.frames[io.frames.length - 1]
+    expect(lastFrame?.lines.join('\n')).not.toContain('some pending draft')
+
+    // 2. Busy turn -> Ctrl+C interrupts
+    io.send('stream job')
+    await new Promise((r) => setTimeout(r, 30))
+    io.press('c', { ctrl: true })
+    await new Promise((r) => setTimeout(r, 50))
+    const msgs = store.listChatMessages(chatSessionRow.id)
+    expect(msgs[1]?.meta).toMatchObject({ interrupted: true })
+
+    // 3. Idle & empty -> first Ctrl+C prompts warning, second Ctrl+C exits
+    io.press('c', { ctrl: true })
+    expect(io.commits[io.commits.length - 1]).toContain('Press Ctrl+C again to exit')
+
+    io.press('c', { ctrl: true })
+    const exitCode = await runPromise
+    expect(exitCode).toBe(0)
+  })
+
   it('resumes previous session: passes resumeToken to adapter and commits stored transcript', async () => {
     const chatSessionRow = store.createChatSession({ projectId, museId: muse.id })
     store.updateChatSession(chatSessionRow.id, {

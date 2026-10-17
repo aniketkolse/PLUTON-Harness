@@ -131,7 +131,9 @@ describe('TerminalHost', () => {
     expect(stdout.written).toContain('\x1b[?2004h') // bracketed paste on
 
     stdout.clear()
+    const pauseSpy = vi.spyOn(stdin, 'pause')
     host.stop()
+    expect(pauseSpy).toHaveBeenCalled()
     expect(stdin.rawMode).toBe(false)
     expect(stdout.written).toContain('\x1b[?2004l') // bracketed paste off
     expect(stdout.written).toContain('\x1b[?25h') // show cursor
@@ -152,5 +154,33 @@ describe('TerminalHost', () => {
     stdout.columns = 120
     stdout.rows = 40
     expect(host.size()).toEqual({ columns: 120, rows: 40 })
+  })
+
+  it('tracks parked cursor row correctly when clearing multi-line frames with elevated cursor', () => {
+    host.start()
+    stdout.clear()
+
+    // Frame 1: 3 lines, cursor on row 0 (top line)
+    host.redraw({
+      lines: ['line 0', 'line 1', 'line 2'],
+      cursor: { row: 0, col: 0 },
+    })
+    vi.advanceTimersByTime(50)
+
+    // Verify frame 1 parked cursor at row 0 (moved up 2 from bottom)
+    expect(stdout.written).toContain('\x1b[2A')
+
+    stdout.clear()
+
+    // Frame 2: subsequent redraw must move up by parkedRow (0), NOT liveRows - 1 (2)
+    host.redraw({
+      lines: ['line 0 modified', 'line 1', 'line 2'],
+      cursor: { row: 0, col: 0 },
+    })
+    vi.advanceTimersByTime(50)
+
+    // The clear sequence should NOT move up 2A since cursor was already parked on row 0
+    expect(stdout.written).not.toContain('\x1b[2A\r\x1b[J')
+    expect(stdout.written).toContain('\r\x1b[J')
   })
 })

@@ -73,6 +73,8 @@ export class ChatSession {
   private pollTimer: NodeJS.Timeout | null = null
   private resolveExit: ((code: number) => void) | null = null
   private activeTurnPromise: Promise<void> | null = null
+  private sigintExitPending = false
+  private sigintTimer: NodeJS.Timeout | null = null
 
   constructor(deps: ChatSessionDeps) {
     this.deps = deps
@@ -234,11 +236,30 @@ export class ChatSession {
         break
 
       case 'clear-input':
-        this.editor = { ...this.editor, text: '', cursor: 0 }
-        this.scheduleRedraw()
+        if (this.editor.text.length > 0) {
+          this.editor = { ...this.editor, text: '', cursor: 0, pastes: [] }
+          this.sigintExitPending = false
+          this.scheduleRedraw()
+        } else if (this.viewState.busy) {
+          void this.engineSession?.interrupt()
+          this.sigintExitPending = false
+        } else {
+          if (this.sigintExitPending) {
+            void this.exit(0)
+          } else {
+            this.sigintExitPending = true
+            this.commitLine(this.theme.paint('dim', 'Press Ctrl+C again to exit'))
+            if (this.sigintTimer !== null) clearTimeout(this.sigintTimer)
+            this.sigintTimer = setTimeout(() => {
+              this.sigintExitPending = false
+            }, 2000)
+            this.scheduleRedraw()
+          }
+        }
         break
 
       case 'toggle-tools':
+        this.sigintExitPending = false
         this.viewState = { ...this.viewState, toolExpanded: !this.viewState.toolExpanded }
         this.scheduleRedraw()
         break
@@ -248,13 +269,19 @@ export class ChatSession {
         break
 
       case 'interrupt':
+        this.sigintExitPending = false
         if (this.viewState.busy) {
           void this.engineSession?.interrupt()
         }
         break
 
       case 'exit':
-        void this.exit(0)
+        if (this.editor.text.length === 0) {
+          void this.exit(0)
+        } else {
+          this.editor = editorDelete(this.editor)
+          this.scheduleRedraw()
+        }
         break
 
       case 'send': {
@@ -532,19 +559,26 @@ export class ChatSession {
     }
   }
 
-  private async exit(code: number): Promise<void> {
+  stop(): void {
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
-
+    if (this.sigintTimer !== null) {
+      clearTimeout(this.sigintTimer)
+      this.sigintTimer = null
+    }
     this.clearLive()
+    this.deps.io.stop()
+  }
+
+  private async exit(code: number): Promise<void> {
+    this.stop()
     try {
       await this.engineSession?.close()
     } catch {
       // best-effort
     }
-    this.deps.io.stop()
 
     if (this.resolveExit) {
       this.resolveExit(code)

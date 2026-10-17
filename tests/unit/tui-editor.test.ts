@@ -123,6 +123,16 @@ describe('bracketed-paste & paste collapsing', () => {
     const expanded = expandPastes(s)
     expect(expanded).toBe(longText)
   })
+
+  it('preserves $ patterns (like $1, $&, $$) in collapsed paste expansions', () => {
+    let s = initialEditor()
+    const codeWithDollar = Array.from({ length: 15 }, (_, i) => `echo "$${i + 1}" && cost=$$`).join('\n')
+    s = editorInsert(s, codeWithDollar)
+    expect(s.pastes.length).toBe(1)
+
+    const expanded = expandPastes(s)
+    expect(expanded).toBe(codeWithDollar)
+  })
 })
 
 describe('editorHistory', () => {

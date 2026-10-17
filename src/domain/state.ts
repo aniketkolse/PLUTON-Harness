@@ -112,6 +112,10 @@ export function isRunState(value: string): value is RunState {
   return (RUN_STATES as readonly string[]).includes(value)
 }
 
+export function isTerminalRunState(state: RunState): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled' || state === 'uncertain'
+}
+
 export function canRunTransition(from: RunState, to: RunState): boolean {
   return RUN_TRANSITIONS[from].includes(to)
 }

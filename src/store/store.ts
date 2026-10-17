@@ -6,6 +6,7 @@ import {
   assertTransition,
   isRunState,
   isTaskState,
+  isTerminalRunState,
   SANDBOX_STATES,
   TERMINAL_TASK_STATES,
   type RunState,
@@ -1017,6 +1018,13 @@ export class Store {
     return rows.map(rowToEvent)
   }
 
+  latestEventSeq(projectId: string): number {
+    const row = this.db
+      .prepare('SELECT seq FROM events WHERE project_id = ? ORDER BY seq DESC LIMIT 1')
+      .get(projectId) as { seq: number } | undefined
+    return row?.seq ?? 0
+  }
+
   /** One run's most recent events, newest first (readers look back from now). */
   listEvents(runId: string, opts: { type?: string; limit?: number } = {}): EventRecord[] {
     const limit = opts.limit ?? 50
@@ -1228,10 +1236,6 @@ export class Store {
 
     return { receipt: outcome.receipt, duplicate: outcome.kind === 'duplicate' }
   }
-}
-
-function isTerminalRunState(state: RunState): boolean {
-  return state === 'completed' || state === 'failed' || state === 'cancelled' || state === 'uncertain'
 }
 
 function isApprovalStatus(value: string): value is ApprovalStatus {

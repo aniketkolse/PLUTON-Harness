@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { findManager } from '../../config/load.ts'
 import { ConfigError, NotFoundError, ValidationError, InternalError } from '../../domain/errors.ts'
+import { isTerminalRunState } from '../../domain/state.ts'
 import type { ChatSessionRecord, MuseRecord } from '../../domain/models.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse } from '../../engines/approval.ts'
@@ -168,6 +169,7 @@ export async function chatRun(
     }
 
     let activeRunId: string | null = null
+    let activeRunDone: Promise<unknown> | null = null
     let sessionInstance: ChatSession | null = null
 
     const runStarter = deps.startRun
@@ -207,6 +209,7 @@ export async function chatRun(
             runDeps,
           )
           activeRunId = runId
+          activeRunDone = done
           void done.then(
             (summary) => {
               if (activeRunId === runId) {
@@ -267,8 +270,7 @@ export async function chatRun(
       }
     }
 
-    const existingEvents = store.eventsSince(projectId, 0, 1000)
-    let eventCursor = existingEvents.length > 0 ? existingEvents[existingEvents.length - 1]!.seq : 0
+    let eventCursor = store.latestEventSeq(projectId)
     const seenApprovalIds = new Set<string>()
 
     const defaultPoll = async () => {
@@ -407,6 +409,26 @@ export async function chatRun(
       await chatSession.start()
       exitCode = await chatSession.run()
     } finally {
+      chatSession.stop()
+      if (activeRunId !== null && activeRunId !== 'pending') {
+        try {
+          const run = store.getRun(activeRunId)
+          if (!isTerminalRunState(run.state)) {
+            store.setRunState(activeRunId, 'cancelled', { finalSummary: 'chat session exited' })
+            store.appendEvent({
+              projectId,
+              runId: activeRunId,
+              type: 'run.cancelled',
+              payload: { reason: 'chat session exited' },
+            })
+          }
+        } catch {
+          // best-effort
+        }
+      }
+      if (activeRunDone !== null) {
+        await Promise.race([activeRunDone, new Promise((r) => setTimeout(r, 1000))])
+      }
       await httpServer.stop()
     }
 

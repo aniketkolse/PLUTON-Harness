@@ -176,7 +176,7 @@ export function expandPastes(s: EditorState): string {
   let expanded = s.text
   for (const paste of s.pastes) {
     const placeholder = new RegExp(`\\[paste #${paste.id} \\+\\d+ lines\\]`, 'g')
-    expanded = expanded.replace(placeholder, paste.text)
+    expanded = expanded.replace(placeholder, () => paste.text)
   }
   return expanded
 }
