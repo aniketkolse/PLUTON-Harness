@@ -18,6 +18,7 @@ export interface AdmitTaskRequest {
   brief: string
   acceptanceCriteria: string[]
   assigneeMuseId: string | null
+  writeScope?: string[]
   /** Tasks that must reach `completed` before this task becomes ready. */
   dependsOn?: string[]
 }
@@ -85,6 +86,7 @@ export function admitTask(store: Store, req: AdmitTaskRequest, limits: AdmitTask
       brief: req.brief,
       acceptanceCriteria: req.acceptanceCriteria,
       assigneeMuseId: req.assigneeMuseId,
+      writeScope: req.writeScope,
     } satisfies NewTaskSpec)
 
     for (const depId of deps) {

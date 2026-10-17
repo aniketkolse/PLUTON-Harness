@@ -28,6 +28,8 @@ export const PERMISSIONS = [
   'run.inspect',
   'run.start',
   'approvals.list',
+  'scope.declare',
+  'scope.release',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
@@ -54,10 +56,12 @@ export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<MuseRole, readonly Permis
     'run.inspect',
     'run.start',
     'approvals.list',
+    'scope.declare',
+    'scope.release',
   ],
   researcher: ['project.read', 'research.report', 'diff.inspect'],
-  coder: ['project.read', 'project.write', 'tests.run', 'diff.inspect', 'verification.report'],
-  tester: ['project.read', 'tests.run', 'diff.inspect', 'verification.report', 'verification.run'],
+  coder: ['project.read', 'project.write', 'tests.run', 'diff.inspect', 'verification.report', 'scope.declare', 'scope.release'],
+  tester: ['project.read', 'tests.run', 'diff.inspect', 'verification.report', 'verification.run', 'scope.declare', 'scope.release'],
   reviewer: ['project.read', 'diff.inspect', 'tests.run', 'review.report'],
   custom: ['project.read'],
 }

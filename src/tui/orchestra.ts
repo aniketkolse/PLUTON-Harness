@@ -19,9 +19,13 @@ export interface MuseInspectorItem {
 export interface TaskInspectorItem {
   id: string
   title: string
-  state: 'pending' | 'running' | 'completed' | 'failed' | 'blocked'
+  state: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'verifying'
   ownerMuseSlug?: string
   dependencies?: string[]
+  writeScope?: string[]
+  conflictNote?: string
+  retries?: number
+  verificationSummary?: string
 }
 
 export interface EventInspectorItem {
@@ -35,6 +39,13 @@ export interface OrchestraInspectorData {
   tasks: TaskInspectorItem[]
   approvals: Array<{ id: string; action: string; reason: string }>
   events: EventInspectorItem[]
+  circuitTripped?: boolean
+  circuitReason?: string
+  usage?: {
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalCostUsd: number
+  }
   scrollOffset?: number
 }
 
@@ -110,6 +121,7 @@ export function renderOrchestraInspector(
       let stateBadge = '[..]'
       if (t.state === 'completed') stateBadge = theme.icon('check')
       else if (t.state === 'running') stateBadge = theme.icon('bullet')
+      else if (t.state === 'verifying') stateBadge = theme.paint('warn', '[v]')
       else if (t.state === 'failed') stateBadge = theme.icon('cross')
       else if (t.state === 'blocked') stateBadge = '[!]'
 
@@ -120,9 +132,40 @@ export function renderOrchestraInspector(
         const depLine = `     ${theme.paint('dim', `↳ needs: ${t.dependencies.join(', ')}`)}`
         addLine(depLine)
       }
+      if (t.writeScope && t.writeScope.length > 0) {
+        const scopeLine = `     ${theme.paint('dim', `✎ scope: ${t.writeScope.join(', ')}`)}`
+        addLine(scopeLine)
+      }
+      if (t.conflictNote) {
+        const conflictLine = `     ${theme.paint('warn', `⚠ conflict: ${t.conflictNote}`)}`
+        addLine(conflictLine)
+      }
+      if (t.retries && t.retries > 0) {
+        const retriesLine = `     ${theme.paint('warn', `↺ retries: ${t.retries}`)}`
+        addLine(retriesLine)
+      }
+      if (t.verificationSummary) {
+        const verifyLine = `     ${theme.paint('success', `✓ verified: ${t.verificationSummary}`)}`
+        addLine(verifyLine)
+      }
     }
   }
   addEmpty()
+
+  // Circuit Breaker Section (if tripped)
+  if (data.circuitTripped) {
+    addLine(theme.paint('error', `Circuit breaker: TRIPPED (${data.circuitReason ?? 'repeated errors'})`))
+    addEmpty()
+  }
+
+  // Usage & Budget Section (if provided)
+  if (data.usage) {
+    addLine(theme.paint('accent', 'Run usage & budget'))
+    addLine(
+      `  ${theme.paint('dim', 'Tokens:')} ${data.usage.totalInputTokens} in / ${data.usage.totalOutputTokens} out · ${theme.paint('dim', 'Cost:')} $${data.usage.totalCostUsd.toFixed(3)}`,
+    )
+    addEmpty()
+  }
 
   // 3. Pending Approvals Section
   addLine(theme.paint('accent', 'Pending approvals'))

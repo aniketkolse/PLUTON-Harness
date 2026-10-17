@@ -275,6 +275,48 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_plans_project ON plans(project_id, updated_at)`,
     ],
   },
+  {
+    version: 5,
+    name: 'multi-agent-reliability',
+    statements: [
+      `ALTER TABLE tasks ADD COLUMN write_scope_json TEXT NOT NULL DEFAULT '[]'`,
+      `CREATE TABLE file_leases (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        muse_id TEXT NOT NULL REFERENCES muses(id),
+        path TEXT NOT NULL,
+        symbols_json TEXT NOT NULL DEFAULT '[]',
+        acquired_at TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active'
+      )`,
+      `CREATE INDEX idx_file_leases_run ON file_leases(run_id, state)`,
+      `CREATE INDEX idx_file_leases_task ON file_leases(task_id, state)`,
+      `CREATE TABLE run_usage (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        muse_id TEXT NOT NULL REFERENCES muses(id),
+        task_id TEXT REFERENCES tasks(id),
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0.0,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_run_usage_run ON run_usage(run_id)`,
+      `CREATE TABLE verifications (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        verdict TEXT NOT NULL,
+        criteria_json TEXT NOT NULL DEFAULT '[]',
+        tamper_json TEXT NOT NULL DEFAULT '{}',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_verifications_task ON verifications(task_id)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

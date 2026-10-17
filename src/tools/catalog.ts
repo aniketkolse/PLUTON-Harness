@@ -18,6 +18,7 @@ const brief = z.string().min(1).max(60_000)
 const acceptanceCriteria = z.array(z.string().min(1).max(2_000)).max(50)
 const taskRef = z.string().min(3).max(64)
 const dependsOn = z.array(taskRef).max(50)
+const writeScope = z.array(z.string().min(1).max(500)).max(100)
 
 export const TOOL_SCHEMAS = {
   'task.create': z
@@ -27,6 +28,7 @@ export const TOOL_SCHEMAS = {
       acceptanceCriteria,
       assigneeMuseId: z.string().min(1).max(64),
       dependsOn: dependsOn.optional(),
+      writeScope: writeScope.optional(),
     })
     .strict(),
   'task.delegate': z
@@ -36,6 +38,18 @@ export const TOOL_SCHEMAS = {
       acceptanceCriteria,
       assigneeMuseId: z.string().min(1).max(64),
       dependsOn: dependsOn.optional(),
+      writeScope: writeScope.optional(),
+    })
+    .strict(),
+  'scope.declare': z
+    .object({
+      paths: z.array(z.string().min(1).max(500)).min(1).max(100),
+      symbols: z.record(z.string(), z.array(z.string().min(1).max(200))).optional(),
+    })
+    .strict(),
+  'scope.release': z
+    .object({
+      paths: z.array(z.string().min(1).max(500)).optional(),
     })
     .strict(),
   'task.inspect': z
@@ -175,6 +189,18 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     mutating: true,
     description:
       'Request that this run stops. Transitions the run state to cancelled where the state machine allows it and records your reason; in-flight attempts are wound down by the runtime.',
+  },
+  'scope.declare': {
+    permission: 'scope.declare',
+    mutating: true,
+    description:
+      'Declare intended file paths and symbols before modifying them. Prohibits conflicting concurrent edits and lockfile corruption across Muses.',
+  },
+  'scope.release': {
+    permission: 'scope.release',
+    mutating: true,
+    description:
+      'Release declared file paths so other Muses may acquire them after work is completed.',
   },
 }
 

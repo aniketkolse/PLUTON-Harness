@@ -146,6 +146,7 @@ export interface NewTaskSpec {
   brief: string
   acceptanceCriteria: string[]
   assigneeMuseId: string | null
+  writeScope?: string[]
 }
 
 export interface AppendEventInput {
@@ -429,9 +430,9 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO tasks (id, run_id, parent_task_id, root_task_id, depth, title, brief, acceptance_json,
-                              assignee_muse_id, state, attempt, workspace_id, engine_session_id, result_json,
-                              failure_json, created_at, started_at, completed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', 0, NULL, NULL, NULL, NULL, ?, NULL, NULL)`,
+                              write_scope_json, assignee_muse_id, state, attempt, workspace_id, engine_session_id,
+                              result_json, failure_json, created_at, started_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', 0, NULL, NULL, NULL, NULL, ?, NULL, NULL)`,
         )
         .run(
           id,
@@ -442,6 +443,7 @@ export class Store {
           spec.title,
           spec.brief,
           stringifyJson(spec.acceptanceCriteria),
+          stringifyJson(spec.writeScope ?? []),
           spec.assigneeMuseId,
           now,
         )
@@ -1345,6 +1347,200 @@ export class Store {
 
     return { receipt: outcome.receipt, duplicate: outcome.kind === 'duplicate' }
   }
+
+  // --- File Leases ---
+  recordLease(lease: {
+    id: string
+    runId: string
+    taskId: string
+    museId: string
+    path: string
+    symbols?: string[]
+    acquiredAt?: string
+    state?: 'active' | 'released'
+  }): void {
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO file_leases (id, run_id, task_id, muse_id, path, symbols_json, acquired_at, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        lease.id,
+        lease.runId,
+        lease.taskId,
+        lease.museId,
+        lease.path,
+        stringifyJson(lease.symbols ?? []),
+        lease.acquiredAt ?? now,
+        lease.state ?? 'active',
+      )
+  }
+
+  releaseLeasesForTask(taskId: string): string[] {
+    const rows = this.db.prepare(`SELECT path FROM file_leases WHERE task_id = ? AND state = 'active'`).all(taskId) as Row[]
+    this.db.prepare(`UPDATE file_leases SET state = 'released' WHERE task_id = ? AND state = 'active'`).run(taskId)
+    return rows.map((r) => str(r, 'path'))
+  }
+
+  listActiveLeases(runId: string): Array<{
+    id: string
+    runId: string
+    taskId: string
+    museId: string
+    path: string
+    symbols: string[]
+    acquiredAt: string
+    state: 'active' | 'released'
+  }> {
+    const rows = this.db
+      .prepare(`SELECT * FROM file_leases WHERE run_id = ? AND state = 'active' ORDER BY acquired_at ASC`)
+      .all(runId) as Row[]
+    return rows.map((r) => ({
+      id: str(r, 'id'),
+      runId: str(r, 'run_id'),
+      taskId: str(r, 'task_id'),
+      museId: str(r, 'muse_id'),
+      path: str(r, 'path'),
+      symbols: parseJsonText<string[]>(nstr(r, 'symbols_json'), []),
+      acquiredAt: str(r, 'acquired_at'),
+      state: str(r, 'state') as 'active' | 'released',
+    }))
+  }
+
+  reapOrphanedLeases(activeTaskIds: Set<string>): void {
+    const rows = this.db.prepare(`SELECT id, task_id FROM file_leases WHERE state = 'active'`).all() as Row[]
+    const stmt = this.db.prepare(`UPDATE file_leases SET state = 'released' WHERE id = ?`)
+    for (const r of rows) {
+      const taskId = str(r, 'task_id')
+      if (!activeTaskIds.has(taskId)) {
+        stmt.run(str(r, 'id'))
+      }
+    }
+  }
+
+  // --- Run Usage ---
+  recordUsage(input: {
+    id?: string
+    runId: string
+    museId: string
+    taskId?: string | null
+    inputTokens?: number
+    outputTokens?: number
+    cachedTokens?: number
+    costUsd?: number
+  }): void {
+    const id = input.id ?? newId('attempt')
+    this.db
+      .prepare(
+        `INSERT INTO run_usage (id, run_id, muse_id, task_id, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.runId,
+        input.museId,
+        input.taskId ?? null,
+        input.inputTokens ?? 0,
+        input.outputTokens ?? 0,
+        input.cachedTokens ?? 0,
+        input.costUsd ?? 0.0,
+        nowIso(),
+      )
+  }
+
+  getRunUsage(runId: string): {
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalCachedTokens: number
+    totalCostUsd: number
+    perMuse: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }>
+  } {
+    const rows = this.db
+      .prepare(`SELECT muse_id, input_tokens, output_tokens, cached_tokens, cost_usd FROM run_usage WHERE run_id = ?`)
+      .all(runId) as Row[]
+    let totalInputTokens = 0
+    let totalOutputTokens = 0
+    let totalCachedTokens = 0
+    let totalCostUsd = 0
+    const perMuse: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }> = {}
+
+    for (const r of rows) {
+      const museId = str(r, 'muse_id')
+      const inTok = num(r, 'input_tokens')
+      const outTok = num(r, 'output_tokens')
+      const cacheTok = num(r, 'cached_tokens')
+      const cost = typeof r['cost_usd'] === 'number' ? r['cost_usd'] : 0
+
+      totalInputTokens += inTok
+      totalOutputTokens += outTok
+      totalCachedTokens += cacheTok
+      totalCostUsd += cost
+
+      const entry = perMuse[museId] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 }
+      entry.inputTokens += inTok
+      entry.outputTokens += outTok
+      entry.cachedTokens += cacheTok
+      entry.costUsd += cost
+      perMuse[museId] = entry
+    }
+
+    return { totalInputTokens, totalOutputTokens, totalCachedTokens, totalCostUsd, perMuse }
+  }
+
+  // --- Verifications ---
+  recordVerification(input: {
+    id?: string
+    runId: string
+    taskId: string
+    verdict: string
+    criteria?: JsonValue
+    tamper?: JsonValue
+    evidence?: JsonValue
+  }): void {
+    const id = input.id ?? newId('attempt')
+    this.db
+      .prepare(
+        `INSERT INTO verifications (id, run_id, task_id, verdict, criteria_json, tamper_json, evidence_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.runId,
+        input.taskId,
+        input.verdict,
+        stringifyJson(input.criteria ?? []),
+        stringifyJson(input.tamper ?? {}),
+        stringifyJson(input.evidence ?? {}),
+        nowIso(),
+      )
+  }
+
+  getTaskVerification(taskId: string): {
+    id: string
+    runId: string
+    taskId: string
+    verdict: string
+    criteria: JsonValue
+    tamper: JsonValue
+    evidence: JsonValue
+    createdAt: string
+  } | null {
+    const row = this.db
+      .prepare(`SELECT * FROM verifications WHERE task_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(taskId) as Row | undefined
+    if (!row) return null
+    return {
+      id: str(row, 'id'),
+      runId: str(row, 'run_id'),
+      taskId: str(row, 'task_id'),
+      verdict: str(row, 'verdict'),
+      criteria: parseJsonText(nstr(row, 'criteria_json'), []),
+      tamper: parseJsonText(nstr(row, 'tamper_json'), {}),
+      evidence: parseJsonText(nstr(row, 'evidence_json'), {}),
+      createdAt: str(row, 'created_at'),
+    }
+  }
 }
 
 function isApprovalStatus(value: string): value is ApprovalStatus {
@@ -1431,6 +1627,7 @@ function rowToTask(r: Row): TaskRecord {
     title: str(r, 'title'),
     brief: str(r, 'brief'),
     acceptanceCriteria: parseJsonText<string[]>(nstr(r, 'acceptance_json'), []),
+    writeScope: parseJsonText<string[]>(nstr(r, 'write_scope_json'), []),
     assigneeMuseId: nstr(r, 'assignee_muse_id'),
     state,
     attempt: num(r, 'attempt'),

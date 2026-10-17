@@ -3,6 +3,7 @@ import { InternalError, NotFoundError, PolicyDeniedError, PlutonError } from '..
 import type { JsonValue } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import { WakeupRegistry } from '../orchestrator/wakeups.ts'
+import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
 import { getToolDef, toolInfosForMcp } from './catalog.ts'
 import type { McpToolCallResult, McpToolHost, McpToolInfo } from './mcp-server.ts'
 import { TOOL_HANDLERS, type ToolEnv } from './handlers.ts'
@@ -96,6 +97,7 @@ export interface PlutonToolBridgeOptions {
   /** The caller's own task when its session is task-scoped (null for the manager or operator). */
   callerTaskId?: string | null
   limits: ToolBridgeLimits
+  leaseManager?: FileLeaseManager
   /** Shared per-run registry; the runtime notifies it when tasks reach terminal states. */
   wakeups?: WakeupRegistry
   now?: () => number
@@ -174,6 +176,7 @@ export class PlutonToolBridge implements McpToolHost {
         callerMuseId: opts.callerMuseId,
         callerTaskId: opts.callerTaskId ?? null,
         limits: opts.limits,
+        leaseManager: opts.leaseManager,
         wakeups: opts.wakeups ?? new WakeupRegistry(),
         now: this.now,
       }

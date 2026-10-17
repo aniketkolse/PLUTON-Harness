@@ -16,6 +16,10 @@ import type { GitWorkspaceManager } from '../workspace/manager.ts'
 import { KeyedMutex } from './mutex.ts'
 import { notifyTaskSettled, taskAncestorIds, WakeupRegistry, wakeupChannelFor } from './wakeups.ts'
 import { PlutonToolBridge, type ToolBridgeLimits } from '../tools/bridge.ts'
+import { FileLeaseManager } from './lease-manager.ts'
+import { CircuitBreaker } from './circuit-breaker.ts'
+import { UsageLedger } from './usage-ledger.ts'
+import { newId } from '../domain/ids.ts'
 
 /**
  * Run supervisor (Phase 6, ADR-0006/0007).
@@ -66,6 +70,10 @@ export interface SupervisorOptions {
   wakeups?: WakeupRegistry
   now?: () => number
   diagnostic?: (line: string) => void
+  leaseManager?: FileLeaseManager
+  circuitBreaker?: CircuitBreaker
+  usageLedger?: UsageLedger
+  maxRetriesPerTask?: number
 }
 
 export interface RunOutcome {
@@ -182,6 +190,10 @@ export class RunSupervisor {
   private readonly wakeups: WakeupRegistry
   private readonly now: () => number
   private readonly diagnostic: (line: string) => void
+  readonly leaseManager: FileLeaseManager
+  readonly circuitBreaker: CircuitBreaker
+  readonly usageLedger: UsageLedger
+  private readonly maxRetriesPerTask: number
   private readonly mutex = new KeyedMutex()
   private bridgeInstance: PlutonToolBridge | null = null
   private timedOut = false
@@ -209,6 +221,10 @@ export class RunSupervisor {
     this.wakeups = opts.wakeups ?? new WakeupRegistry()
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})
+    this.leaseManager = opts.leaseManager ?? new FileLeaseManager()
+    this.circuitBreaker = opts.circuitBreaker ?? new CircuitBreaker()
+    this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
+    this.maxRetriesPerTask = opts.maxRetriesPerTask ?? 2
   }
 
   /** The manager session's bridge (in-process; the HTTP/stdio transports wrap the same bridge). */
@@ -223,6 +239,7 @@ export class RunSupervisor {
         callerMuseId: run.managerMuseId,
         callerTaskId: null,
         limits: this.limits,
+        leaseManager: this.leaseManager,
         wakeups: this.wakeups,
         now: this.now,
       })
@@ -303,6 +320,22 @@ export class RunSupervisor {
               context?.museId,
             )
           },
+          onUsage: (u) => {
+            if (context?.museId) {
+              const res = this.usageLedger.record({
+                museId: context.museId,
+                taskId: context.taskId,
+                inputTokens: u.inputTokens,
+                outputTokens: u.outputTokens,
+                cachedTokens: 0,
+                costUsd: u.costUsd,
+              })
+              if (!res.withinBudget) {
+                this.diagnostic(`usage budget exceeded: ${res.limitExceededReason ?? 'hard limit'}`)
+                void session.interrupt()
+              }
+            }
+          },
         })
       }
     } catch (e) {
@@ -332,6 +365,7 @@ export class RunSupervisor {
       onResult: (r: { outcome: PromptOutcome['outcome']; summary?: string }) => void
       onError: (code: string) => void
       onApproval?: (a: { requestId: string; description: string }) => void
+      onUsage?: (u: { inputTokens: number; outputTokens: number; costUsd: number }) => void
     },
   ): void {
     switch (ev.kind) {
@@ -347,8 +381,15 @@ export class RunSupervisor {
       case 'approval_request':
         hooks.onApproval?.({ requestId: ev.requestId, description: ev.description })
         break
+      case 'usage':
+        hooks.onUsage?.({
+          inputTokens: ev.inputTokens ?? 0,
+          outputTokens: ev.outputTokens ?? 0,
+          costUsd: ev.costUsd ?? 0,
+        })
+        break
       default:
-        break // status/tool/usage events: not needed for run decisions yet
+        break // status/tool events
     }
   }
 
@@ -440,9 +481,6 @@ export class RunSupervisor {
           { taskId: task.id, museId: muse.id },
         )
       } finally {
-        // Close on EVERY exit path: a throwing prompt previously skipped the
-        // close and leaked a live engine process in the container
-        // (container-mode smoke finding, 2026-10-17).
         await session.close().catch((e: unknown) => {
           this.diagnostic(`task ${task.id}: session close failed: ${e instanceof Error ? e.message : String(e)}`)
         })
@@ -458,12 +496,9 @@ export class RunSupervisor {
       if (out.outcome === 'success') {
         const verifying = store.setTaskState(task.id, 'verifying', { result: resultPayload })
         if (this.verificationConfigured) {
-          // Work is done; only the operator's verification gate can close the
-          // task. Waiters are woken NOW so they never deadlock on `completed`
-          // (host-mode smoke finding: the manager waited out the whole run).
           this.appendEvent('task.awaiting_verification', { outcome: out.outcome }, task.id)
           this.notifySettled(verifying)
-          return // Phase-7 gate completes it; the dispatch loop leaves it here honestly
+          return
         }
         const done = store.setTaskState(task.id, 'completed')
         this.appendEvent('task.completed', { outcome: out.outcome, summary: out.summary }, task.id)
@@ -471,7 +506,25 @@ export class RunSupervisor {
         return
       }
       if (out.outcome === 'failure') {
-        this.failTask(task.id, resultPayload)
+        const retryDecision = this.circuitBreaker.recordFailure(task.id, resultPayload)
+        if (retryDecision.shouldRetry && task.attempt < this.maxRetriesPerTask) {
+          const retrying = store.setTaskState(task.id, 'queued', {
+            attempt: task.attempt + 1,
+            failure: resultPayload,
+          })
+          this.appendEvent(
+            'task.retry_scheduled',
+            {
+              taskId: task.id,
+              attempt: retrying.attempt,
+              reason: retryDecision.reason,
+            },
+            task.id,
+          )
+          this.wakeups.notify(this.managerChannel(), task.id, retrying.state)
+          return
+        }
+        this.failTask(task.id, { ...resultPayload, reason: retryDecision.reason })
         return
       }
       if (out.outcome === 'cancelled') {
@@ -480,7 +533,6 @@ export class RunSupervisor {
         this.notifySettled(cancelled)
         return
       }
-      // unknown — never replay automatically; a human/manager decides what next.
       const unknown = store.setTaskState(task.id, 'unknown_outcome', { failure: resultPayload })
       this.appendEvent('task.unknown_outcome', { outcome: 'unknown', summary: out.summary }, task.id)
       this.notifySettled(unknown)
@@ -488,12 +540,63 @@ export class RunSupervisor {
       const message = e instanceof Error ? e.message : String(e)
       this.diagnostic(`task ${task.id} failed: ${message}`)
       this.failTask(task.id, { code: 'task_setup_failed', message: message.slice(0, 2_000) })
+    } finally {
+      const released = this.leaseManager.releaseScope(task.id)
+      this.store.releaseLeasesForTask(task.id)
+      if (released.length > 0) {
+        this.appendEvent('scope.released', { taskId: task.id, paths: released }, task.id)
+        this.wakeups.notify(this.managerChannel(), task.id, task.state)
+      }
     }
   }
 
   private dispatchReadyTasks(): void {
+    if (this.circuitBreaker.isTripped()) {
+      this.diagnostic(this.circuitBreaker.getTripReason() ?? 'circuit breaker tripped')
+      return
+    }
     for (const task of this.store.listReadyTasks(this.runId)) {
       if (this.inFlight.size >= this.maxConcurrentWorkers) return
+
+      const writeScope = task.writeScope ?? []
+      let hasConflict = false
+      for (const p of writeScope) {
+        const conflict = this.leaseManager.hasConflict(this.runId, task.id, p)
+        if (conflict.conflicted) {
+          hasConflict = true
+          this.appendEvent(
+            'task.blocked_by_lease',
+            { taskId: task.id, path: p, reason: conflict.reason ?? 'lease conflict' },
+            task.id,
+          )
+          break
+        }
+      }
+      if (hasConflict) {
+        continue
+      }
+
+      if (writeScope.length > 0) {
+        const declared = this.leaseManager.declareScope(
+          this.runId,
+          task.id,
+          task.assigneeMuseId ?? 'unassigned',
+          writeScope,
+        )
+        if (declared.conflicts.length > 0) {
+          continue
+        }
+        for (const path of declared.acquired) {
+          this.store.recordLease({
+            id: newId('attempt'),
+            runId: this.runId,
+            taskId: task.id,
+            museId: task.assigneeMuseId ?? 'unassigned',
+            path,
+          })
+        }
+      }
+
       const key = task.assigneeMuseId ?? `unassigned:${task.id}`
       const promise = this.mutex.withLock(key, () => this.executeTask(task))
       this.inFlight.set(task.id, promise)
@@ -562,6 +665,20 @@ export class RunSupervisor {
       this.appendEvent('run.started', { goal: run.goal, managerMuseId: run.managerMuseId })
     }
 
+    // Interrupted run recovery: reap orphaned leases and recover unowned running tasks
+    const activeRunning = new Set(
+      this.store.listTasks(this.runId).filter((t) => ACTIVELY_RUNNING.has(t.state)).map((t) => t.id),
+    )
+    this.leaseManager.recoverLeases(activeRunning)
+    this.store.reapOrphanedLeases(activeRunning)
+
+    for (const t of this.store.listTasks(this.runId)) {
+      if (t.state === 'running' && !this.inFlight.has(t.id)) {
+        this.store.setTaskState(t.id, 'queued', { attempt: t.attempt + 1 })
+        this.appendEvent('task.recovered', { taskId: t.id, priorState: 'running' }, t.id)
+      }
+    }
+
     let managerOutcome: PromptOutcome | null = null
     let managerError: string | null = null
     const managerCompletion = this.runManagerSession().then(
@@ -575,7 +692,18 @@ export class RunSupervisor {
 
     for (;;) {
       const current = this.store.getRun(this.runId)
-      if (TERMINAL_RUN_STATES.has(current.state)) break // operator stopped/finished it; respect the record
+      if (TERMINAL_RUN_STATES.has(current.state)) {
+        for (const t of this.store.listTasks(this.runId)) {
+          if (!TERMINAL_TASK_STATES.has(t.state)) {
+            this.store.setTaskState(t.id, 'cancelled', {
+              failure: { code: 'run_cancelled', reason: `run is ${current.state}` },
+            })
+            this.leaseManager.releaseScope(t.id)
+            this.store.releaseLeasesForTask(t.id)
+          }
+        }
+        break
+      }
       this.dispatchReadyTasks()
       const managerSettled = managerOutcome !== null || managerError !== null
       if (this.allQuiescent(managerSettled)) break

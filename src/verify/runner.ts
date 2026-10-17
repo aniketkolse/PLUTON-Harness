@@ -6,6 +6,7 @@ import type { JsonValue } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState } from '../domain/state.ts'
 import type { Store } from '../store/store.ts'
 import { run } from '../util/exec.ts'
+import { IndependentVerifier } from './independent.ts'
 
 /**
  * Verification gates (Phase 7; ADR-0006 durability, ADR-0007 policy): the only
@@ -208,13 +209,24 @@ export interface TaskVerdict {
   summary: string
 }
 
+export interface ApplyVerificationOptions {
+  diffText?: string
+  changedFiles?: string[]
+  maxRepairAttempts?: number
+  verifier?: IndependentVerifier
+}
+
 /**
  * Apply the verification verdict for one task from its durable evidence rows.
  * Refuses when the task is not `verifying` or when no check was ever recorded
  * — no evidence, no verdict. `pending` checks count as unmet: an unrun check
  * can never be green.
  */
-export function applyTaskVerificationVerdict(store: Store, taskId: string): TaskVerdict {
+export function applyTaskVerificationVerdict(
+  store: Store,
+  taskId: string,
+  opts?: ApplyVerificationOptions,
+): TaskVerdict {
   const task = store.getTask(taskId)
   if (task.state !== 'verifying') {
     throw new ValidationError(
@@ -230,26 +242,117 @@ export function applyTaskVerificationVerdict(store: Store, taskId: string): Task
   const run = store.getRun(task.runId)
   const unmet = checks.filter((c) => c.status !== 'passed')
 
-  if (unmet.length === 0) {
+  const verifier = opts?.verifier ?? new IndependentVerifier()
+  const report = verifier.verifyCriteria(
+    run.goal,
+    task.acceptanceCriteria,
+    {
+      changedFiles: opts?.changedFiles ?? [],
+      gitDiff: opts?.diffText ?? '',
+      checkResults: checks.map((c) => ({
+        name: c.name,
+        command: c.command,
+        status: c.status === 'passed' ? 'passed' : 'failed',
+        exitCode: c.exitCode,
+      })),
+      workerClaims:
+        typeof task.result === 'object' && task.result !== null
+          ? (task.result as { outcome?: string; summary?: string })
+          : undefined,
+    },
+  )
+
+  store.recordVerification({
+    runId: task.runId,
+    taskId,
+    verdict: report.verdict,
+    criteria: report.criteria as unknown as JsonValue,
+    tamper: { tampered: report.tamperDetected, reasons: report.tamperReasons } as JsonValue,
+    evidence: { sensitiveExposure: report.sensitiveExposure, summary: report.summary } as JsonValue,
+  })
+
+  if (report.tamperDetected) {
+    store.appendEvent({
+      projectId: run.projectId,
+      runId: task.runId,
+      taskId,
+      type: 'verification.tamper_detected',
+      payload: { reasons: report.tamperReasons },
+    })
+    const failure: JsonValue = { code: 'tamper_detected', reasons: report.tamperReasons }
+    store.setTaskState(taskId, 'failed', { failure })
+    return {
+      taskId,
+      state: 'failed',
+      passed: false,
+      summary: 'Verification rejected: test tampering detected',
+    }
+  }
+
+  if (report.sensitiveExposure.length > 0) {
+    store.appendEvent({
+      projectId: run.projectId,
+      runId: task.runId,
+      taskId,
+      type: 'verification.sensitive_exposure',
+      payload: { files: report.sensitiveExposure },
+    })
+    const failure: JsonValue = { code: 'sensitive_exposure', files: report.sensitiveExposure }
+    store.setTaskState(taskId, 'failed', { failure })
+    return {
+      taskId,
+      state: 'failed',
+      passed: false,
+      summary: 'Verification rejected: sensitive file exposure',
+    }
+  }
+
+  if (unmet.length === 0 && report.verdict === 'verified') {
     const prior =
       task.result !== null && typeof task.result === 'object' && !Array.isArray(task.result)
         ? (task.result as Record<string, JsonValue>)
         : {}
     store.setTaskState(taskId, 'completed', {
-      result: { ...prior, verifiedBy: checks.map((c) => c.id) },
+      result: { ...prior, verifiedBy: checks.map((c) => c.id), verificationSummary: report.summary },
     })
     store.appendEvent({
       projectId: run.projectId,
       runId: task.runId,
       taskId,
       type: 'task.completed',
-      payload: { via: 'verification', checks: checks.length },
+      payload: { via: 'verification', checks: checks.length, summary: report.summary },
     })
     return {
       taskId,
       state: 'completed',
       passed: true,
-      summary: `${String(checks.length)}/${String(checks.length)} checks passed`,
+      summary: `${String(checks.length)}/${String(checks.length)} checks passed (${report.summary})`,
+    }
+  }
+
+  // Bounded repair cycle
+  const maxRepairs = opts?.maxRepairAttempts ?? 0
+  if (maxRepairs > 0 && task.attempt < maxRepairs) {
+    const failure: JsonValue = {
+      code: 'verification_failed',
+      checks: unmet.map((c) => ({ name: c.name, status: c.status, exitCode: c.exitCode })),
+      unverifiedCriteria: report.criteria
+        .filter((c) => c.status !== 'verified')
+        .map((c) => ({ criterion: c.criterion, reason: c.evidence })),
+    }
+    store.setTaskState(taskId, 'queued', { attempt: task.attempt + 1, failure })
+    store.appendEvent({
+      projectId: run.projectId,
+      runId: task.runId,
+      taskId,
+      type: 'verification.repair_scheduled',
+      payload: { attempt: task.attempt + 1, maxRepairs, failedChecks: unmet.map((c) => c.name) },
+    })
+    return {
+      taskId,
+      state: 'failed',
+      passed: false,
+      summary: `Verification failed (${unmet.length} checks unmet); repair attempt ${task.attempt + 1} of ${maxRepairs} scheduled`,
     }
   }
 

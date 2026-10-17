@@ -1,6 +1,6 @@
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
-import { ConflictError, ExternalToolError, NotFoundError, PolicyDeniedError, ValidationError } from '../domain/errors.ts'
+import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, ValidationError } from '../domain/errors.ts'
 import type { JsonValue, MuseRecord, TaskRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
@@ -9,6 +9,7 @@ import type { Store } from '../store/store.ts'
 import { firstLine, run } from '../util/exec.ts'
 import { TOOL_SCHEMAS, type PlutonToolName } from './catalog.ts'
 import type { ToolBridgeLimits } from './bridge.ts'
+import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
 
 /**
  * Tool implementations. Every handler receives the validated server-side
@@ -27,6 +28,7 @@ export interface ToolEnv {
   limits: ToolBridgeLimits
   wakeups: WakeupRegistry
   now: () => number
+  leaseManager?: FileLeaseManager
   /**
    * Set while the caller is still connected and the host is running; aborted
    * when the client disconnects or the runtime shuts the bridge down. Long
@@ -210,6 +212,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
         acceptanceCriteria: a.acceptanceCriteria,
         assigneeMuseId: assignee.id,
         dependsOn: a.dependsOn,
+        writeScope: a.writeScope,
       },
       { maxChildrenPerTask: env.limits.maxChildrenPerTask, maxBriefChars: env.limits.maxBriefChars },
     )
@@ -255,6 +258,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
         acceptanceCriteria: a.acceptanceCriteria,
         assigneeMuseId: assignee.id,
         dependsOn: a.dependsOn,
+        writeScope: a.writeScope,
       },
       { maxChildrenPerTask: env.limits.maxChildrenPerTask, maxBriefChars: env.limits.maxBriefChars },
     )
@@ -622,5 +626,56 @@ export const TOOL_HANDLERS: ToolHandlers = {
       payload: { reason: a.reason, requestedBy: env.callerMuseId },
     })
     return { runId: updated.id, state: updated.state }
+  },
+
+  'scope.declare': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['scope.declare'].parse(args)
+    if (!env.callerTaskId) {
+      throw new ValidationError('scope.declare must be called within a task-scoped session')
+    }
+    if (!env.leaseManager) {
+      throw new InternalError('leaseManager is not configured on ToolEnv')
+    }
+    const res = env.leaseManager.declareScope(env.runId, env.callerTaskId, env.callerMuseId, a.paths, a.symbols)
+    if (res.conflicts.length > 0) {
+      const explanation = res.conflicts.map((c) => c.reason).join('; ')
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: env.callerTaskId,
+        museId: env.callerMuseId,
+        type: 'scope.conflict',
+        payload: { paths: a.paths, conflicts: res.conflicts as unknown as JsonValue, explanation },
+      })
+      return { status: 'rejected', conflicts: res.conflicts as unknown as JsonValue, explanation }
+    }
+    env.store.appendEvent({
+      projectId: env.projectId,
+      runId: env.runId,
+      taskId: env.callerTaskId,
+      museId: env.callerMuseId,
+      type: 'scope.declared',
+      payload: { acquired: res.acquired, symbols: (a.symbols ?? null) as JsonValue },
+    })
+    return { status: 'acquired', acquired: res.acquired }
+  },
+
+  'scope.release': async (env, _args): Promise<JsonValue> => {
+    if (!env.callerTaskId) {
+      throw new ValidationError('scope.release must be called within a task-scoped session')
+    }
+    if (!env.leaseManager) {
+      throw new InternalError('leaseManager is not configured on ToolEnv')
+    }
+    const released = env.leaseManager.releaseScope(env.callerTaskId)
+    env.store.appendEvent({
+      projectId: env.projectId,
+      runId: env.runId,
+      taskId: env.callerTaskId,
+      museId: env.callerMuseId,
+      type: 'scope.released',
+      payload: { released },
+    })
+    return { status: 'released', released }
   },
 }

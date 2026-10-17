@@ -101,6 +101,7 @@ export interface TaskRecord {
   title: string
   brief: string
   acceptanceCriteria: string[]
+  writeScope?: string[]
   assigneeMuseId: string | null
   state: TaskState
   attempt: number

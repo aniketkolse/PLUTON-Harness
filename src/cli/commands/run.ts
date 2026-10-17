@@ -284,6 +284,7 @@ export function createRunSupervisor(args: {
               callerMuseId: muse.id,
               callerTaskId: taskId,
               limits,
+              leaseManager: supervisor.leaseManager,
               wakeups,
             })
       const { token } = http.register(bridge, {

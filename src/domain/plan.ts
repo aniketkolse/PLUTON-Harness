@@ -16,6 +16,7 @@ export interface PlanTask {
   assigneeRole: string
   dependsOn: string[]
   acceptanceCriteria: string[]
+  writeScope?: string[]
 }
 
 export interface PlanRecord {

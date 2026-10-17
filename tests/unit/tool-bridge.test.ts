@@ -220,6 +220,8 @@ describe('PlutonToolBridge — identity and permissions', () => {
     expect(manager.listTools().map((t) => t.name)).toEqual([
       'task.create',
       'task.delegate',
+      'scope.declare',
+      'scope.release',
       'task.inspect',
       'task.wait',
       'task.get_result',
