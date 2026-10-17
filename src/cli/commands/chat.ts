@@ -30,6 +30,9 @@ import { decideApproval } from './approvals.ts'
 import { resolveMuseByRef } from './mcp.ts'
 import { runLine } from './status.ts'
 import { containerAdapterFor, prepareContainerMode, startRunInBackground, type RunDeps } from './run.ts'
+import { collectDoctorChecks } from './doctor.ts'
+import { PlanManager } from '../../plan/manager.ts'
+import { renderPlanGraph } from '../../tui/plan-graph.ts'
 import { defaultSlashHelp, type SlashContext } from '../../chat/commands.ts'
 
 export interface ChatCommandOptions {
@@ -464,6 +467,279 @@ export async function chatRun(
           const msg = err instanceof Error ? err.message : String(err)
           return `Failed to switch model: ${msg}`
         }
+      },
+      plan: async (args?: string) => {
+        const planMgr = new PlanManager(store, projectId, currentChatSession.id)
+        const sub = (args ?? '').trim()
+
+        const showCurrent = () => {
+          const current = planMgr.getCurrentPlan()
+          if (!current) {
+            return 'No active plan for this session. Use /plan <goal> to start a new plan.'
+          }
+          const activeTasks = current.runId ? store.listTasks(current.runId) : []
+          return renderPlanGraph(current, activeTasks)
+        }
+
+        if (!sub || sub === 'show') {
+          return showCurrent()
+        }
+
+        if (sub === 'review') {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan. Use /plan <goal> first.'
+          try {
+            const p = planMgr.reviewPlan(current.id)
+            return renderPlanGraph(p)
+          } catch (err) {
+            return `Cannot review plan: ${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+
+        if (sub === 'approve') {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan. Use /plan <goal> first.'
+          try {
+            const p = planMgr.approvePlan(current.id)
+            return renderPlanGraph(p)
+          } catch (err) {
+            return `Cannot approve plan: ${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+
+        if (sub === 'run' || sub === 'execute' || sub === 'confirm') {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan. Use /plan <goal> first.'
+          if (current.state !== 'APPROVED') {
+            return `Plan must be APPROVED before execution (currently ${current.state}). Use /plan review and /plan approve first.`
+          }
+          try {
+            const executed = await planMgr.executePlan(current.id, async (p) => {
+              const reqId = `chat-${currentChatSession.id}-plan-${++slashSeq}`
+              const res = await runStarter({
+                goal: p.goal,
+                acceptance: p.tasks.flatMap((t) => t.acceptanceCriteria),
+                requestId: reqId,
+              })
+              const runId = res.runId
+
+              const idMap = new Map<string, string>()
+              for (const t of p.tasks) {
+                const admitted = store.createTask({
+                  runId,
+                  parentTaskId: null,
+                  title: t.title,
+                  brief: t.description || t.title,
+                  acceptanceCriteria: t.acceptanceCriteria,
+                  assigneeMuseId: muse.id,
+                })
+                idMap.set(t.id, admitted.id)
+              }
+
+              for (const t of p.tasks) {
+                const toId = idMap.get(t.id)
+                if (toId) {
+                  for (const depId of t.dependsOn) {
+                    const fromId = idMap.get(depId)
+                    if (fromId) {
+                      store.addEdge(runId, toId, fromId, 'depends_on')
+                    }
+                  }
+                }
+              }
+
+              return runId
+            })
+            activeRunId = executed.runId
+            return `Plan execution started in run ${executed.runId}!\n\n${renderPlanGraph(executed)}`
+          } catch (err) {
+            return `Execution failed: ${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+
+        if (sub === 'cancel') {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan to cancel.'
+          planMgr.cancelPlan(current.id)
+          if (current.runId) {
+            try {
+              store.setRunState(current.runId, 'cancelled')
+            } catch {
+              // best effort
+            }
+          }
+          return `Plan ${current.id} cancelled.`
+        }
+
+        if (sub === 'reset') {
+          const current = planMgr.getCurrentPlan()
+          if (current) {
+            planMgr.cancelPlan(current.id)
+          }
+          return 'Plan reset. Use /plan <goal> to start fresh.'
+        }
+
+        if (sub.startsWith('add ')) {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan. Use /plan <goal> first.'
+          const raw = sub.slice(4).trim()
+          const title = raw.split(/\s--/)[0]?.trim() ?? ''
+          const assigneeMatch = raw.match(/--assignee\s+([^\s]+)/)
+          const needsMatch = raw.match(/--needs\s+([^\s]+)/)
+          const descMatch = raw.match(/--desc\s+("([^"]+)"|'([^']+)'|([^\s]+))/)
+          const acceptMatch = raw.match(/--accept\s+("([^"]+)"|'([^']+)'|([^\s]+))/)
+
+          const taskId = `task-${current.tasks.length + 1}`
+          const assigneeRole = assigneeMatch ? assigneeMatch[1]! : 'developer'
+          const dependsOn = needsMatch
+            ? needsMatch[1]!
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : []
+          const description = descMatch ? (descMatch[2] ?? descMatch[3] ?? descMatch[4] ?? '') : ''
+          const acceptanceCriteria = acceptMatch
+            ? (acceptMatch[2] ?? acceptMatch[3] ?? acceptMatch[4] ?? '')
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : ['Task completed and verified']
+
+          try {
+            const updated = planMgr.addTask(current.id, {
+              id: taskId,
+              title,
+              description,
+              assigneeRole,
+              dependsOn,
+              acceptanceCriteria,
+            })
+            return renderPlanGraph(updated)
+          } catch (err) {
+            return `Cannot add task: ${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+
+        if (sub.startsWith('remove ')) {
+          const current = planMgr.getCurrentPlan()
+          if (!current) return 'No active plan.'
+          const taskId = sub.slice(7).trim()
+          try {
+            const updated = planMgr.removeTask(current.id, taskId)
+            return renderPlanGraph(updated)
+          } catch (err) {
+            return `Cannot remove task: ${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+
+        try {
+          const current = planMgr.getCurrentPlan()
+          if (current && ['DRAFT', 'REVIEW'].includes(current.state)) {
+            const updated = planMgr.setGoal(current.id, sub)
+            return renderPlanGraph(updated)
+          }
+          const created = planMgr.createPlanDraft(sub)
+          return `Created plan ${created.id} (DRAFT):\n\n${renderPlanGraph(created)}`
+        } catch (err) {
+          return `Failed to create plan: ${err instanceof Error ? err.message : String(err)}`
+        }
+      },
+      sessions: async (args?: string) => {
+        const sub = (args ?? '').trim()
+        if (sub.startsWith('switch ')) {
+          const targetId = sub.slice(7).trim()
+          const target = store.getChatSessionOrNull(targetId)
+          if (!target || target.projectId !== projectId) {
+            return `Session '${targetId}' not found for project.`
+          }
+          currentChatSession = target
+          slashContext.session.id = target.id
+          return `Switched active session to ${target.id} (${target.title || 'untitled'}).`
+        }
+
+        if (sub.startsWith('inspect')) {
+          const targetId = sub.slice(7).trim() || currentChatSession.id
+          const target = store.getChatSessionOrNull(targetId)
+          if (!target || target.projectId !== projectId) {
+            return `Session '${targetId}' not found.`
+          }
+          const msgs = store.listChatMessages(target.id, { limit: 5 })
+          const lines = [
+            `Session: ${target.id}`,
+            `Title: ${target.title || '(untitled)'}`,
+            `State: ${target.state}`,
+            `Created: ${target.createdAt}`,
+            `Updated: ${target.updatedAt}`,
+            `Recent messages (${msgs.length}):`,
+          ]
+          for (const m of msgs) {
+            const preview = m.text.replace(/\n/g, ' ').slice(0, 60)
+            lines.push(`  [${m.role}] ${preview}`)
+          }
+          return lines.join('\n')
+        }
+
+        const list = store.listChatSessions(projectId, 20)
+        if (list.length === 0) return 'No sessions recorded for this project.'
+        const lines = ['Available chat sessions:']
+        for (const s of list) {
+          const isCurrent = s.id === currentChatSession.id ? ' (active)' : ''
+          const title = s.title ? ` — ${s.title}` : ''
+          lines.push(`  • ${s.id} [${s.state}] updated ${s.updatedAt}${title}${isCurrent}`)
+        }
+        lines.push('\nUse /sessions switch <id> to switch or /sessions inspect <id> to inspect.')
+        return lines.join('\n')
+      },
+      doctor: async () => {
+        try {
+          const checks = await collectDoctorChecks({ cwd: ctx.rootDir })
+          const lines = ['Runtime Doctor Report:']
+          for (const c of checks) {
+            let icon = '✓'
+            if (c.status === 'warn') icon = '⚠'
+            else if (c.status === 'fail') icon = '✗'
+            else if (c.status === 'info') icon = 'ℹ'
+            lines.push(`  ${icon} [${c.status.toUpperCase()}] ${c.title}: ${c.message}`)
+            if (c.fix) {
+              lines.push(`     Fix: ${c.fix}`)
+            }
+          }
+          return lines.join('\n')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Doctor diagnostics failed: ${msg}`
+        }
+      },
+      permissions: async (args?: string) => {
+        const sub = (args ?? '').trim()
+        if (sub.startsWith('approve ')) {
+          const ref = sub.slice(8).trim()
+          return slashContext.approve(ref)
+        }
+        if (sub.startsWith('deny ')) {
+          const ref = sub.slice(5).trim()
+          return slashContext.deny(ref)
+        }
+
+        const lines = ['Effective Permissions by Muse:']
+        const muses = store.listMuses().filter((m) => m.projectId === projectId)
+        for (const m of muses) {
+          lines.push(`  • ${m.slug} (${m.role}): [${m.permissions.join(', ')}]`)
+          lines.push(`    Approval mode: ${m.approvalMode}, Policy: ${m.workspacePolicy}`)
+        }
+
+        const pending = store.listApprovalsByProject(projectId, { status: 'pending', limit: 50 })
+        lines.push('')
+        if (pending.length === 0) {
+          lines.push('Pending approval requests: (none)')
+        } else {
+          lines.push(`Pending approval requests (${pending.length}):`)
+          for (const a of pending) {
+            lines.push(`  • [${a.id}] ${a.action} by ${a.requestedByMuseId ?? 'unknown'}: ${a.reason}`)
+          }
+          lines.push('\nUse /permissions approve <ref> or /permissions deny <ref> to respond.')
+        }
+        return lines.join('\n')
       },
       newSession: async () => {
         store.updateChatSession(currentChatSession.id, { state: 'closed' })

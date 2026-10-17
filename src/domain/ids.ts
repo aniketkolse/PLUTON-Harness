@@ -21,6 +21,7 @@ export const ID_PREFIXES = [
   'session',
   'chat',
   'msg',
+  'plan',
 ] as const
 
 export type IdPrefix = (typeof ID_PREFIXES)[number]

@@ -67,7 +67,11 @@ afterEach(() => {
     }
   }
   for (const dir of tmpDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true })
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Windows lock cleanup best effort
+    }
   }
 })
 
@@ -82,6 +86,7 @@ describe('migrations', () => {
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
       'v3:chat-sessions',
+      'v4:plans',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -122,7 +127,7 @@ describe('migrations', () => {
     const result = migrate(db)
     expect(result.from).toBe(1)
     expect(result.to).toBe(SCHEMA_VERSION)
-    expect(result.applied).toEqual(['v2:unique-sandbox-and-terminal-per-muse', 'v3:chat-sessions'])
+    expect(result.applied).toEqual(['v2:unique-sandbox-and-terminal-per-muse', 'v3:chat-sessions', 'v4:plans'])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
     const terminalIds = db.prepare('SELECT id FROM terminals ORDER BY id').all().map((r) => r['id'])

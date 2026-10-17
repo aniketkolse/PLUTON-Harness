@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { ConflictError, InternalError, NotFoundError, ValidationError } from '../domain/errors.ts'
 import { newId } from '../domain/ids.ts'
+import { type PlanRecord, type PlanState, type PlanTask, transitionPlanState } from '../domain/plan.ts'
 import {
   assertRunTransition,
   assertTransition,
@@ -1172,6 +1173,106 @@ export class Store {
     return rows.map(rowToChatMessage)
   }
 
+  /** List chat sessions for a project ordered by updated_at DESC. */
+  listChatSessions(projectId: string, limit: number = 50): ChatSessionRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM chat_sessions WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?')
+      .all(projectId, limit) as Row[]
+    return rows.map(rowToChatSession)
+  }
+
+  // -- plans (planning workflow) ----------------------------------------------
+
+  createPlan(spec: {
+    id?: string
+    projectId: string
+    sessionId: string
+    goal: string
+    tasks?: PlanTask[]
+    state?: PlanState
+  }): PlanRecord {
+    const id = spec.id ?? newId('plan')
+    const now = nowIso()
+    const state: PlanState = spec.state ?? 'DRAFT'
+    const tasksJson = stringifyJson(spec.tasks ?? [])
+    this.db
+      .prepare(
+        `INSERT INTO plans (id, project_id, session_id, goal, state, tasks_json, run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+      )
+      .run(id, spec.projectId, spec.sessionId, spec.goal, state, tasksJson, now, now)
+    return this.getPlan(id)
+  }
+
+  getPlan(id: string): PlanRecord {
+    const plan = this.getPlanOrNull(id)
+    if (!plan) throw new NotFoundError('plan', id)
+    return plan
+  }
+
+  getPlanOrNull(id: string): PlanRecord | null {
+    const row = this.db.prepare('SELECT * FROM plans WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToPlan(row) : null
+  }
+
+  getLatestPlanForSession(sessionId: string): PlanRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM plans WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1')
+      .get(sessionId) as Row | undefined
+    return row ? rowToPlan(row) : null
+  }
+
+  updatePlan(
+    id: string,
+    patch: {
+      goal?: string
+      state?: PlanState
+      tasks?: PlanTask[]
+      runId?: string | null
+    },
+  ): PlanRecord {
+    const current = this.getPlan(id)
+    let nextState = current.state
+
+    // If goal or tasks changed and plan was APPROVED, invalidate back to DRAFT
+    if (current.state === 'APPROVED' && (patch.goal !== undefined || patch.tasks !== undefined)) {
+      nextState = 'DRAFT'
+    }
+
+    if (patch.state !== undefined) {
+      nextState = transitionPlanState(nextState, patch.state)
+    }
+
+    const sets: string[] = []
+    const values: Array<string | null> = []
+
+    if (patch.goal !== undefined) {
+      sets.push('goal = ?')
+      values.push(patch.goal)
+    }
+
+    sets.push('state = ?')
+    values.push(nextState)
+
+    if (patch.tasks !== undefined) {
+      sets.push('tasks_json = ?')
+      values.push(stringifyJson(patch.tasks))
+    }
+
+    if (patch.runId !== undefined) {
+      sets.push('run_id = ?')
+      values.push(patch.runId)
+    }
+
+    sets.push('updated_at = ?')
+    values.push(nowIso())
+
+    values.push(id)
+
+    this.db.prepare(`UPDATE plans SET ${sets.join(', ')} WHERE id = ?`).run(...values)
+    return this.getPlan(id)
+  }
+
   // -- receipts (idempotency core, §5) ---------------------------------------
 
   getReceipt(id: string): RequestReceiptRecord | null {
@@ -1427,6 +1528,21 @@ function rowToApproval(r: Row): ApprovalRecord {
     decidedAt: nstr(r, 'decided_at'),
     expiresAt: nstr(r, 'expires_at'),
     createdAt: str(r, 'created_at'),
+  }
+}
+
+function rowToPlan(r: Row): PlanRecord {
+  const state = str(r, 'state') as PlanState
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    sessionId: str(r, 'session_id'),
+    goal: str(r, 'goal'),
+    state,
+    tasks: parseJsonText<PlanTask[]>(nstr(r, 'tasks_json'), []),
+    runId: nstr(r, 'run_id'),
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
   }
 }
 

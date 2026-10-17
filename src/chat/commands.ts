@@ -41,6 +41,29 @@ export const COMMAND_REGISTRY: SlashCommandDef[] = [
     argHint: '[run-id]',
   },
   {
+    name: 'plan',
+    syntax: '/plan [goal|subcommand]',
+    description: 'Inspect, edit, or execute structured implementation plans',
+    argHint: '[goal|subcommand]',
+  },
+  {
+    name: 'sessions',
+    syntax: '/sessions [switch <id>]',
+    description: 'List, inspect, or switch chat sessions',
+    argHint: '[switch <id>]',
+  },
+  {
+    name: 'doctor',
+    syntax: '/doctor',
+    description: 'Inspect runtime environment, engines, and project health',
+  },
+  {
+    name: 'permissions',
+    syntax: '/permissions [approve|deny <ref>]',
+    description: 'View effective permissions and manage approval requests',
+    argHint: '[approve|deny <ref>]',
+  },
+  {
     name: 'models',
     syntax: '/models',
     description: 'List available models supported by the engine',
@@ -111,6 +134,10 @@ export interface SlashContext {
   models?(): Promise<string>
   model?(name?: string): Promise<string>
   cancel?(runId?: string): Promise<string>
+  plan?(args?: string): Promise<string>
+  sessions?(args?: string): Promise<string>
+  doctor?(): Promise<string>
+  permissions?(args?: string): Promise<string>
 }
 
 export function defaultSlashHelp(): string {
@@ -225,6 +252,30 @@ export async function executeSlash(
         return { output: 'Run cancellation is not supported in this session' }
       }
       return { output: await ctx.cancel(parsed.args) }
+
+    case 'plan':
+      if (!ctx.plan) {
+        return { output: 'Plan mode is not supported in this session' }
+      }
+      return { output: await ctx.plan(parsed.args) }
+
+    case 'sessions':
+      if (!ctx.sessions) {
+        return { output: 'Session management is not supported in this session' }
+      }
+      return { output: await ctx.sessions(parsed.args) }
+
+    case 'doctor':
+      if (!ctx.doctor) {
+        return { output: 'Doctor diagnostics are not supported in this session' }
+      }
+      return { output: await ctx.doctor() }
+
+    case 'permissions':
+      if (!ctx.permissions) {
+        return { output: 'Permissions inspection is not supported in this session' }
+      }
+      return { output: await ctx.permissions(parsed.args) }
 
     case 'models':
       if (!ctx.models) {

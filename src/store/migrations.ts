@@ -256,6 +256,25 @@ export const MIGRATIONS: Migration[] = [
       `CREATE UNIQUE INDEX idx_chat_messages_session_seq ON chat_messages(session_id, seq)`,
     ],
   },
+  {
+    version: 4,
+    name: 'plans',
+    statements: [
+      `CREATE TABLE plans (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id),
+        goal TEXT NOT NULL,
+        state TEXT NOT NULL,
+        tasks_json TEXT NOT NULL DEFAULT '[]',
+        run_id TEXT REFERENCES runs(id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_plans_session ON plans(session_id, updated_at)`,
+      `CREATE INDEX idx_plans_project ON plans(project_id, updated_at)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

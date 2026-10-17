@@ -72,12 +72,13 @@ describe('chat migrations', () => {
     const db = openDatabase(path)
     openDbs.push(db)
     const result = migrate(db)
-    expect(SCHEMA_VERSION).toBe(3)
-    expect(result.to).toBe(3)
+    expect(SCHEMA_VERSION).toBe(4)
+    expect(result.to).toBe(4)
     expect(result.applied).toEqual([
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
       'v3:chat-sessions',
+      'v4:plans',
     ])
     const tables = (
       db
