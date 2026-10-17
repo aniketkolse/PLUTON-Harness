@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parseSlash, executeSlash, type SlashContext } from '../../src/chat/commands.ts'
+import {
+  parseSlash,
+  executeSlash,
+  getCommandSuggestions,
+  getUnknownCommandSuggestions,
+  type SlashContext,
+} from '../../src/chat/commands.ts'
 
 describe('parseSlash', () => {
   it('parses commands with and without arguments', () => {
@@ -15,6 +21,35 @@ describe('parseSlash', () => {
     expect(parseSlash('/')).toBeNull()
     expect(parseSlash('/   ')).toBeNull()
     expect(parseSlash('  /help  ')).toEqual({ command: 'help', args: '' })
+  })
+})
+
+describe('getCommandSuggestions', () => {
+  it('returns all commands for bare /', () => {
+    const list = getCommandSuggestions('/')
+    expect(list.length).toBeGreaterThanOrEqual(8)
+    expect(list.some((c) => c.name === 'help')).toBe(true)
+    expect(list.some((c) => c.name === 'run')).toBe(true)
+  })
+
+  it('filters commands by prefix', () => {
+    const rList = getCommandSuggestions('/r')
+    expect(rList.some((c) => c.name === 'run')).toBe(true)
+    expect(rList.some((c) => c.name === 'runs')).toBe(true)
+    expect(rList.every((c) => c.name.startsWith('r'))).toBe(true)
+  })
+})
+
+describe('getUnknownCommandSuggestions', () => {
+  it('suggests closest commands for typos', () => {
+    const suggestions = getUnknownCommandSuggestions('runn')
+    expect(suggestions).toContain('/run')
+    expect(suggestions).toContain('/runs')
+  })
+
+  it('suggests /approvals for approv', () => {
+    const suggestions = getUnknownCommandSuggestions('approv')
+    expect(suggestions.some((s) => s.startsWith('/approv'))).toBe(true)
   })
 })
 
@@ -57,7 +92,7 @@ describe('executeSlash', () => {
     expect(await executeSlash(ctx, '/deny')).toEqual({ output: 'usage: /deny <ref>' })
   })
 
-  it('returns a notice for unknown slash command', async () => {
+  it('returns a notice and suggestions for unknown slash command', async () => {
     const ctx = makeMockContext()
     const res = await executeSlash(ctx, '/unknowncmd')
     expect(res?.output).toContain("unknown command '/unknowncmd'")

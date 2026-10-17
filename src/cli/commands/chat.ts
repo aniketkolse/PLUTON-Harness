@@ -144,7 +144,7 @@ export async function chatRun(
       return { exitCode: 0, plan: basePlan }
     }
 
-    const io = deps.io ?? new TerminalHost()
+    const io = deps.io ?? new TerminalHost({ alternateScreen: true })
     if (!io.isTty) {
       throw new ValidationError(
         'pluton chat needs an interactive terminal (stdin/stdout are not a TTY); use --json to resolve the chat plan',

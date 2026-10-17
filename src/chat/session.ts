@@ -30,6 +30,7 @@ import {
   type ChatViewState,
 } from '../tui/state.ts'
 import {
+  renderFullScreenFrame,
   renderHeader,
   renderInput,
   renderNotice,
@@ -37,9 +38,21 @@ import {
   renderToolLine,
   type StatusView,
 } from '../tui/render.ts'
+import { renderMarkdown } from '../tui/markdown.ts'
+import {
+  createToolActivity,
+  updateToolActivity,
+  renderToolActivity,
+} from '../tui/activity.ts'
+import { renderApprovalCard, type ApprovalViewData } from '../tui/approval.ts'
 import { wrapText } from '../tui/width.ts'
 import { operatorPreamble } from './prompt.ts'
-import { defaultSlashHelp, executeSlash, type SlashContext } from './commands.ts'
+import {
+  defaultSlashHelp,
+  executeSlash,
+  getCommandSuggestions,
+  type SlashContext,
+} from './commands.ts'
 
 export interface ChatSessionDeps {
   store: Store
@@ -151,7 +164,10 @@ export class ChatSession {
       })
 
       this.deps.io.onKey((input, key) => {
-        const act = keyAction(input, key)
+        const act = keyAction(input, key, {
+          approvalPending: this.viewState.approvalsPending > 0,
+          draftEmpty: this.editor.text.trim().length === 0,
+        })
         this.handleAction(act)
       })
 
@@ -263,6 +279,71 @@ export class ChatSession {
         this.viewState = { ...this.viewState, toolExpanded: !this.viewState.toolExpanded }
         this.scheduleRedraw()
         break
+
+      case 'toggle-inspector':
+        this.sigintExitPending = false
+        this.viewState = { ...this.viewState, inspectorOpen: !this.viewState.inspectorOpen }
+        this.scheduleRedraw()
+        break
+
+      case 'scroll-up':
+        this.viewState = { ...this.viewState, scrollOffset: this.viewState.scrollOffset + 5 }
+        this.scheduleRedraw()
+        break
+
+      case 'scroll-down':
+        this.viewState = {
+          ...this.viewState,
+          scrollOffset: Math.max(0, this.viewState.scrollOffset - 5),
+        }
+        this.scheduleRedraw()
+        break
+
+      case 'palette':
+      case 'help': {
+        const ctx = this.getSlashContext()
+        this.commitLine(ctx.help())
+        this.scheduleRedraw()
+        break
+      }
+
+      case 'approve': {
+        const firstApproval = this.viewState.pendingApprovalList[0]
+        if (firstApproval) {
+          const ctx = this.getSlashContext()
+          const res = await ctx.approve(firstApproval.id)
+          this.commitLine(this.theme.paint('success', res))
+          this.scheduleRedraw()
+        }
+        break
+      }
+
+      case 'deny': {
+        const firstApproval = this.viewState.pendingApprovalList[0]
+        if (firstApproval) {
+          const ctx = this.getSlashContext()
+          const res = await ctx.deny(firstApproval.id)
+          this.commitLine(this.theme.paint('error', res))
+          this.scheduleRedraw()
+        }
+        break
+      }
+
+      case 'view-details': {
+        const firstApproval = this.viewState.pendingApprovalList[0]
+        if (firstApproval) {
+          const cards = renderApprovalCard(
+            firstApproval,
+            this.deps.io.size().columns,
+            this.theme,
+          )
+          for (const line of cards) {
+            this.commitLine(line)
+          }
+          this.scheduleRedraw()
+        }
+        break
+      }
 
       case 'redraw':
         this.scheduleRedraw()
@@ -429,13 +510,34 @@ export class ChatSession {
         this.viewState = applyEngineEvent(this.viewState, ev)
 
         if (ev.kind === 'tool') {
-          const line = renderToolLine(
-            ev,
-            { expanded: this.viewState.toolExpanded },
+          const act = createToolActivity({
+            id: ev.name,
+            name: ev.name,
+            summary: ev.summary,
+          })
+          const finishedAct = updateToolActivity(act, {
+            status: ev.phase === 'start' ? 'running' : ev.isError ? 'failed' : 'succeeded',
+            summary: ev.summary,
+          })
+          const lines = renderToolActivity(
+            finishedAct,
+            this.viewState.toolExpanded,
             this.deps.io.size().columns,
             this.theme,
           )
-          if (line !== null) {
+          for (const line of lines) {
+            this.commitLine(line)
+          }
+        } else if (ev.kind === 'approval_request') {
+          const appData: ApprovalViewData = {
+            id: ev.requestId,
+            action: 'sensitive action',
+            reason: ev.description,
+            requestedByMuse: this.deps.muse.slug,
+          }
+          this.viewState.pendingApprovalList.push(appData)
+          const cards = renderApprovalCard(appData, this.deps.io.size().columns, this.theme)
+          for (const line of cards) {
             this.commitLine(line)
           }
         } else if (ev.kind === 'error') {
@@ -459,7 +561,14 @@ export class ChatSession {
     this.viewState = endRes.state
 
     if (endRes.assistantText) {
-      this.commitLine(endRes.assistantText)
+      const renderedMd = renderMarkdown(
+        endRes.assistantText,
+        this.deps.io.size().columns,
+        this.theme,
+      )
+      for (const line of renderedMd) {
+        this.commitLine(line)
+      }
       this.deps.store.appendChatMessage({
         sessionId: this.deps.session.id,
         role: 'assistant',
@@ -499,6 +608,14 @@ export class ChatSession {
         ...this.viewState,
         run: res.run,
         approvalsPending: res.approvalsPending,
+        orchestra: {
+          ...this.viewState.orchestra,
+          events: (res.events ?? []).map((e) => ({
+            seq: e.seq,
+            type: e.type,
+            summary: e.line,
+          })),
+        },
       }
       this.scheduleRedraw()
     } catch {
@@ -548,6 +665,24 @@ export class ChatSession {
     const inputStartRow = lines.length
     for (const l of inputRender.lines) {
       lines.push(l)
+    }
+
+    // Slash command autocomplete suggestions
+    if (this.editor.text.startsWith('/')) {
+      const suggestions = getCommandSuggestions(this.editor.text, 5)
+      if (suggestions.length > 0) {
+        lines.push(
+          this.theme.paint(
+            'border',
+            '┌─ Suggestions ────────────────────────────────────┐',
+          ),
+        )
+        for (const s of suggestions) {
+          lines.push(
+            `  ${this.theme.paint('focus', s.syntax.padEnd(16))} ${this.theme.paint('dim', s.description)}`,
+          )
+        }
+      }
     }
 
     return {

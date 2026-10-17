@@ -45,4 +45,29 @@ describe('keyAction', () => {
     expect(resSpace.action).toBe('insert')
     expect(resSpace.text).toBe(' ')
   })
+
+  it('maps tab to toggle-inspector, pageup/pagedown to scroll, ctrl+p to palette', () => {
+    expect(keyAction('', { name: 'tab' }).action).toBe('toggle-inspector')
+    expect(keyAction('', { name: 'pageup' }).action).toBe('scroll-up')
+    expect(keyAction('', { name: 'pagedown' }).action).toBe('scroll-down')
+    expect(keyAction('', { name: 'p', ctrl: true }).action).toBe('palette')
+    expect(keyAction('', { name: 'f1' }).action).toBe('help')
+  })
+
+  it('maps A, D, V to approval actions only when approval is pending and draft is empty', () => {
+    expect(
+      keyAction('a', { name: 'a' }, { approvalPending: true, draftEmpty: true }).action,
+    ).toBe('approve')
+    expect(
+      keyAction('d', { name: 'd' }, { approvalPending: true, draftEmpty: true }).action,
+    ).toBe('deny')
+    expect(
+      keyAction('v', { name: 'v' }, { approvalPending: true, draftEmpty: true }).action,
+    ).toBe('view-details')
+
+    // Normal text typing when draft is not empty
+    expect(
+      keyAction('a', { name: 'a' }, { approvalPending: true, draftEmpty: false }).action,
+    ).toBe('insert')
+  })
 })

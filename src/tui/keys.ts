@@ -19,6 +19,14 @@ export type KeyAction =
   | 'clear-input'
   | 'redraw'
   | 'toggle-tools'
+  | 'toggle-inspector'
+  | 'scroll-up'
+  | 'scroll-down'
+  | 'palette'
+  | 'help'
+  | 'approve'
+  | 'deny'
+  | 'view-details'
   | 'history-prev'
   | 'history-next'
   | 'cursor-left'
@@ -33,7 +41,16 @@ export type KeyAction =
   | 'insert'
   | 'ignore'
 
-export function keyAction(input: string, key: Key): { action: KeyAction; text?: string } {
+export interface KeyContext {
+  approvalPending?: boolean
+  draftEmpty?: boolean
+}
+
+export function keyAction(
+  input: string,
+  key: Key,
+  ctx: KeyContext = {},
+): { action: KeyAction; text?: string } {
   // Return / Enter variants
   if (key.name === 'return' || key.name === 'enter') {
     if (key.shift || key.meta) {
@@ -84,9 +101,36 @@ export function keyAction(input: string, key: Key): { action: KeyAction; text?: 
         return { action: 'kill-word' }
       case 'o':
         return { action: 'toggle-tools' }
+      case 'p':
+        return { action: 'palette' }
       case 'l':
         return { action: 'redraw' }
     }
+  }
+
+  // Tab key -> toggle inspector
+  if (key.name === 'tab') {
+    return { action: 'toggle-inspector' }
+  }
+
+  // PageUp / PageDown -> scroll viewport
+  if (key.name === 'pageup') {
+    return { action: 'scroll-up' }
+  }
+  if (key.name === 'pagedown') {
+    return { action: 'scroll-down' }
+  }
+
+  // F1 or ? (when draft empty)
+  if (key.name === 'f1') {
+    return { action: 'help' }
+  }
+
+  // Approval single-key triggers when approval is pending and no draft is being composed
+  if (ctx.approvalPending && ctx.draftEmpty) {
+    if (input.toLowerCase() === 'a') return { action: 'approve' }
+    if (input.toLowerCase() === 'd') return { action: 'deny' }
+    if (input.toLowerCase() === 'v') return { action: 'view-details' }
   }
 
   // Navigation and deletion keys

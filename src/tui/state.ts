@@ -4,11 +4,16 @@
  */
 
 import type { EngineEvent } from '../engines/contract/types.ts'
+import type { ToolActivityState } from './activity.ts'
+import type { OrchestraInspectorData } from './orchestra.ts'
+import type { ApprovalViewData } from './approval.ts'
 
 export interface TranscriptBlock {
   kind: 'user' | 'assistant' | 'tool' | 'notice' | 'error' | 'approval'
   text: string
   state?: 'streaming' | 'final' | 'interrupted' | 'failed'
+  tool?: ToolActivityState
+  approval?: ApprovalViewData
 }
 
 export interface ChatViewState {
@@ -16,9 +21,13 @@ export interface ChatViewState {
   live: string
   busy: boolean
   toolExpanded: boolean
+  inspectorOpen: boolean
+  scrollOffset: number
   usage: { inputTokens: number; outputTokens: number } | null
   approvalsPending: number
+  pendingApprovalList: ApprovalViewData[]
   run: { id: string; state: string } | null
+  orchestra: OrchestraInspectorData
   queue: string[]
 }
 
@@ -28,9 +37,18 @@ export function initialViewState(): ChatViewState {
     live: '',
     busy: false,
     toolExpanded: false,
+    inspectorOpen: true,
+    scrollOffset: 0,
     usage: null,
     approvalsPending: 0,
+    pendingApprovalList: [],
     run: null,
+    orchestra: {
+      muses: [],
+      tasks: [],
+      approvals: [],
+      events: [],
+    },
     queue: [],
   }
 }
@@ -56,9 +74,15 @@ export function applyEngineEvent(s: ChatViewState, ev: EngineEvent): ChatViewSta
       const icon = ev.phase === 'start' ? '▶' : ev.isError ? '✖' : '✔'
       const summary = ev.summary ? ` (${ev.summary})` : ''
       const toolText = `${icon} ${ev.name}${summary}`
+      const toolActivity: ToolActivityState = {
+        id: ev.name,
+        name: ev.name,
+        summary: ev.summary ?? ev.name,
+        status: ev.phase === 'start' ? 'running' : ev.isError ? 'failed' : 'succeeded',
+      }
       return {
         ...s,
-        blocks: [...s.blocks, { kind: 'tool', text: toolText }],
+        blocks: [...s.blocks, { kind: 'tool', text: toolText, tool: toolActivity }],
       }
     }
 

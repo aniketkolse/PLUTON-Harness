@@ -183,4 +183,18 @@ describe('TerminalHost', () => {
     expect(stdout.written).not.toContain('\x1b[2A\r\x1b[J')
     expect(stdout.written).toContain('\r\x1b[J')
   })
+
+  it('enters and leaves alternate screen when alternateScreen is true', () => {
+    const altHost = new TerminalHost({
+      stdin: stdin as any,
+      stdout: stdout as any,
+      alternateScreen: true,
+    })
+    altHost.start()
+    expect(stdout.written).toContain('\x1b[?1049h')
+    stdout.clear()
+
+    altHost.stop()
+    expect(stdout.written).toContain('\x1b[?1049l')
+  })
 })

@@ -26,6 +26,7 @@ export class TerminalHost implements ChatIo {
   private readonly stdin: NodeJS.ReadStream
   private readonly stdout: NodeJS.WriteStream
   private readonly throttleMs: number
+  private readonly alternateScreen: boolean
 
   private liveRows = 0
   private parkedRow = 0
@@ -43,10 +44,12 @@ export class TerminalHost implements ChatIo {
     stdin?: NodeJS.ReadStream
     stdout?: NodeJS.WriteStream
     throttleMs?: number
+    alternateScreen?: boolean
   } = {}) {
     this.stdin = opts.stdin ?? (process.stdin as NodeJS.ReadStream)
     this.stdout = opts.stdout ?? (process.stdout as NodeJS.WriteStream)
     this.throttleMs = opts.throttleMs ?? 33
+    this.alternateScreen = opts.alternateScreen ?? false
     this.isTty = Boolean((this.stdin as any)?.isTTY && (this.stdout as any)?.isTTY)
   }
 
@@ -140,7 +143,11 @@ export class TerminalHost implements ChatIo {
     }
 
     // Bracketed paste ON
-    this.stdout.write('\x1b[?2004h')
+    let enterSeq = '\x1b[?2004h'
+    if (this.alternateScreen) {
+      enterSeq += '\x1b[?1049h\x1b[2J\x1b[H'
+    }
+    this.stdout.write(enterSeq)
 
     // Readline keypress setup
     readline.emitKeypressEvents(this.stdin)
@@ -181,7 +188,11 @@ export class TerminalHost implements ChatIo {
     }
 
     // Bracketed paste OFF, show cursor
-    this.stdout.write('\x1b[?2004l\x1b[?25h')
+    let exitSeq = '\x1b[?2004l\x1b[?25h'
+    if (this.alternateScreen) {
+      exitSeq += '\x1b[?1049l'
+    }
+    this.stdout.write(exitSeq)
 
     if ((this.stdin as any)?.isTTY && typeof (this.stdin as any).setRawMode === 'function') {
       try {
