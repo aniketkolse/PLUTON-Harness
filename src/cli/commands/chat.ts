@@ -25,8 +25,11 @@ import { TerminalHost, type ChatIo } from '../../tui/terminal.ts'
 import { ChatSession, type ChatSessionDeps } from '../../chat/session.ts'
 import { operatorPreamble } from '../../chat/prompt.ts'
 import type { ProjectContext } from '../context.ts'
+import { decideApproval } from './approvals.ts'
 import { resolveMuseByRef } from './mcp.ts'
+import { runLine } from './status.ts'
 import { containerAdapterFor, prepareContainerMode, startRunInBackground, type RunDeps } from './run.ts'
+import { defaultSlashHelp, type SlashContext } from '../../chat/commands.ts'
 
 export interface ChatCommandOptions {
   museRef?: string
@@ -314,6 +317,74 @@ export async function chatRun(
       }
     }
 
+    let slashSeq = 0
+    let currentChatSession = session
+
+    const slashContext: SlashContext = {
+      session: {
+        get id() {
+          return currentChatSession.id
+        },
+        set id(newId: string) {
+          currentChatSession = store.getChatSession(newId)
+        },
+      },
+      muse: { id: muse.id, slug: muse.slug },
+      status: async () => {
+        const runs = store.listRuns(1)
+        const currentRun = runs.length > 0 && runs[0]!.projectId === projectId ? runs[0]! : null
+        const pending = store.listApprovalsByProject(projectId, { status: 'pending', limit: 100 })
+        const lines = [
+          `Project: ${ctx.loaded.config.project.name} (${projectId})`,
+          `Operator: ${muse.slug} (${muse.model})`,
+          `Chat session: ${currentChatSession.id} (${currentChatSession.state})`,
+          currentRun ? `Current run: ${runLine(currentRun)}` : 'No runs recorded yet',
+          `Pending approvals: ${pending.length}`,
+        ]
+        return lines.join('\n')
+      },
+      runs: async (limit: number) => {
+        const allRuns = store.listRuns(limit)
+        if (allRuns.length === 0) return 'no runs recorded'
+        const rows = ['ID        STATE              CREATED              GOAL']
+        for (const r of allRuns) {
+          rows.push(runLine(r))
+        }
+        return rows.join('\n')
+      },
+      approvalsList: async () => {
+        const pending = store.listApprovalsByProject(projectId, { status: 'pending', limit: 100 })
+        if (pending.length === 0) return 'no pending approvals'
+        const rows = ['ID                       ACTION          REQUESTED BY     REASON']
+        for (const a of pending) {
+          rows.push(`${a.id}  ${a.action.padEnd(14)}  ${(a.requestedByMuseId ?? '-').padEnd(15)}  ${a.reason}`)
+        }
+        return rows.join('\n')
+      },
+      approve: async (ref: string) => {
+        const reqId = `chat-${currentChatSession.id}-slash-${++slashSeq}`
+        const report = await decideApproval(ctx, { approvalRef: ref, decision: 'approve', requestId: reqId })
+        return `approval ${report.approval.id} (${report.approval.action}) approved by ${report.approval.decidedBy ?? 'operator'}`
+      },
+      deny: async (ref: string) => {
+        const reqId = `chat-${currentChatSession.id}-slash-${++slashSeq}`
+        const report = await decideApproval(ctx, { approvalRef: ref, decision: 'deny', requestId: reqId })
+        return `approval ${report.approval.id} (${report.approval.action}) denied by ${report.approval.decidedBy ?? 'operator'}`
+      },
+      startRun: async (goal: string) => {
+        const reqId = `chat-${currentChatSession.id}-slash-${++slashSeq}`
+        const res = await runStarter({ goal, acceptance: [], requestId: reqId })
+        return `started run ${res.runId}`
+      },
+      newSession: async () => {
+        store.updateChatSession(currentChatSession.id, { state: 'closed' })
+        const next = store.createChatSession({ projectId, museId: muse.id })
+        currentChatSession = next
+        return `closed previous session and started new session ${next.id}`
+      },
+      help: () => defaultSlashHelp(),
+    }
+
     const chatSession = new ChatSession({
       store,
       projectId,
@@ -326,6 +397,7 @@ export async function chatRun(
       instructions,
       resumeToken: session.resumeToken,
       startRun: runStarter,
+      slashContext,
       poll: deps.poll ?? defaultPoll,
     })
     sessionInstance = chatSession

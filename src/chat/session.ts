@@ -39,6 +39,7 @@ import {
 } from '../tui/render.ts'
 import { wrapText } from '../tui/width.ts'
 import { operatorPreamble } from './prompt.ts'
+import { defaultSlashHelp, executeSlash, type SlashContext } from './commands.ts'
 
 export interface ChatSessionDeps {
   store: Store
@@ -52,6 +53,7 @@ export interface ChatSessionDeps {
   instructions?: string
   resumeToken?: string | null
   startRun?: OperatorToolEnv['startRun']
+  slashContext?: SlashContext
   poll?: () => Promise<{
     events: { seq: number; type: string; line: string }[]
     run: { id: string; state: string } | null
@@ -162,7 +164,7 @@ export class ChatSession {
     })
   }
 
-  private handleAction(act: ReturnType<typeof keyAction>): void {
+  private async handleAction(act: ReturnType<typeof keyAction>): Promise<void> {
     switch (act.action) {
       case 'insert':
         if (act.text) {
@@ -269,17 +271,24 @@ export class ChatSession {
         }
 
         if (fullText.startsWith('/')) {
-          if (fullText === '/exit' || fullText === '/quit') {
-            void this.exit(0)
-            return
-          }
-          if (fullText === '/help') {
-            this.commitLine(
-              this.theme.paint(
-                'dim',
-                'Available commands:\n  /help - Show this help\n  /exit, /quit - Exit chat\n  Ctrl+D - Exit chat\n  Ctrl+C - Clear input\n  Escape - Interrupt turn',
-              ),
-            )
+          const ctx = this.getSlashContext()
+          try {
+            const slashRes = await executeSlash(ctx, fullText)
+            if (slashRes !== null) {
+              this.commitLine(this.theme.paint('dim', slashRes.output))
+              if (slashRes.exit) {
+                void this.exit(0)
+                return
+              }
+              if (slashRes.newSession) {
+                await this.handleNewSession()
+                return
+              }
+              return
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err)
+            this.commitLine(this.theme.paint('error', msg))
             return
           }
         }
@@ -297,6 +306,81 @@ export class ChatSession {
       case 'ignore':
         break
     }
+  }
+
+  private getSlashContext(): SlashContext {
+    if (this.deps.slashContext) return this.deps.slashContext
+    return {
+      session: { id: this.deps.session.id },
+      muse: { id: this.deps.muse.id, slug: this.deps.muse.slug },
+      status: async () => 'Status not configured',
+      runs: async () => 'No runs',
+      approvalsList: async () => 'No approvals',
+      approve: async () => 'Approve not configured',
+      deny: async () => 'Deny not configured',
+      startRun: async () => 'Start run not configured',
+      newSession: async () => 'New session not configured',
+      help: () => defaultSlashHelp(),
+    }
+  }
+
+  private async handleNewSession(): Promise<void> {
+    try {
+      await this.engineSession?.close()
+    } catch {
+      // best-effort
+    }
+
+    const activeSessionId = this.deps.slashContext?.session.id ?? this.deps.session.id
+    let newSession = this.deps.store.getChatSession(activeSessionId)
+    if (newSession.state === 'closed') {
+      newSession = this.deps.store.createChatSession({
+        projectId: this.deps.projectId,
+        museId: this.deps.muse.id,
+      })
+      if (this.deps.slashContext) {
+        this.deps.slashContext.session.id = newSession.id
+      }
+    }
+    this.deps.session = newSession
+
+    const engineSession = await this.deps.adapter.startSession({
+      muse: {
+        id: this.deps.muse.id,
+        slug: this.deps.muse.slug,
+        role: this.deps.muse.role,
+        model: this.deps.muse.model,
+      },
+      workdir: this.deps.rootDir,
+      env: {},
+      configDir: this.deps.muse.engineHome,
+      instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
+      mcpServers: this.deps.mcpServers,
+    })
+    this.engineSession = engineSession
+    this.deps.store.updateChatSession(newSession.id, {
+      engineSessionId: engineSession.info.id,
+      nativeSessionId: engineSession.info.nativeSessionId,
+      resumeToken: engineSession.info.resumeToken,
+    })
+
+    const projectName = this.deps.store.getProject(this.deps.projectId)?.name ?? this.deps.projectId
+    const header = renderHeader(
+      {
+        projectName,
+        rootDir: this.deps.rootDir,
+        museSlug: this.deps.muse.slug,
+        engine: this.deps.adapter.kind,
+        model: this.deps.muse.model,
+        mode: 'container',
+        sessionId: newSession.id,
+        resumed: false,
+        messageCount: 0,
+      },
+      this.theme,
+    )
+    this.commitLine(header)
+    this.scheduleRedraw()
   }
 
   private async dispatchTurn(userText: string): Promise<void> {

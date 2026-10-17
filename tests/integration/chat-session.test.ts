@@ -282,4 +282,132 @@ describe('ChatSession interactive loop', () => {
     io.press('d', { ctrl: true })
     await runPromise
   })
+
+  it('handles slash commands: /status, /approvals, /approve, /deny, /run, /new, /quit and unknown', async () => {
+    const chatSessionRow = store.createChatSession({ projectId, museId: muse.id })
+    const adapter = new MockEngineAdapter()
+
+    // Seed a run
+    const testRun = store.createRun({
+      projectId,
+      goal: 'Existing run for status',
+      origin: 'cli',
+      requestedBy: 'operator',
+      acceptanceCriteria: [],
+      managerMuseId: muse.id,
+      budget: { maxConcurrentWorkers: 1, maxTasks: 5, maxDelegationDepth: 1, maxRunMinutes: 10, defaultTaskMinutes: 5 },
+    })
+
+    // Seed an approval
+    const approval = store.createApproval({
+      projectId,
+      runId: testRun.id,
+      taskId: null,
+      requestedByMuseId: muse.id,
+      action: 'file.delete',
+      reason: 'cleanup obsolete file',
+      scope: { path: 'old.txt' },
+      expiresAt: null,
+    })
+
+    let startedRunGoal: string | null = null
+    const slashCtx = {
+      session: { id: chatSessionRow.id },
+      muse: { id: muse.id, slug: muse.slug },
+      status: async () => `Run: ${testRun.id} (${testRun.state})`,
+      runs: async (limit: number) => `Run list (${limit}): ${testRun.id}`,
+      approvalsList: async () => `Pending approvals: ${approval.id} (${approval.action})`,
+      approve: async (ref: string) => {
+        store.setApprovalStatus(ref, 'approved', { decidedBy: 'operator' })
+        store.appendEvent({ projectId, runId: testRun.id, type: 'approval.decided', payload: { approvalId: ref, status: 'approved' } })
+        return `approved ${ref}`
+      },
+      deny: async (ref: string) => {
+        store.setApprovalStatus(ref, 'denied', { decidedBy: 'operator' })
+        store.appendEvent({ projectId, runId: testRun.id, type: 'approval.decided', payload: { approvalId: ref, status: 'denied' } })
+        return `denied ${ref}`
+      },
+      startRun: async (goal: string) => {
+        startedRunGoal = goal
+        return `started run for ${goal}`
+      },
+      newSession: async () => {
+        store.updateChatSession(chatSessionRow.id, { state: 'closed' })
+        const next = store.createChatSession({ projectId, museId: muse.id })
+        slashCtx.session.id = next.id
+        return `closed session and started new session ${next.id}`
+      },
+      help: () => 'Slash help list',
+    }
+
+    const session = new ChatSession({
+      store,
+      projectId,
+      rootDir,
+      muse,
+      adapter,
+      io,
+      session: chatSessionRow,
+      mcpServers: [],
+      slashContext: slashCtx,
+    })
+
+    await session.start()
+    const runPromise = session.run()
+
+    // 1. /status
+    io.send('/status')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(io.commits.some((c) => c.includes(testRun.state))).toBe(true)
+
+    // 2. /approvals
+    io.send('/approvals')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(io.commits.some((c) => c.includes(approval.id))).toBe(true)
+
+    // 3. /approve
+    io.send(`/approve ${approval.id}`)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(io.commits.some((c) => c.includes(`approved ${approval.id}`))).toBe(true)
+    const approvedRow = store.getApproval(approval.id)
+    expect(approvedRow.status).toBe('approved')
+
+    // 4. /deny
+    const approval2 = store.createApproval({
+      projectId,
+      runId: testRun.id,
+      taskId: null,
+      requestedByMuseId: muse.id,
+      action: 'bash.exec',
+      reason: 'dangerous script',
+      scope: { command: 'rm -rf' },
+      expiresAt: null,
+    })
+    io.send(`/deny ${approval2.id}`)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(io.commits.some((c) => c.includes(`denied ${approval2.id}`))).toBe(true)
+
+    // 5. /run
+    io.send('/run build feature Y')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(startedRunGoal).toBe('build feature Y')
+    expect(io.commits.some((c) => c.includes('started run for build feature Y'))).toBe(true)
+
+    // 6. Unknown command
+    io.send('/foobar')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(io.commits.some((c) => c.includes("unknown command '/foobar'"))).toBe(true)
+
+    // 7. /new
+    io.send('/new')
+    await new Promise((r) => setTimeout(r, 40))
+    const closedOld = store.getChatSession(chatSessionRow.id)
+    expect(closedOld.state).toBe('closed')
+    expect(slashCtx.session.id).not.toBe(chatSessionRow.id)
+
+    // 8. /quit
+    io.send('/quit')
+    const exitCode = await runPromise
+    expect(exitCode).toBe(0)
+  })
 })
