@@ -66,6 +66,9 @@ import {
   getCommandSuggestions,
   type SlashContext,
 } from './commands.ts'
+import { renderUserMessage, renderAssistantMessage } from '../ui/messages.ts'
+import { renderToolGroup, type ToolItemData } from '../ui/tools.ts'
+import { getUITheme } from '../ui/theme.ts'
 
 /** Map a durable approval record to its UI view data (target only when scope names one). */
 function approvalRecordToView(record: ApprovalRecord): ApprovalViewData {
@@ -603,8 +606,11 @@ export class ChatSession {
   private async dispatchTurn(userText: string): Promise<void> {
     this.viewState = beginTurn(this.viewState, userText)
     if (this.transcriptLines.length > 0) this.transcriptLines.push('')
-    this.transcriptLines.push(this.theme.paint('focus', 'You'))
-    this.commitLine(userText)
+    const uiTheme = getUITheme({ color: this.theme.enabled })
+    const userLines = renderUserMessage(userText, Math.max(20, this.deps.io.size().columns - 4), uiTheme)
+    for (const line of userLines) {
+      this.commitLine(line)
+    }
     this.deps.store.appendChatMessage({
       sessionId: this.deps.session.id,
       role: 'user',
@@ -689,13 +695,13 @@ export class ChatSession {
 
     if (endRes.assistantText) {
       if (this.transcriptLines.length > 0) this.transcriptLines.push('')
-      this.transcriptLines.push(this.theme.paint('header', 'PLUTON'))
-      const renderedMd = renderMarkdown(
+      const uiTheme = getUITheme({ color: this.theme.enabled })
+      const asstLines = renderAssistantMessage(
         endRes.assistantText,
-        this.deps.io.size().columns,
-        this.theme,
+        Math.max(20, this.deps.io.size().columns - 4),
+        uiTheme,
       )
-      for (const line of renderedMd) {
+      for (const line of asstLines) {
         this.commitLine(line)
       }
       if (interrupted) {
@@ -982,19 +988,31 @@ export class ChatSession {
 
     // Build active transcript including live streaming Markdown and in-flight tools
     const activeTranscript = [...this.transcriptLines]
-    for (const act of this.inFlightTools.values()) {
-      const lines = renderToolActivity(
-        act,
-        this.viewState.toolExpanded,
+    if (this.inFlightTools.size > 0) {
+      const tools: ToolItemData[] = Array.from(this.inFlightTools.values()).map((act) => ({
+        id: act.id,
+        name: act.name,
+        status: (act.status === 'succeeded' || act.status === 'failed' ? act.status : 'running') as ToolItemData['status'],
+        command: typeof act.input === 'object' && act.input && 'command' in act.input ? String((act.input as any).command) : act.summary,
+        output: act.output,
+        durationMs: act.durationMs,
+      }))
+      const lines = renderToolGroup(
+        {
+          id: 'live-tools',
+          tools,
+          running: true,
+          expanded: this.viewState.toolExpanded,
+        },
         Math.max(20, columns - 4),
-        this.theme,
+        getUITheme({ color: this.theme.enabled }),
       )
       activeTranscript.push(...lines)
     }
     if (this.viewState.live) {
       const chatWidth = Math.max(20, Math.round(columns * 0.72))
-      activeTranscript.push(this.theme.paint('header', 'PLUTON'))
-      const liveMd = renderMarkdown(this.viewState.live + ' ▌', chatWidth, this.theme)
+      const uiTheme = getUITheme({ color: this.theme.enabled })
+      const liveMd = renderAssistantMessage(this.viewState.live + ' ▌', chatWidth, uiTheme)
       activeTranscript.push(...liveMd)
     }
 

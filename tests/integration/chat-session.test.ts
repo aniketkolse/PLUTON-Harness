@@ -101,7 +101,7 @@ describe('ChatSession interactive loop', () => {
     expect(io.commits.some((c) => c.includes('Hello muse'))).toBe(true)
     // Turn labels are frame content (full-screen transcript), not stream commits.
     const frameText = io.frames.map((f) => stripAnsi(f.lines.join('\n'))).join('\n')
-    expect(frameText).toContain('\nYou')
+    expect(frameText).toMatch(/(?:👤|>)\s*You/)
     expect(frameText).toContain('PLUTON')
     expect(io.commits.some((c) => c.includes('Hello operator!'))).toBe(true)
 
