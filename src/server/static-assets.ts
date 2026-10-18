@@ -1239,6 +1239,50 @@ body {
   margin-top: 8px;
 }
 
+.dag-flow-container {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 8px 4px 14px;
+  align-items: flex-start;
+}
+
+.dag-stage-col {
+  flex: 1;
+  min-width: 260px;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(18, 20, 29, 0.6);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+
+.dag-stage-header {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-purple-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.dag-flow-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-purple);
+  font-size: 1.25rem;
+  padding-top: 40px;
+  opacity: 0.7;
+}
+
 /* Files Nav Tabs */
 .files-nav-tabs {
   display: flex;
@@ -1348,6 +1392,7 @@ body {
 
   // State
   let activeTab = 'chat';
+  let dagViewMode = 'flow';
   let activeSessionId = null;
   let activeMuseId = null;
   let workspaceData = null;
@@ -1923,32 +1968,92 @@ body {
         if (tasks.length === 0) {
           elDagContainer.innerHTML = '<p style="color:var(--text-muted); font-size:0.85rem; padding:8px 0;">No tasks admitted for this run yet.</p>';
         } else {
-          elDagContainer.innerHTML = '<h4 style="margin:14px 0 8px; font-size:0.85rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Run Tasks DAG (' + tasks.length + ' tasks)</h4>' +
-            tasks.map((t) => {
-              const prereqs = edges.filter((e) => e.toTaskId === t.id).map((e) => e.fromTaskId);
-              const blocks = edges.filter((e) => e.fromTaskId === t.id).map((e) => e.toTaskId);
-              return (
-                '<div class="dag-task-card state-' + t.state + '">' +
-                  '<div class="dag-card-header">' +
-                    '<div class="dag-task-title">' + escapeHtml(t.title) + '</div>' +
-                    '<span class="tool-status-pill ' + (t.state === 'completed' ? 'succeeded' : t.state === 'running' ? 'running' : t.state === 'failed' ? 'failed' : 'pending') + '">' + t.state + '</span>' +
-                  '</div>' +
-                  (t.brief ? '<div style="font-size:0.85rem; color:var(--text-secondary);">' + escapeHtml(t.brief) + '</div>' : '') +
-                  '<div class="dag-task-meta">' +
-                    '<span>👤 ' + escapeHtml(t.assigneeMuseId || 'coordinator') + '</span>' +
-                    '<span>🆔 <code>' + escapeHtml(t.id) + '</code></span>' +
-                    (prereqs.length > 0 ? '<span class="dag-task-deps">Depends on: ' + prereqs.map((p) => '<span class="dag-edge-tag">' + escapeHtml(p) + '</span>').join(' ') + '</span>' : '') +
-                    (blocks.length > 0 ? '<span class="dag-task-deps">Blocks: ' + blocks.map((b) => '<span class="dag-edge-tag">' + escapeHtml(b) + '</span>').join(' ') + '</span>' : '') +
-                  '</div>' +
-                  '<div class="dag-task-actions">' +
-                    '<button class="btn-secondary-sm" onclick="window.plutonViewTaskDiff(\\'' + t.id + '\\')">View Diff</button>' +
-                    (t.state === 'verifying'
-                      ? '<button class="btn-success-sm" onclick="window.plutonVerifyTask(\\'' + runId + '\\', \\'' + t.id + '\\')">Verify Task</button>'
-                      : '') +
-                  '</div>' +
-                '</div>'
-              );
-            }).join('');
+          const renderCardHtml = (t) => {
+            const prereqs = edges.filter((e) => e.toTaskId === t.id).map((e) => e.fromTaskId);
+            const blocks = edges.filter((e) => e.fromTaskId === t.id).map((e) => e.toTaskId);
+            return (
+              '<div class="dag-task-card state-' + t.state + '">' +
+                '<div class="dag-card-header">' +
+                  '<div class="dag-task-title">' + escapeHtml(t.title) + '</div>' +
+                  '<span class="tool-status-pill ' + (t.state === 'completed' ? 'succeeded' : t.state === 'running' ? 'running' : t.state === 'failed' ? 'failed' : 'pending') + '">' + t.state + '</span>' +
+                '</div>' +
+                (t.brief ? '<div style="font-size:0.85rem; color:var(--text-secondary);">' + escapeHtml(t.brief) + '</div>' : '') +
+                '<div class="dag-task-meta">' +
+                  '<span>👤 ' + escapeHtml(t.assigneeMuseId || 'coordinator') + '</span>' +
+                  '<span>🆔 <code>' + escapeHtml(t.id) + '</code></span>' +
+                  (prereqs.length > 0 ? '<span class="dag-task-deps">Depends on: ' + prereqs.map((p) => '<span class="dag-edge-tag">' + escapeHtml(p) + '</span>').join(' ') + '</span>' : '') +
+                  (blocks.length > 0 ? '<span class="dag-task-deps">Blocks: ' + blocks.map((b) => '<span class="dag-edge-tag">' + escapeHtml(b) + '</span>').join(' ') + '</span>' : '') +
+                '</div>' +
+                '<div class="dag-task-actions">' +
+                  '<button class="btn-secondary-sm" onclick="window.plutonViewTaskDiff(\\'' + t.id + '\\')">View Diff</button>' +
+                  (t.state === 'verifying'
+                    ? '<button class="btn-success-sm" onclick="window.plutonVerifyTask(\\'' + runId + '\\', \\'' + t.id + '\\')">Verify Task</button>'
+                    : '') +
+                '</div>' +
+              '</div>'
+            );
+          };
+
+          // Compute topological depth for pipeline stages
+          const depths = new Map();
+          tasks.forEach((t) => {
+            const prereqs = edges.filter((e) => e.toTaskId === t.id);
+            if (prereqs.length === 0) depths.set(t.id, 0);
+          });
+          for (let iter = 0; iter < 20; iter++) {
+            tasks.forEach((t) => {
+              const current = depths.get(t.id) || 0;
+              const prereqs = edges.filter((e) => e.toTaskId === t.id);
+              let maxP = -1;
+              prereqs.forEach((p) => {
+                if (depths.has(p.fromTaskId)) {
+                  maxP = Math.max(maxP, depths.get(p.fromTaskId));
+                }
+              });
+              const nextDepth = maxP + 1;
+              if (nextDepth > current) depths.set(t.id, nextDepth);
+            });
+          }
+
+          const stageMap = new Map();
+          tasks.forEach((t) => {
+            const d = depths.get(t.id) || 0;
+            if (!stageMap.has(d)) stageMap.set(d, []);
+            stageMap.get(d).push(t);
+          });
+          const sortedStages = Array.from(stageMap.keys()).sort((a, b) => a - b);
+
+          let contentHtml = '';
+          if (dagViewMode === 'flow') {
+            contentHtml = '<div class="dag-flow-container">' +
+              sortedStages.map((stageIdx, idx) => {
+                const stageTasks = stageMap.get(stageIdx) || [];
+                const stageLabel = stageIdx === 0 ? 'Stage 1 · Root' : 'Stage ' + (stageIdx + 1) + ' · Dependent';
+                return (idx > 0 ? '<div class="dag-flow-arrow">➔</div>' : '') +
+                  '<div class="dag-stage-col">' +
+                    '<div class="dag-stage-header"><span>' + stageLabel + '</span><span>' + stageTasks.length + ' tasks</span></div>' +
+                    stageTasks.map(renderCardHtml).join('') +
+                  '</div>';
+              }).join('') +
+            '</div>';
+          } else {
+            contentHtml = tasks.map(renderCardHtml).join('');
+          }
+
+          elDagContainer.innerHTML =
+            '<div style="display:flex; justify-content:space-between; align-items:center; margin:14px 0 8px;">' +
+              '<h4 style="margin:0; font-size:0.85rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Run Tasks DAG (' + tasks.length + ' tasks)</h4>' +
+              '<button class="btn-secondary-sm" id="btnToggleDagMode" style="padding:2px 8px; font-size:0.75rem;">' + (dagViewMode === 'flow' ? '📋 Card List' : '⚡ Stage Pipeline') + '</button>' +
+            '</div>' +
+            contentHtml;
+
+          const btnToggle = document.getElementById('btnToggleDagMode');
+          if (btnToggle) {
+            btnToggle.onclick = () => {
+              dagViewMode = dagViewMode === 'flow' ? 'list' : 'flow';
+              loadRunDetail(runId);
+            };
+          }
         }
       }
 

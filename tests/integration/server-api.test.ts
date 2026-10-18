@@ -324,6 +324,8 @@ describe('Pluton application server REST & SSE API', () => {
       expect(jsText).toContain('loadRunDetail')
       expect(jsText).toContain('renderDiffContent')
       expect(jsText).toContain('plutonVerifyTask')
+      expect(jsText).toContain('dag-flow-container')
+      expect(jsText).toContain('btnToggleDagMode')
     } finally {
       await server.close()
     }
