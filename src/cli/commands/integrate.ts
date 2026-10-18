@@ -74,7 +74,7 @@ const CHECK_TIMEOUT_MS = 600_000
 const CHECK_MAX_OUTPUT_BYTES = 200_000
 const OUTPUT_TAIL_CHARS = 2_000
 
-function approvalScopeTaskId(scope: JsonValue): string | null {
+export function approvalScopeTaskId(scope: JsonValue): string | null {
   if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
   const value = (scope as Record<string, JsonValue>)['taskId']
   return typeof value === 'string' ? value : null

@@ -267,8 +267,9 @@ Dual Desktop + Browser Graphical Application (ADR-0014) landed in the working tr
 2. Shared Graphical Workspace Frontend (`src/server/static-assets.ts`) delivered as an offline-capable SPA supporting conversation management, real-time message streaming, markdown formatting, tool cards, agent orchestra inspector, security approvals, workspace file inspection, and runtime diagnostics.
 3. Desktop Shell Launcher (`src/desktop/launcher.ts`) launching dedicated app-mode windows via Microsoft Edge or Google Chrome (`--app=http://...`) on Windows/macOS/Linux with automatic browser fallback.
 4. Windows PowerShell CLI Launcher (`pluton`, `pluton .`, `pluton <path>`, `pluton app`) with `--desktop`, `--browser`, `--port`, `--headless`, `--detach`, `--status`, and `--stop` flags, supporting Windows paths with spaces and drive letters. TUI chat remains accessible via `pluton --tui` or `pluton chat`.
-Live test status: 809 tests / 99 files green (`npm run check` = typecheck + unit + integration tests).
+Live test status: 812 tests / 100 files green (`npm run check` = typecheck + unit + integration tests).
 P1 (audit roadmap PR-4) landed in the working tree 2026-10-18:
 1. Verification Gate Re-dispatch: unblocks downstream dependent tasks once upstream verification verdicts succeed and enables continuous multi-stage pipeline execution without manual re-orchestration via `finalizeRunVerdict`, `pluton verify --dispatch`, and `pluton run --resume`.
 2. Structured Network Policy (Audit Gap L7): per-Muse network isolation overrides (`muses.<id>.network_policy`: `none` | `restricted` | `open`), custom Docker network binding (`runtime.internal_network_name`), validated in `src/config/schema.ts`, `src/sandbox/docker.ts`, `src/sandbox/muse-containers.ts`, `src/cli/commands/run.ts`, and `src/cli/commands/approvals.ts`. Covered by `tests/unit/muse-network-policy.test.ts`.
-Next: auto-continue path for `integration.apply` approvals, and graphical workspace UI enhancements._
+3. Auto-continue Path for Approvals (ADR-0005): automatic multi-stage progression when approving `integration.apply` or resuming parked runs via `decideApproval(..., { autoContinue: true })` and `pluton approvals approve <id> --continue`. Covered by `tests/unit/approvals-autocontinue.test.ts`.
+Next: graphical workspace UI enhancements._

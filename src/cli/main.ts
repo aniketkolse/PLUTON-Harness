@@ -1181,6 +1181,25 @@ function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string
         ? `stays parked — supervisor already exited${report.run.recordedOutcome !== null ? ` (outcome: ${report.run.recordedOutcome})` : ''}`
         : 'still awaiting other approvals'
     lines.push(`run ${report.run.id}  ${report.run.stateBefore} → ${report.run.stateAfter}  (${note})`)
+    if (report.run.resumeSummary !== undefined && report.run.resumeSummary !== null) {
+      lines.push(
+        `auto-continued run ${report.run.resumeSummary.runId}: ${report.run.resumeSummary.state} (${report.run.resumeSummary.outcome})`,
+      )
+    }
+  }
+  if (report.integrationReport !== null) {
+    const passed = report.integrationReport.checks.every((c) => c.status === 'passed')
+    const status =
+      report.integrationReport.conflicts.length > 0
+        ? 'conflicts'
+        : report.integrationReport.failed.length > 0
+          ? 'failed'
+          : passed
+            ? 'success'
+            : 'checks_failed'
+    lines.push(
+      `auto-continued integration: ${status} (${String(report.integrationReport.integrated.length)} task(s) integrated)`,
+    )
   }
   if (report.expiredSwept.length > 0) {
     lines.push(`swept ${String(report.expiredSwept.length)} overdue approval(s) to expired`)
@@ -1192,7 +1211,8 @@ approvalsCmd
   .command('approve <approval>')
   .description('approve a pending approval (applies approved muse.create proposals)')
   .option('--request-id <id>', 'idempotency key: retrying with the same id never decides twice')
-  .action(async (approvalRef: string, opts: { requestId?: string }, cmd: Command) => {
+  .option('--continue', 'automatically continue execution (e.g. apply integration or resume unparked run)')
+  .action(async (approvalRef: string, opts: { requestId?: string; continue?: boolean }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
@@ -1200,6 +1220,7 @@ approvalsCmd
         approvalRef,
         decision: 'approve',
         ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
+        ...(opts.continue !== undefined ? { autoContinue: opts.continue } : {}),
       })
       emitOk(io, json, decideHuman(report), report)
     })

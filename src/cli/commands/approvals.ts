@@ -30,6 +30,8 @@ import type { ProjectContext } from '../context.ts'
 import { createMuse } from './muse.ts'
 import { provisionMuseContainer } from './muse-provision.ts'
 import { runByRef } from './status.ts'
+import { approvalScopeTaskId, integrateRun, type IntegrateCommandOptions, type IntegrateReport } from './integrate.ts'
+import { resumeRun, type ResumeRunOptions, type RunSummary } from './run.ts'
 
 /**
  * The operator approvals inbox (Phase 3): `list` (pending by default, project
@@ -80,6 +82,8 @@ export interface ApprovalDecideOptions {
   decision: 'approve' | 'deny'
   /** Idempotency key: retrying with the same id never decides twice. */
   requestId?: string
+  /** Automatically continue execution (e.g. run integration for integration.apply, or resume unparked run). */
+  autoContinue?: boolean
 }
 
 export interface ApprovalDecideDeps {
@@ -87,6 +91,10 @@ export interface ApprovalDecideDeps {
   sandboxManager?: SandboxManager
   /** Test seam: replaces the worker-image probe in docker mode. */
   workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
+  /** Test seam: replaces integrateRun for auto-continue integration.apply. */
+  integrateRunFn?: (ctx: ProjectContext, opts: IntegrateCommandOptions) => Promise<IntegrateReport>
+  /** Test seam: replaces resumeRun for auto-continue run resume. */
+  resumeRunFn?: (ctx: ProjectContext, runId: string, opts?: ResumeRunOptions) => Promise<RunSummary>
 }
 
 export interface ApprovalDecideReport {
@@ -97,6 +105,7 @@ export interface ApprovalDecideReport {
     container: { containerName: string; created: boolean } | null
     containerWarning: string | null
   } | null
+  integrationReport: IntegrateReport | null
   run: {
     id: string
     stateBefore: RunState
@@ -104,6 +113,7 @@ export interface ApprovalDecideReport {
     resumed: boolean
     parked: boolean
     recordedOutcome: string | null
+    resumeSummary?: RunSummary | null
   } | null
   expiredSwept: string[]
 }
@@ -440,6 +450,7 @@ function reportFromCurrentRows(
       decidedAt: current.decidedAt ?? current.createdAt,
     },
     applied,
+    integrationReport: null,
     run,
     expiredSwept,
   }
@@ -502,6 +513,23 @@ export async function decideApproval(
     }
 
     const run = runBefore !== null ? unParkRun(store, projectId, decided, runBefore) : null
+
+    let integrationReport: IntegrateReport | null = null
+    if (decided.status === 'approved' && decided.action === 'integration.apply' && opts.autoContinue) {
+      const scopeTaskId = approvalScopeTaskId(decided.scope)
+      if (decided.runId !== null && scopeTaskId !== null) {
+        store.close()
+        const integrateFn = deps.integrateRunFn ?? integrateRun
+        integrationReport = await integrateFn(ctx, { runRef: decided.runId, taskRefs: [scopeTaskId] })
+      }
+    }
+
+    if (run !== null && run.resumed && opts.autoContinue) {
+      store.close()
+      const resumeFn = deps.resumeRunFn ?? resumeRun
+      run.resumeSummary = await resumeFn(ctx, run.id, { skipManager: true })
+    }
+
     return {
       approval: {
         id: decided.id,
@@ -511,6 +539,7 @@ export async function decideApproval(
         decidedAt: decided.decidedAt ?? now,
       },
       applied,
+      integrationReport,
       run,
       expiredSwept,
     }
