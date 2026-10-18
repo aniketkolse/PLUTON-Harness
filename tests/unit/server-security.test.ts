@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage } from 'node:http'
+import { join } from 'node:path'
 import {
   generateServerToken,
   isLoopbackRequest,
@@ -80,15 +81,23 @@ describe('server security', () => {
   })
 
   it('prevents path traversal escapes outside rootDir', () => {
-    const root = 'Y:\\Pluton'
-    expect(safeResolvePath(root, 'src/main.ts')).toBe('Y:\\Pluton\\src\\main.ts')
-    expect(safeResolvePath(root, 'package.json')).toBe('Y:\\Pluton\\package.json')
-    expect(safeResolvePath(root, '../../windows/system32/cmd.exe')).toBeNull()
-    expect(safeResolvePath(root, '..\\..\\secret.env')).toBeNull()
-    // Windows case insensitivity safety
+    // Platform-appropriate absolute root: the resolver follows host path
+    // semantics, so the fixture must too (a Windows-shaped root would resolve
+    // relative to cwd on POSIX and vice versa).
+    const root = process.platform === 'win32' ? 'Y:\\Pluton' : '/var/pluton'
+    expect(safeResolvePath(root, 'src/main.ts')).toBe(join(root, 'src', 'main.ts'))
+    expect(safeResolvePath(root, 'package.json')).toBe(join(root, 'package.json'))
+    expect(safeResolvePath(root, join('..', '..', 'secret.env'))).toBeNull()
+    // Leading separators are treated as root-relative (the server API never
+    // passes raw absolute inputs).
+    const leading = process.platform === 'win32' ? '\\package.json' : '/package.json'
+    expect(safeResolvePath(root, leading)).toBe(join(root, 'package.json'))
+
     if (process.platform === 'win32') {
-      const lowerRoot = 'y:\\pluton'
-      expect(safeResolvePath(lowerRoot, 'src/main.ts')).not.toBeNull()
+      // Absolute drive path from a different root is rejected…
+      expect(safeResolvePath(root, 'C:\\Windows\\system32\\cmd.exe')).toBeNull()
+      // …and root case differences are normalized away on Windows.
+      expect(safeResolvePath('y:\\pluton', 'src/main.ts')).not.toBeNull()
     }
   })
 })

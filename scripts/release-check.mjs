@@ -2,165 +2,436 @@
 /**
  * Repeatable public-release gate (docs/RELEASE.md).
  *
- * Verifies, in order:
+ * Technical validation, in order:
  *   1. working tree cleanliness (use --allow-dirty for local pre-commit runs)
  *   2. version consistency (package.json === src/version.ts)
- *   3. typecheck + full test suite (`npm run check`)
- *   4. production build (`npm run build`)
- *   5. package contents (`npm pack --dry-run --json`): required runtime assets
- *      present, dev/test/local artifacts absent
- *   6. owner-decision blockers reported honestly (private flag, license field)
+ *   3. package identity (name + bin mapping)
+ *   4. engine requirement declared and satisfied by the running Node
+ *   5. lockfile consistency (package-lock.json vs package.json)
+ *   6. documentation integrity (README / THIRD_PARTY_NOTICES relative links)
+ *   7. typecheck + full test suite (`npm run check`)
+ *   8. production build (`npm run build`)
+ *   9. package contents via `npm pack --dry-run --json`:
+ *      required runtime assets present, dev/local artifacts absent,
+ *      no host-local paths or credential-looking strings in shipped files
+ *  10. production dependency audit (NOT TESTED when the registry is unreachable)
+ *  11. POSIX permission enforcement (NOT TESTED on Windows; runs in CI)
  *
- * Exit code 0 only when every automated check passes. Owner decisions are
- * reported as BLOCKER lines and do not silently pass.
+ * Owner decisions (private flag, outbound license) are reported as BLOCKED.
+ *
+ * Result states (see scripts/lib/release-gate.mjs):
+ *   PASS / FAIL / NOT TESTED / BLOCKED.
+ * Exit code is 0 only when no check FAILED; NOT TESTED and BLOCKED never
+ * silently pass — they are printed with reasons and remediation, and the
+ * publication line stays blocked until owner decisions are resolved.
+ *
+ * This script never publishes, tags, pushes, deletes repository files or
+ * mutates package metadata. The only files it creates are a throwaway
+ * permission-probe directory under the OS temp dir, removed in a finally block.
  */
 
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  STATUS,
+  buildLeakPatterns,
+  findBrokenRelativeLinks,
+  findContentLeaks,
+  findForbiddenPackFiles,
+  formatErrorDetail,
+  parsePackManifest,
+  renderResultLine,
+  sameDepMap,
+  summarize,
+  REQUIRED_PACK_FILES,
+} from './lib/release-gate.mjs'
+
+const { PASS, FAIL, NOT_TESTED, BLOCKED } = STATUS
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const allowDirty = process.argv.includes('--allow-dirty')
 
 const results = []
 
-function record(name, ok, detail) {
-  results.push({ name, ok, detail })
-  const tag = ok === true ? 'PASS' : ok === false ? 'FAIL' : 'BLOCKER'
-  console.log(`[${tag}] ${name}${detail ? ` — ${detail}` : ''}`)
+function record(id, label, status, detail, fix) {
+  results.push({ id, label, status, detail, fix })
+  console.log(renderResultLine({ label, status, detail, fix }))
 }
 
-function run(command) {
-  return execSync(command, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+function run(command, timeoutMs = 600_000) {
+  return execSync(command, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: timeoutMs,
+  })
 }
 
 console.log(`pluton release gate (repo: ${repoRoot})\n`)
+
+let pkg
+try {
+  pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+} catch (err) {
+  console.error(`fatal: cannot read package.json: ${formatErrorDetail(err, 2)}`)
+  process.exit(1)
+}
 
 // 1. Working tree cleanliness
 try {
   const status = run('git status --porcelain').trim()
   if (status === '') {
-    record('working tree clean', true)
+    record('worktree', 'working tree clean', PASS)
   } else if (allowDirty) {
-    record('working tree clean', true, 'dirty tree allowed via --allow-dirty (NOT acceptable for a real release)')
+    record('worktree', 'working tree clean', PASS, 'dirty tree allowed via --allow-dirty (NOT acceptable for a real release)')
   } else {
     const files = status.split('\n').map((l) => l.slice(3))
-    record('working tree clean', false, `${files.length} modified/untracked file(s): ${files.slice(0, 8).join(', ')}${files.length > 8 ? ', …' : ''}`)
+    record(
+      'worktree',
+      'working tree clean',
+      FAIL,
+      `${files.length} modified/untracked file(s): ${files.slice(0, 8).join(', ')}${files.length > 8 ? ', …' : ''}`,
+      'commit or stash the changes (or re-run with --allow-dirty for a local pre-commit check only)',
+    )
   }
 } catch (err) {
-  record('working tree clean', false, `git status failed: ${err.message}`)
+  record(
+    'worktree',
+    'working tree clean',
+    BLOCKED,
+    `git status failed: ${formatErrorDetail(err, 2)}`,
+    'run inside a git checkout with git installed',
+  )
 }
 
 // 2. Version consistency
 try {
-  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
   const versionSource = readFileSync(join(repoRoot, 'src', 'version.ts'), 'utf8')
   const match = versionSource.match(/PLUTON_VERSION\s*=\s*'([^']+)'/)
   const sourceVersion = match?.[1]
   if (sourceVersion && pkg.version === sourceVersion) {
-    record('version consistency', true, `package.json === src/version.ts === ${pkg.version}`)
+    record('version', 'version consistency', PASS, `package.json === src/version.ts === ${pkg.version}`)
   } else {
-    record('version consistency', false, `package.json=${pkg.version} vs src/version.ts=${sourceVersion ?? 'not found'}`)
-  }
-
-  // Name/bin contract used by README install instructions
-  if (pkg.name === 'pluton-harness' && pkg.bin?.pluton === 'bin/pluton.js') {
-    record('package name and executable mapping', true, `${pkg.name} → ${pkg.bin.pluton}`)
-  } else {
-    record('package name and executable mapping', false, `name=${pkg.name} bin.pluton=${pkg.bin?.pluton}`)
-  }
-
-  // Owner decisions required before the first public publish
-  if (pkg.private === true) {
     record(
-      'owner decision: private flag',
-      null,
-      'package.json has "private": true — npm publish is blocked by design until the owner removes it',
+      'version',
+      'version consistency',
+      FAIL,
+      `package.json=${pkg.version} vs src/version.ts=${sourceVersion ?? 'not found'}`,
+      'make src/version.ts and package.json agree',
     )
-  } else {
-    record('owner decision: private flag', true, 'private flag absent (publishable)')
-  }
-  if (pkg.license === 'UNLICENSED' || pkg.license === undefined) {
-    record(
-      'owner decision: license',
-      null,
-      `license is "${pkg.license ?? 'missing'}" — a public release needs an outbound license decision (ADR-0011)`,
-    )
-  } else {
-    record('owner decision: license', true, `license: ${pkg.license}`)
   }
 } catch (err) {
-  record('version consistency', false, err.message)
+  record('version', 'version consistency', FAIL, formatErrorDetail(err, 2), 'restore src/version.ts')
 }
 
-// 3. Typecheck + tests
+// 3. Package identity
+if (pkg.name === 'pluton-harness' && pkg.bin?.pluton === 'bin/pluton.js') {
+  record('identity', 'package name and executable mapping', PASS, `${pkg.name} → ${pkg.bin.pluton}`)
+} else {
+  record(
+    'identity',
+    'package name and executable mapping',
+    FAIL,
+    `name=${pkg.name} bin.pluton=${pkg.bin?.pluton}`,
+    'restore the documented name/bin contract (README install instructions depend on it)',
+  )
+}
+
+// 4. Engine requirement
+{
+  const range = pkg.engines?.node
+  const required = typeof range === 'string' ? range.match(/>=\s*(\d+)/) : null
+  const running = process.versions.node
+  if (typeof range !== 'string') {
+    record('engines', 'engine requirement declared', FAIL, 'package.json has no engines.node', 'declare "engines": { "node": ">=24.0.0" }')
+  } else if (!required) {
+    record(
+      'engines',
+      'engine requirement declared',
+      FAIL,
+      `unrecognized engines.node range "${range}"`,
+      'use a simple ">=<major>.0.0" range so the gate can verify it',
+    )
+  } else if (Number(running.split('.')[0]) < Number(required[1])) {
+    record(
+      'engines',
+      'engine requirement declared',
+      FAIL,
+      `running Node v${running} does not satisfy engines.node ${range}`,
+      `run the gate on Node ${range}`,
+    )
+  } else {
+    record('engines', 'engine requirement declared', PASS, `engines.node ${range} (running v${running})`)
+  }
+}
+
+// 5. Lockfile consistency
+try {
+  const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
+  const root = lock.packages?.['']
+  const problems = []
+  if (typeof lock.lockfileVersion !== 'number' || lock.lockfileVersion < 3) {
+    problems.push(`lockfileVersion ${lock.lockfileVersion}`)
+  }
+  if (root?.name !== pkg.name) problems.push(`name ${root?.name}`)
+  if (root?.version !== pkg.version) problems.push(`version ${root?.version}`)
+  if (!sameDepMap(pkg.dependencies, root?.dependencies)) problems.push('dependencies differ')
+  if (!sameDepMap(pkg.devDependencies, root?.devDependencies)) problems.push('devDependencies differ')
+  if (problems.length === 0) {
+    record('lockfile', 'lockfile consistency', PASS, `lockfileVersion ${lock.lockfileVersion}, name/version/dependencies match package.json`)
+  } else {
+    record(
+      'lockfile',
+      'lockfile consistency',
+      FAIL,
+      problems.join(', '),
+      'run `npm install` to regenerate package-lock.json and commit the result',
+    )
+  }
+} catch (err) {
+  record('lockfile', 'lockfile consistency', FAIL, formatErrorDetail(err, 2), 'restore package-lock.json (npm ci depends on it)')
+}
+
+// 6. Documentation integrity
+try {
+  const missing = []
+  for (const doc of ['README.md', 'THIRD_PARTY_NOTICES.md']) {
+    const text = readFileSync(join(repoRoot, doc), 'utf8')
+    missing.push(...findBrokenRelativeLinks(text, (t) => existsSync(join(repoRoot, t))).map((t) => `${doc} → ${t}`))
+  }
+  if (missing.length === 0) {
+    record('docs-links', 'documentation links resolve', PASS, 'README.md and THIRD_PARTY_NOTICES.md relative links all exist')
+  } else {
+    record(
+      'docs-links',
+      'documentation links resolve',
+      FAIL,
+      `missing targets: ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ', …' : ''}`,
+      'fix the link targets (dead docs links undermine the release)',
+    )
+  }
+} catch (err) {
+  record('docs-links', 'documentation links resolve', FAIL, formatErrorDetail(err, 2), 'restore README.md / THIRD_PARTY_NOTICES.md')
+}
+
+// 7. Typecheck + tests
 try {
   console.log('\n> npm run check\n')
   const out = run('npm run check')
   const tail = out.split('\n').filter((l) => l.includes('Tests') || l.includes('Test Files')).slice(-2).join(' | ')
-  record('npm run check (typecheck + tests)', true, tail || 'green')
+  record('check', 'npm run check (typecheck + tests)', PASS, tail || 'green')
 } catch (err) {
-  record('npm run check (typecheck + tests)', false, String(err.stdout ?? err.message).split('\n').filter(Boolean).slice(-6).join(' | '))
+  record(
+    'check',
+    'npm run check (typecheck + tests)',
+    FAIL,
+    formatErrorDetail(err),
+    'fix the failing test/typecheck before any release attempt',
+  )
 }
 
-// 4. Production build
+// 8. Production build
 try {
   console.log('\n> npm run build\n')
   run('npm run build')
-  record('npm run build', true)
+  record('build', 'npm run build', PASS)
 } catch (err) {
-  record('npm run build', false, String(err.stdout ?? err.message).split('\n').filter(Boolean).slice(-4).join(' | '))
+  record('build', 'npm run build', FAIL, formatErrorDetail(err), 'fix the build errors')
 }
 
-// 5. Package contents (npm pack --dry-run)
+// 9. Package contents (npm pack --dry-run)
+let packFiles = null
 try {
-  const raw = execSync('npm pack --dry-run --json', { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-  const start = raw.indexOf('[')
-  const end = raw.lastIndexOf(']')
-  const manifest = JSON.parse(raw.slice(start, end + 1))
-  const files = manifest[0].files.map((f) => f.path)
-
-  const required = [
-    'package.json',
-    'bin/pluton.js',
-    'dist/cli/main.js',
-    'dist/server/static-assets.js',
-    'docker/worker/Dockerfile',
-    'templates/teams/full-stack.yaml',
-    'templates/roles/manager.md',
-    'README.md',
-    'THIRD_PARTY_NOTICES.md',
-  ]
-  const missing = required.filter((f) => !files.includes(f))
-  if (missing.length === 0) {
-    record('package contents: required assets', true, `${files.length} files, all required entries present`)
-  } else {
-    record('package contents: required assets', false, `missing: ${missing.join(', ')}`)
-  }
-
-  const forbiddenPattern = /(^|\/)tests?\//i
-  const forbiddenExt = /\.(env|sqlite|db|log|tgz)$/i
-  const forbidden = files.filter(
-    (f) => forbiddenPattern.test(f) || forbiddenExt.test(f) || f.includes('node_modules') || f.startsWith('.pluton/'),
-  )
-  if (forbidden.length === 0) {
-    record('package contents: no dev/local artifacts', true)
-  } else {
-    record('package contents: no dev/local artifacts', false, `unexpected: ${forbidden.slice(0, 8).join(', ')}`)
-  }
+  const raw = execSync('npm pack --dry-run --json', {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 600_000,
+  })
+  packFiles = parsePackManifest(raw).files
 } catch (err) {
-  record('package contents (npm pack --dry-run)', false, err.message)
+  record(
+    'pack-manifest',
+    'package manifest (npm pack --dry-run)',
+    FAIL,
+    formatErrorDetail(err),
+    'run `npm pack --dry-run --json` manually and fix the reported problem',
+  )
+}
+
+if (packFiles) {
+  const missing = REQUIRED_PACK_FILES.filter((f) => !packFiles.includes(f))
+  if (missing.length === 0) {
+    record('pack-required', 'package contents: required assets', PASS, `${packFiles.length} files, all required entries present`)
+  } else {
+    record(
+      'pack-required',
+      'package contents: required assets',
+      FAIL,
+      `missing: ${missing.join(', ')}`,
+      'check the "files" whitelist in package.json and the build output',
+    )
+  }
+
+  const forbidden = findForbiddenPackFiles(packFiles)
+  if (forbidden.length === 0) {
+    record('pack-forbidden', 'package contents: no dev/local artifacts', PASS)
+  } else {
+    record(
+      'pack-forbidden',
+      'package contents: no dev/local artifacts',
+      FAIL,
+      `unexpected: ${forbidden.slice(0, 8).join(', ')}`,
+      'remove these paths from the published set (files whitelist / build output)',
+    )
+  }
+
+  const patterns = buildLeakPatterns({ homeDir: homedir(), repoRoot, platform: process.platform })
+  const findings = findContentLeaks({
+    files: packFiles,
+    readFile: (f) => {
+      const buf = readFileSync(join(repoRoot, f))
+      if (buf.subarray(0, 4096).includes(0)) return '' // binary: no text leaks to find
+      return buf.toString('utf8')
+    },
+    patterns,
+  })
+  if (findings.length === 0) {
+    record('pack-content', 'package contents: no local paths or credentials', PASS, `${packFiles.length} files scanned`)
+  } else {
+    record(
+      'pack-content',
+      'package contents: no local paths or credentials',
+      FAIL,
+      findings.slice(0, 6).map((f) => `${f.file} (${f.label})`).join(', '),
+      'remove host-local paths/credentials from the shipped files or their build inputs',
+    )
+  }
+}
+
+// 10. Production dependency audit
+{
+  let raw = ''
+  let failure = ''
+  try {
+    raw = execSync('npm audit --omit=dev --json', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 120_000,
+    })
+  } catch (err) {
+    raw = err?.stdout ? String(err.stdout) : ''
+    failure = formatErrorDetail(err, 2)
+  }
+  let audit = null
+  try {
+    audit = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
+  } catch {
+    audit = null
+  }
+  const total = audit?.metadata?.vulnerabilities?.total
+  if (typeof total !== 'number') {
+    record(
+      'audit',
+      'dependency audit (production)',
+      NOT_TESTED,
+      `npm registry unreachable or audit output unparsable${failure ? ` (${failure})` : ''}`,
+      'run `npm audit --omit=dev` when the registry is reachable',
+    )
+  } else if (total === 0) {
+    record('audit', 'dependency audit (production)', PASS, '0 vulnerabilities in production dependencies')
+  } else {
+    const names = Object.keys(audit.vulnerabilities ?? {}).slice(0, 5).join(', ')
+    record(
+      'audit',
+      'dependency audit (production)',
+      FAIL,
+      `${total} vulnerability/ies: ${names}${Object.keys(audit.vulnerabilities ?? {}).length > 5 ? ', …' : ''}`,
+      'review `npm audit --omit=dev` and update or document each finding before release',
+    )
+  }
+}
+
+// 11. POSIX permission enforcement
+if (process.platform === 'win32') {
+  record(
+    'posix-perms',
+    'file permission enforcement (POSIX 0600)',
+    NOT_TESTED,
+    'Windows does not enforce POSIX mode bits',
+    'runs automatically on the Linux/macOS CI jobs (ubuntu-latest, macos-latest)',
+  )
+} else {
+  const probeDir = mkdtempSync(join(tmpdir(), 'pluton-gate-perms-'))
+  try {
+    const probeFile = join(probeDir, 'probe')
+    writeFileSync(probeFile, 'x', { mode: 0o600 })
+    const mode = statSync(probeFile).mode & 0o777
+    if (mode === 0o600) {
+      record('posix-perms', 'file permission enforcement (POSIX 0600)', PASS, 'created with mode 0600 and observed 0600')
+    } else {
+      record(
+        'posix-perms',
+        'file permission enforcement (POSIX 0600)',
+        FAIL,
+        `expected 0600, observed 0${mode.toString(8)}`,
+        'check the umask and filesystem mount options (token/instance files rely on 0600)',
+      )
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true })
+  }
+}
+
+// Owner decisions required before the first public publish
+if (pkg.private === true) {
+  record(
+    'owner-private',
+    'owner decision: private flag',
+    BLOCKED,
+    'package.json has "private": true — npm publish is blocked by design until the owner removes it',
+    'owner removes "private": true in the release commit (docs/RELEASE.md)',
+  )
+} else {
+  record('owner-private', 'owner decision: private flag', PASS, 'private flag absent (publishable)')
+}
+if (pkg.license === 'UNLICENSED' || pkg.license === undefined) {
+  record(
+    'owner-license',
+    'owner decision: license',
+    BLOCKED,
+    `license is "${pkg.license ?? 'missing'}" — a public release needs an outbound license decision (ADR-0011)`,
+    'owner chooses a license, adds LICENSE, and updates package.json + THIRD_PARTY_NOTICES.md',
+  )
+} else {
+  record('owner-license', 'owner decision: license', PASS, `license: ${pkg.license}`)
 }
 
 // Summary
 console.log('\n' + '─'.repeat(72))
-const failed = results.filter((r) => r.ok === false)
-const blocked = results.filter((r) => r.ok === null)
-console.log(`checks: ${results.length} | passed: ${results.filter((r) => r.ok === true).length} | failed: ${failed.length} | owner blockers: ${blocked.length}`)
-if (blocked.length > 0) {
-  console.log('\nOwner decisions required before any public publish:')
-  for (const b of blocked) console.log(`  BLOCKER ${b.name}: ${b.detail}`)
+const summary = summarize(results)
+console.log(
+  `checks: ${summary.total} | passed: ${summary.passed} | failed: ${summary.failed} | not tested: ${summary.notTested} | owner blockers: ${summary.blocked}`,
+)
+
+const attention = results.filter((r) => r.status !== PASS && r.fix)
+if (attention.length > 0) {
+  console.log('\nItems needing attention:')
+  for (const r of attention) console.log(`  ${renderResultLine(r)}`)
 }
-console.log('\nAutomated gate: ' + (failed.length === 0 ? 'PASS' : 'FAIL'))
-process.exitCode = failed.length === 0 ? 0 : 1
+
+console.log(`\nTECHNICAL VALIDATION: ${summary.technical}`)
+if (summary.blocked > 0) {
+  console.log(`PUBLICATION: BLOCKED — ${summary.blocked} owner/infrastructure blocker(s) unresolved; do not publish`)
+} else {
+  console.log('PUBLICATION: ELIGIBLE — automated validation is green; publishing still requires explicit human approval (docs/RELEASE.md)')
+}
+
+process.exitCode = summary.exitCode

@@ -210,7 +210,7 @@ _Phases 0–5 complete; Phase 6 essentially complete (bridge + supervisor + live
 engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring delivered as
 `pluton approvals`). Phase 7 complete (verification gate + integration checkout via `pluton integrate`).
 Phase 8 complete (interactive chat TUI for the operator Muse via `pluton`, `pluton chat [muse]`, and `pluton muse chat <muse>`).
-Live status (2026-10-18): 837 tests / 102 files green
+Live status (2026-10-18): 863 tests / 104 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
@@ -273,7 +273,7 @@ P1 (audit roadmap PR-4) landed in the working tree 2026-10-18:
 2. Structured Network Policy (Audit Gap L7): per-Muse network isolation overrides (`muses.<id>.network_policy`: `none` | `restricted` | `open`), custom Docker network binding (`runtime.internal_network_name`), validated in `src/config/schema.ts`, `src/sandbox/docker.ts`, `src/sandbox/muse-containers.ts`, `src/cli/commands/run.ts`, and `src/cli/commands/approvals.ts`. Covered by `tests/unit/muse-network-policy.test.ts`.
 3. Auto-continue Path for Approvals (ADR-0005): automatic multi-stage progression when approving `integration.apply` or resuming parked runs via `decideApproval(..., { autoContinue: true })` and `pluton approvals approve <id> --continue`. Covered by `tests/unit/approvals-autocontinue.test.ts`.
 4. Graphical Workspace Enhancements: Interactive Task DAG visualizer with dependency edge tags and task actions in `Agent Orchestra`, interactive approval decision buttons ("Approve & Continue", "Approve", "Deny") with scope inspection in `Security & Operator Approvals`, and Worktree Diff viewer with unified additions/deletions/hunk highlighting in `Workspace Files & Diffs`. Covered by `tests/integration/server-api.test.ts`.
-Public-release gate hardening landed in the working tree 2026-10-18 (not yet committed), each item
+Public-release gate hardening landed 2026-10-18 (commit `17d1a41`), each item
 reproduced before the fix and covered by a regression test:
 1. Instance matching now compares workspace paths with platform semantics (`sameDirPath`): on Windows/macOS `y:\Pluton` and `Y:\Pluton` are one workspace, so a healthy server is no longer rejected (and duplicated) across path-case variants.
 2. `pluton --stop` only signals a PID that passes the authenticated health check; a stale instance file whose PID was recycled by an unrelated process is no longer killed (it reports a warning instead).
@@ -282,4 +282,5 @@ reproduced before the fix and covered by a regression test:
 5. `/api/files/content` and `/api/files` canonicalize through `realpath` and refuse directory junctions/symlinks that resolve outside the workspace (parity with the engine tool bridge).
 6. Token exposure hardening: `Referrer-Policy: no-referrer` on asset and API responses, and the detached `server.log` (which contains the tokenized URL) is created `0600`.
 7. Repeatable release gate: `npm run release:check` (typecheck + tests + build + package-content audit + version/working-tree checks) and the staged publish/rollback procedure in `docs/RELEASE.md`.
-Next: Linux container user-namespace/mount UID alignment._
+Cross-platform release-readiness audit landed 2026-10-18 (uncommitted; awaiting owner-authorized commit): the gate was rebuilt around PASS / FAIL / NOT TESTED / BLOCKED semantics and now also verifies `engines.node`, lockfile consistency, README/NOTICES link integrity, packaged-file content (host-local paths, credential shapes), the production dependency audit (NOT TESTED when the registry is unreachable) and POSIX `0600` enforcement (NOT TESTED on Windows); `docs/RELEASE.md` documents every check, the platform matrix and the technical-validation vs publication-authorization split. Two portability defects were reproduced and fixed: `findAppModeBrowser` unconditionally reported `microsoft-edge` on Linux (a missing opener also crashed the host through an unhandled spawn `error` event — reproduced), and the path-traversal test hard-coded Windows paths. Added: CI workflow `.github/workflows/ci.yml` (ubuntu/macos/windows on Node 24 + docker/tmux E2E on Linux; NOT TESTED until a git remote exists) and a clean-install smoke script (`npm run smoke:package`). Local evidence: 863 tests / 104 files green; gate 12 PASS / 0 FAIL / 1 NOT TESTED / 2 owner BLOCKED (exit 0); Docker/tmux E2E 5/5 via Docker Desktop (Linux containers on a Windows host — not a native Linux host); package smoke PASS in a temp path with a space. Native Linux/macOS runs and the public publish remain NOT TESTED / BLOCKED.
+Next: owner decisions for the first public publish (outbound license, removing `private`) and the first CI run once a git remote exists._

@@ -126,8 +126,8 @@ export function isPidAlive(pid: number): boolean {
 
 /**
  * Compare two directory paths with platform path semantics.
- * Windows and macOS filesystems are case-insensitive by default, so `y:\Pluton` and
- * `Y:\Pluton` name the same workspace. A byte-wise comparison would reject a healthy
+ * Windows and macOS filesystems are case-insensitive by default, so `c:\work\app` and
+ * `C:\Work\App` name the same workspace. A byte-wise comparison would reject a healthy
  * server as an unintended service and spawn a duplicate instance (release-gate fix).
  */
 export function sameDirPath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {

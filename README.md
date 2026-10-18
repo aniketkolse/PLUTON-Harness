@@ -57,7 +57,10 @@ npm install && npm run build && npm link
 ```
 
 Releasing this package is a staged, gated process — see
-[`docs/RELEASE.md`](docs/RELEASE.md) and run `npm run release:check`.
+[`docs/RELEASE.md`](docs/RELEASE.md) and run `npm run release:check` plus
+`npm run smoke:package` (clean-install smoke). The CI workflow
+(`.github/workflows/ci.yml`) runs both on Linux, macOS and Windows once this
+repository is hosted with a remote.
 
 ### Launching the Graphical Workspace (Primary UX)
 
@@ -106,7 +109,7 @@ Pluton uses a two-tier desktop delivery model with **one shared graphical fronte
 
 ## Troubleshooting & Lifecycle Management
 
-- **Port in use or existing server:** Pluton automatically reuses an existing healthy server instance running for the same workspace (`checkServerHealth` verifies token, project ID, and workspace path — path comparison is case-insensitive where the filesystem is, e.g. `Y:\Pluton` = `y:\pluton`). If an explicitly requested port is taken, the error names the port and suggests `--port`.
+- **Port in use or existing server:** Pluton automatically reuses an existing healthy server instance running for the same workspace (`checkServerHealth` verifies token, project ID, and workspace path — path comparison is case-insensitive where the filesystem is, e.g. `C:\Work\App` = `c:\work\app`). If an explicitly requested port is taken, the error names the port and suggests `--port`.
 - **Stale instance after crash:** If a previous server process terminated abruptly, `pluton` detects dead PIDs and cleans up stale `.pluton/run/server.json` files automatically.
 - **Stopping servers:** Run `pluton --stop` in the workspace directory to cleanly terminate background daemons. For safety, `--stop` only signals a process that passes the authenticated health check for this workspace; a stale PID that was recycled by an unrelated process is reported, not killed.
 - **Concurrent launches:** Launching twice at once is serialized by an atomic workspace claim (`.pluton/run/server.claim`); the second launch waits for and reuses the first server instead of starting a duplicate.

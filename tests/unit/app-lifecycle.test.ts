@@ -239,9 +239,15 @@ describe('desktop and browser application lifecycle', () => {
       expect(readServerInstance(root)).toBeNull()
       expect(stopRes.warning).toContain(String(innocentPid))
 
-      await new Promise((r) => setTimeout(r, 500))
+      // A regression would signal the PID before --stop returns, but signal
+      // delivery is asynchronous — wait for an exit event in a bounded window
+      // instead of sleeping a fixed duration.
+      const exited = await Promise.race([
+        new Promise<boolean>((r) => innocent.once('exit', () => r(true))),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 750)),
+      ])
+      expect(exited).toBe(false)
       expect(innocent.exitCode).toBeNull()
-      expect(innocent.killed).toBe(false)
     } finally {
       innocent.kill('SIGKILL')
     }

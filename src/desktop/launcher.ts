@@ -7,7 +7,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 
 export interface DesktopLaunchResult {
   mode: 'desktop-app' | 'browser'
@@ -25,14 +25,18 @@ export interface LaunchOptions {
 
 /**
  * Known binary locations for Chromium-based browsers that support `--app=URL` mode.
+ * `platform`, `fileExists` and `env` are injectable for tests; defaults match
+ * the running process.
  */
-export function findAppModeBrowser(): string | null {
-  const platform = process.platform
-
+export function findAppModeBrowser(
+  platform: NodeJS.Platform = process.platform,
+  fileExists: (path: string) => boolean = existsSync,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
   if (platform === 'win32') {
-    const progFiles86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)'
-    const progFiles = process.env.ProgramFiles ?? 'C:\\Program Files'
-    const localAppData = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? 'C:\\Users\\Default', 'AppData\\Local')
+    const progFiles86 = env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)'
+    const progFiles = env.ProgramFiles ?? 'C:\\Program Files'
+    const localAppData = env.LOCALAPPDATA ?? join(env.USERPROFILE ?? 'C:\\Users\\Default', 'AppData\\Local')
 
     const candidatePaths = [
       join(progFiles86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
@@ -44,7 +48,7 @@ export function findAppModeBrowser(): string | null {
     ]
 
     for (const p of candidatePaths) {
-      if (existsSync(p)) return p
+      if (fileExists(p)) return p
     }
   } else if (platform === 'darwin') {
     const candidatePaths = [
@@ -53,14 +57,18 @@ export function findAppModeBrowser(): string | null {
       '/Applications/Chromium.app/Contents/MacOS/Chromium',
     ]
     for (const p of candidatePaths) {
-      if (existsSync(p)) return p
+      if (fileExists(p)) return p
     }
   } else {
-    // Linux / BSD
+    // Linux / BSD: probe each PATH directory explicitly — a bare binary name
+    // must not be reported as found when it is not installed.
     const binaries = ['microsoft-edge', 'google-chrome', 'chromium-browser', 'chromium']
+    const pathDirs = (env['PATH'] ?? '').split(delimiter).filter((d) => d !== '')
     for (const bin of binaries) {
-      // In non-windows, binary name is typically resolved via PATH
-      return bin
+      for (const dir of pathDirs) {
+        const candidate = join(dir, bin)
+        if (fileExists(candidate)) return candidate
+      }
     }
   }
 
@@ -90,6 +98,9 @@ export function launchDesktopApp(options: LaunchOptions): DesktopLaunchResult {
         windowsHide: false,
       })
 
+      // Best-effort launch: a missing or failing browser binary must never
+      // crash the host with an unhandled 'error' event (spawn ENOENT).
+      child.on('error', () => {})
       child.unref()
 
       return {
@@ -119,6 +130,7 @@ export function launchDesktopApp(options: LaunchOptions): DesktopLaunchResult {
     windowsHide: true,
   })
 
+  child.on('error', () => {})
   child.unref()
 
   return {
