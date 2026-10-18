@@ -4,7 +4,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { resolve } from 'node:path'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bootstrapStore } from '../../bootstrap.ts'
 import { findProjectRoot, loadConfig } from '../../config/load.ts'
@@ -146,11 +147,22 @@ export async function appRun(
     const binPath = fileURLToPath(new URL('../../../bin/pluton.js', import.meta.url))
     const childArgs = ['app', targetPath, '--headless']
     if (opts.port) childArgs.push('--port', String(opts.port))
+
+    const logDir = join(rootDir, '.pluton', 'run')
+    mkdirSync(logDir, { recursive: true })
+    const logPath = join(logDir, 'server.log')
+    const logFd = openSync(logPath, 'a')
+
     const child = spawn(process.execPath, [binPath, ...childArgs], {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', logFd, logFd],
       windowsHide: true,
     })
+    try {
+      closeSync(logFd)
+    } catch {
+      // Ignore
+    }
     child.unref()
 
     // Poll until healthy (up to 5s)
@@ -177,7 +189,16 @@ export async function appRun(
         }
       }
     }
-    throw new InternalError('detached app server failed to become ready within 5 seconds')
+    let detail = ''
+    try {
+      if (existsSync(logPath)) {
+        const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean)
+        detail = lines.slice(-3).join('; ')
+      }
+    } catch {
+      // Ignore
+    }
+    throw new InternalError(`detached app server failed to become ready within 5 seconds${detail ? `: ${detail}` : ''}`)
   }
 
   // 5. In-process server execution

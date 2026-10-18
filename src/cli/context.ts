@@ -21,5 +21,6 @@ export function requireProject(cwd: string): ProjectContext {
 export function optionalProject(cwd: string): ProjectContext | null {
   const root = findProjectRoot(cwd)
   if (!root) return null
-  return { rootDir: root, configPath: `${root}\\pluton.yaml`, loaded: loadConfig(root) }
+  const loaded = loadConfig(root)
+  return { rootDir: loaded.rootDir, configPath: loaded.configPath, loaded }
 }

@@ -4,9 +4,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { request } from 'node:http'
-import type { ServerInstanceInfo } from './types.ts'
+import type { HealthResponse, ServerInstanceInfo } from './types.ts'
 
 export function serverRunDir(rootDir: string): string {
   return join(rootDir, '.pluton', 'run')
@@ -19,7 +19,10 @@ export function serverInstancePath(rootDir: string): string {
 export function writeServerInstance(rootDir: string, info: ServerInstanceInfo): void {
   const dir = serverRunDir(rootDir)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(serverInstancePath(rootDir), JSON.stringify(info, null, 2), 'utf8')
+  writeFileSync(serverInstancePath(rootDir), JSON.stringify(info, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  })
 }
 
 export function readServerInstance(rootDir: string): ServerInstanceInfo | null {
@@ -84,13 +87,35 @@ export function checkServerHealth(instance: ServerInstanceInfo, timeoutMs = 2000
         timeout: timeoutMs,
       },
       (res) => {
-        if (res.statusCode === 200) {
-          res.resume()
-          resolveResult(true)
-        } else {
+        if (res.statusCode !== 200) {
           res.resume()
           resolveResult(false)
+          return
         }
+
+        let raw = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          raw += chunk
+        })
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(raw) as Partial<HealthResponse>
+            if (parsed.ok === true && typeof parsed.version === 'string') {
+              if (parsed.rootDir && instance.rootDir) {
+                if (resolve(parsed.rootDir) !== resolve(instance.rootDir)) {
+                  resolveResult(false)
+                  return
+                }
+              }
+              resolveResult(true)
+              return
+            }
+            resolveResult(false)
+          } catch {
+            resolveResult(false)
+          }
+        })
       },
     )
 
