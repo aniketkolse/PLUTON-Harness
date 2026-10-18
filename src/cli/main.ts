@@ -26,7 +26,7 @@ import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { integrateRun } from './commands/integrate.ts'
 import { mcpServe } from './commands/mcp.ts'
-import { runRun } from './commands/run.ts'
+import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
 import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProfile } from '../sandbox/image.ts'
@@ -758,7 +758,8 @@ program
   .description('run the project verification checks for a run and record the verdict (verifying → completed|failed)')
   .requiredOption('--run <id>', 'run id (full id or unique suffix)')
   .option('--task <id>', 'verify exactly one task (must be in verifying)')
-  .action(async (opts: { run: string; task?: string }, cmd: Command) => {
+  .option('--dispatch', 're-dispatch unblocked tasks immediately after verification')
+  .action(async (opts: { run: string; task?: string; dispatch?: boolean }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
@@ -854,26 +855,43 @@ program
             )
           }
         }
-        human.push(
-          runVerdict !== null
-            ? `run ${finalRun.id}  → ${finalRun.state}`
-            : `run ${finalRun.id}  → ${finalRun.state} (not closed: ${
-                [
-                  ...(stillVerifying.length > 0 ? [`${stillVerifying.length} task(s) awaiting verification`] : []),
-                  ...(blockedTasks.length > 0
-                    ? [
-                        `blocked behind unverified dependencies: ${blockedTasks
-                          .map((t) => `${t.id} (${t.state})`)
-                          .join(', ')}`,
-                      ]
-                    : []),
-                ].join('; ') || 'no run verdict recorded'
-              })`,
-        )
+        if (runVerdict?.outcome === 'redispatched') {
+          human.push(
+            `run ${finalRun.id}  → ${finalRun.state} (redispatched ${runVerdict.redispatchedTasks?.length ?? 0} unblocked task(s): ${runVerdict.redispatchedTasks?.join(', ') ?? ''})`,
+          )
+        } else if (runVerdict !== null) {
+          human.push(`run ${finalRun.id}  → ${finalRun.state}`)
+        } else {
+          human.push(
+            `run ${finalRun.id}  → ${finalRun.state} (not closed: ${
+              [
+                ...(stillVerifying.length > 0 ? [`${stillVerifying.length} task(s) awaiting verification`] : []),
+                ...(blockedTasks.length > 0
+                  ? [
+                      `blocked behind unverified dependencies: ${blockedTasks
+                        .map((t) => `${t.id} (${t.state})`)
+                        .join(', ')}`,
+                    ]
+                  : []),
+              ].join('; ') || 'no run verdict recorded'
+            })`,
+          )
+        }
+
+        let redispatchSummary = null
+        if (opts.dispatch && runVerdict?.outcome === 'redispatched') {
+          store.close()
+          redispatchSummary = await resumeRun(ctx, run.id, { skipManager: true })
+          human.push(
+            `redispatched execution completed → run ${redispatchSummary.runId} is ${redispatchSummary.state} (${redispatchSummary.outcome ?? 'in progress'})`,
+          )
+        }
+
         emitOk(io, json, human.join('\n'), {
           run: { id: finalRun.id, state: finalRun.state },
           tasks: taskReports,
           runVerdict,
+          ...(redispatchSummary !== null ? { redispatchSummary } : {}),
           ...(blockedTasks.length > 0 ? { blockedTasks: blockedTasks.map((t) => t.id) } : {}),
         })
       } finally {
@@ -889,7 +907,7 @@ program
 program
   .command('run')
   .description('start an orchestration run: the Manager Muse plans and delegates through the restricted tool bridge')
-  .option('--goal <text>', 'what the run must achieve (required)')
+  .option('--goal <text>', 'what the run must achieve (required for new runs)')
   .option(
     '--acceptance <criterion>',
     'acceptance criterion (repeatable)',
@@ -898,17 +916,34 @@ program
   )
   .option('--manager <muse>', 'Muse that coordinates the run (default: the supervisor-role Muse)')
   .option('--request-id <id>', 'idempotency key: retrying with the same id never creates a second run')
+  .option('--resume <id>', 'resume an existing run (full run id or unique suffix)')
   .action(
-    async (opts: { goal?: string; acceptance: string[]; manager?: string; requestId?: string }, cmd: Command) => {
+    async (
+      opts: { goal?: string; acceptance: string[]; manager?: string; requestId?: string; resume?: string },
+      cmd: Command,
+    ) => {
       const json = jsonMode(cmd)
       await runCommand(io, json, async () => {
         const ctx = requireProject(process.cwd())
-        const summary = await runRun(ctx, {
-          goal: opts.goal ?? '',
-          acceptance: opts.acceptance,
-          ...(opts.manager !== undefined ? { managerRef: opts.manager } : {}),
-          ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
-        })
+        let summary: RunSummary
+        if (opts.resume !== undefined) {
+          const { store } = bootstrapStore(ctx.loaded)
+          let targetRunId: string
+          try {
+            const r = runByRef(store, opts.resume)
+            targetRunId = r.id
+          } finally {
+            store.close()
+          }
+          summary = await resumeRun(ctx, targetRunId, { skipManager: true })
+        } else {
+          summary = await runRun(ctx, {
+            goal: opts.goal ?? '',
+            acceptance: opts.acceptance,
+            ...(opts.manager !== undefined ? { managerRef: opts.manager } : {}),
+            ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
+          })
+        }
         const counts = Object.entries(summary.taskCounts)
           .map(([state, n]) => `${state}:${n}`)
           .join('  ')

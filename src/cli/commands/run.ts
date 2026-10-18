@@ -8,7 +8,7 @@ import {
   ValidationError,
 } from '../../domain/errors.ts'
 import type { JsonValue, MuseRecord, RunRecord } from '../../domain/models.ts'
-import { TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
+import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
@@ -254,6 +254,7 @@ export function createRunSupervisor(args: {
   containerContexts: Map<string, DockerExecContext> | null
   deps: RunDeps
   diagnostic: (line: string) => void
+  skipManager?: boolean
 }): RunSupervisor {
   const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, containerContexts, deps, diagnostic } = args
   const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
@@ -277,6 +278,7 @@ export function createRunSupervisor(args: {
     maxRetriesPerTask: settings.maxRetriesPerTask,
     ...(budgets !== undefined ? { usageLedger: new UsageLedger(run.id, budgets, store) } : {}),
     verificationConfigured: ctx.loaded.config.project.verification.length > 0,
+    ...(args.skipManager !== undefined ? { skipManager: args.skipManager } : {}),
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
     workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),
     engineEnv: () => ({}),
@@ -555,6 +557,79 @@ export async function runRun(
         bridgeUrl,
         containerContexts,
         deps,
+        diagnostic: (line) => {
+          process.stderr.write(`run ${run.id}: ${line}\n`)
+        },
+      })
+      const outcome = await supervisor.runToCompletion()
+      return {
+        runId: outcome.runId,
+        state: outcome.state,
+        outcome: outcome.outcome,
+        taskCounts: outcome.taskCounts,
+        managerSummary: outcome.managerSummary,
+        unfinishedTasks: outcome.unfinishedTasks,
+        blockedTasks: outcome.blockedTasks,
+        verificationPending: outcome.state === 'verifying',
+      }
+    } finally {
+      await http.stop()
+    }
+  } finally {
+    store.close()
+  }
+}
+
+export interface ResumeRunOptions {
+  skipManager?: boolean
+}
+
+export async function resumeRun(
+  ctx: ProjectContext,
+  runId: string,
+  opts: ResumeRunOptions = {},
+  deps: RunDeps = {},
+): Promise<RunSummary> {
+  const { store, projectId } = bootstrapStore(ctx.loaded)
+  try {
+    const run = store.getRun(runId)
+    if (isTerminalRunState(run.state)) {
+      throw new ValidationError(`run ${runId} is '${run.state}'; cannot resume a terminated run`)
+    }
+
+    const runtime = ctx.loaded.config.runtime
+    let containerContexts: Map<string, DockerExecContext> | null = null
+    if (ctx.loaded.config.sandbox.kind === 'docker') {
+      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
+      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
+    }
+
+    const limits = toolBridgeLimitsFromRuntime(runtime)
+    const wakeups = new WakeupRegistry()
+    const http = new ToolHttpServer({
+      serverName: 'pluton-tools',
+      serverVersion: PLUTON_VERSION,
+      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+    })
+    const started = await http.start()
+    const bridgeUrl =
+      containerContexts !== null
+        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
+        : `${http.url as string}mcp`
+
+    try {
+      const supervisor = createRunSupervisor({
+        ctx,
+        store,
+        projectId,
+        run,
+        limits,
+        wakeups,
+        http,
+        bridgeUrl,
+        containerContexts,
+        deps,
+        skipManager: opts.skipManager ?? true,
         diagnostic: (line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
         },

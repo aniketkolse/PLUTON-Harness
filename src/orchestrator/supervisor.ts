@@ -74,6 +74,7 @@ export interface SupervisorOptions {
   circuitBreaker?: CircuitBreaker
   usageLedger?: UsageLedger
   maxRetriesPerTask?: number
+  skipManager?: boolean
 }
 
 export interface RunOutcome {
@@ -194,6 +195,7 @@ export class RunSupervisor {
   readonly circuitBreaker: CircuitBreaker
   readonly usageLedger: UsageLedger
   private readonly maxRetriesPerTask: number
+  private readonly skipManager: boolean
   private readonly mutex = new KeyedMutex()
   private bridgeInstance: PlutonToolBridge | null = null
   private timedOut = false
@@ -225,6 +227,7 @@ export class RunSupervisor {
     this.circuitBreaker = opts.circuitBreaker ?? new CircuitBreaker()
     this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
     this.maxRetriesPerTask = opts.maxRetriesPerTask ?? 2
+    this.skipManager = opts.skipManager ?? false
   }
 
   /** The manager session's bridge (in-process; the HTTP/stdio transports wrap the same bridge). */
@@ -681,14 +684,16 @@ export class RunSupervisor {
 
     let managerOutcome: PromptOutcome | null = null
     let managerError: string | null = null
-    const managerCompletion = this.runManagerSession().then(
-      (o) => {
-        managerOutcome = o
-      },
-      (e: unknown) => {
-        managerError = (e instanceof Error ? e.message : String(e)).slice(0, 2_000)
-      },
-    )
+    const managerCompletion = this.skipManager
+      ? Promise.resolve()
+      : this.runManagerSession().then(
+          (o) => {
+            managerOutcome = o
+          },
+          (e: unknown) => {
+            managerError = (e instanceof Error ? e.message : String(e)).slice(0, 2_000)
+          },
+        )
 
     for (;;) {
       const current = this.store.getRun(this.runId)
@@ -705,7 +710,7 @@ export class RunSupervisor {
         break
       }
       this.dispatchReadyTasks()
-      const managerSettled = managerOutcome !== null || managerError !== null
+      const managerSettled = this.skipManager || managerOutcome !== null || managerError !== null
       if (this.allQuiescent(managerSettled)) break
       const remaining = deadline - this.now()
       if (remaining <= 0) {
@@ -736,7 +741,9 @@ export class RunSupervisor {
 
     const managerOutcome = this.managerOutcomeCache
     const managerError = this.managerErrorCache
-    const managerSummary = boundedSummary(managerOutcome?.summary ?? undefined)
+    const managerSummary = this.skipManager
+      ? 'resumed worker dispatch'
+      : boundedSummary(managerOutcome?.summary ?? undefined)
 
     let outcome: RunOutcome['outcome']
     let runState: RunState
@@ -746,7 +753,7 @@ export class RunSupervisor {
     } else if (managerError !== null) {
       outcome = 'failure'
       runState = 'failed'
-    } else if (managerOutcome?.outcome === 'success') {
+    } else if (this.skipManager || managerOutcome?.outcome === 'success') {
       if (anyBad) {
         outcome = 'failure'
         runState = 'failed' // durable records disagree with the "success" claim

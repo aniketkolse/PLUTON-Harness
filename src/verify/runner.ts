@@ -379,13 +379,16 @@ export function applyTaskVerificationVerdict(
 export interface RunVerdict {
   runId: string
   state: RunState
-  outcome: 'success' | 'failure'
+  outcome: 'success' | 'failure' | 'redispatched'
+  redispatchedTasks?: string[]
 }
 
 /**
- * Close a `verifying` run from durable records only: all tasks terminal →
- * `completed` when every task completed, `failed` when any did not. Anything
- * still open (or an empty task list) leaves the run `verifying`.
+ * Close a `verifying` run from durable records only:
+ * - If downstream tasks are unblocked by verification, transitions run back to `active` for re-dispatch
+ * - If open tasks are permanently blocked (e.g. dependency failed), transitions run to `failed`
+ * - If all tasks terminal: `completed` when every task completed, `failed` when any did not
+ * - When tasks are still actively verifying, leaves the run in `verifying` (returns null)
  */
 export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | null {
   const run = store.getRun(runId)
@@ -393,7 +396,48 @@ export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | nu
   const tasks = store.listTasks(runId)
   if (tasks.length === 0) return null
   const open = tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state))
-  if (open.length > 0) return null
+  if (open.length > 0) {
+    const ready = store.listReadyTasks(runId)
+    if (ready.length > 0) {
+      // Re-dispatch: downstream tasks have been unblocked by successful verification!
+      store.setRunState(runId, 'active')
+      const unblockedTaskIds = ready.map((t) => t.id)
+      store.appendEvent({
+        projectId: run.projectId,
+        runId,
+        type: 'run.redispatched',
+        payload: {
+          via: 'verification',
+          unblockedTaskIds,
+          count: unblockedTaskIds.length,
+        },
+      })
+      return {
+        runId,
+        state: 'active',
+        outcome: 'redispatched',
+        redispatchedTasks: unblockedTaskIds,
+      }
+    }
+
+    // If any tasks are still in verifying or another active state, remain in verifying
+    const stillVerifying = open.some((t) => t.state === 'verifying')
+    if (stillVerifying) return null
+
+    // If all open tasks are permanently blocked (none ready, none verifying), fail the run
+    const state: RunState = 'failed'
+    store.setRunState(runId, state, {
+      finalSummary: 'verification failed; downstream tasks blocked',
+    })
+    store.appendEvent({
+      projectId: run.projectId,
+      runId,
+      type: 'run.finished',
+      payload: { outcome: 'failure', via: 'verification_blocked', openTasks: open.length },
+    })
+    return { runId, state, outcome: 'failure' }
+  }
+
   const allCompleted = tasks.every((t) => t.state === 'completed')
   const state: RunState = allCompleted ? 'completed' : 'failed'
   store.setRunState(runId, state, {

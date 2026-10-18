@@ -6,12 +6,8 @@ dist/
 coverage/
 
 # Pluton private runtime state (never committed)
-.pluton/state/
-.pluton/engine-homes/
-.pluton/worktrees/
-.pluton/logs/
-.pluton/workspaces/
-.pluton/cache/
+.pluton/
+
 
 # Local scratch (agent session artifacts)
 .pluton-tmp/

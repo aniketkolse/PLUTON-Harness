@@ -267,7 +267,11 @@ Dual Desktop + Browser Graphical Application (ADR-0014) landed in the working tr
 2. Shared Graphical Workspace Frontend (`src/server/static-assets.ts`) delivered as an offline-capable SPA supporting conversation management, real-time message streaming, markdown formatting, tool cards, agent orchestra inspector, security approvals, workspace file inspection, and runtime diagnostics.
 3. Desktop Shell Launcher (`src/desktop/launcher.ts`) launching dedicated app-mode windows via Microsoft Edge or Google Chrome (`--app=http://...`) on Windows/macOS/Linux with automatic browser fallback.
 4. Windows PowerShell CLI Launcher (`pluton`, `pluton .`, `pluton <path>`, `pluton app`) with `--desktop`, `--browser`, `--port`, `--headless`, `--detach`, `--status`, and `--stop` flags, supporting Windows paths with spaces and drive letters. TUI chat remains accessible via `pluton --tui` or `pluton chat`.
-Live test status: 800 tests / 96 files green (`npm run check` = typecheck + unit + integration tests).
-Next (not in this build): network policy `restricted` enforcement, container behavior on Linux
-hosts (mount ownership/uid alignment), re-dispatch after the verification gate, and an auto-continue
-path for `integration.apply` approvals._
+Live test status: 804 tests / 98 files green (`npm run check` = typecheck + unit + integration tests).
+P1 (audit roadmap PR-4) landed in the working tree 2026-10-18: Verification Gate Re-dispatch. Unblocks downstream dependent tasks once upstream verification verdicts succeed and enables continuous multi-stage pipeline execution without manual re-orchestration:
+1. `finalizeRunVerdict` in `src/verify/runner.ts` inspects remaining tasks in durable storage; when unblocked ready tasks exist, transitions run back to `active` with outcome `redispatched` and records a `run.redispatched` event.
+2. CLI `pluton verify --run <id> --dispatch` automatically drives resumed worker dispatch on newly unblocked tasks immediately following verification.
+3. Added `resumeRun` and `pluton run --resume <id>` to resume execution of non-terminal runs directly via `RunSupervisor` with worker dispatch (`skipManager: true`).
+4. Covered by `tests/unit/verify-redispatch.test.ts` and `tests/integration/verify-redispatch-e2e.test.ts`.
+Next (not in this build): structured network policy enforcement (per-Muse override), container behavior on Linux
+hosts (mount ownership/uid alignment), and an auto-continue path for `integration.apply` approvals._

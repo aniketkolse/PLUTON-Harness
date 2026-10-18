@@ -240,12 +240,15 @@ export const MAX_CHAT_MESSAGE_CHARS = 32_000
 
 export class Store {
   readonly db: DatabaseSync
+  private closed = false
 
   constructor(db: DatabaseSync) {
     this.db = db
   }
 
   close(): void {
+    if (this.closed) return
+    this.closed = true
     this.db.close()
   }
 
