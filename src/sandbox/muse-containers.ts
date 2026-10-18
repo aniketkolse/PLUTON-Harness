@@ -50,6 +50,7 @@ export interface MuseContainerSpec {
   imageId?: string
   limits: SandboxLimits
   network: 'restricted' | 'none' | 'open'
+  customNetwork?: string
   mounts: SandboxMount[]
 }
 
@@ -108,6 +109,7 @@ export async function ensureMuseContainer(
       // env arrive per-session at `docker exec` time (ADR-0008).
       env: {},
       network: spec.network,
+      ...(spec.customNetwork !== undefined ? { customNetwork: spec.customNetwork } : {}),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
     })
     containerId = result.containerId

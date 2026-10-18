@@ -27,6 +27,8 @@ export const museConfigSchema = z
     workspace_policy: z.enum(WORKSPACE_POLICIES).default('isolated-task-checkout'),
     permissions: z.array(z.enum(PERMISSIONS)).min(0).optional(),
     approval_mode: z.enum(APPROVAL_MODES).default('ask-for-sensitive-actions'),
+    /** Per-Muse network policy override ('restricted' | 'none' | 'open'). Defaults to runtime.network_policy. */
+    network_policy: z.enum(['restricted', 'none', 'open']).optional(),
     limits: z
       .object({
         cpu: z.number().positive().max(64).optional(),
@@ -54,6 +56,11 @@ export const runtimeConfigSchema = z
     max_retries_per_task: z.number().int().min(0).max(10).default(1),
     /** Worker network policy: 'restricted' = bridge with DNS (not an egress filter — see docs/SECURITY.md). */
     network_policy: z.enum(['restricted', 'none', 'open']).default('restricted'),
+    /** Custom Docker network for restricted policy isolation (e.g. internal network with egress disabled). */
+    internal_network_name: z
+      .string()
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, 'valid docker network name')
+      .optional(),
     max_prompt_chars: z.number().int().min(1_000).max(1_000_000).default(60_000),
     max_event_payload_chars: z.number().int().min(1_000).max(1_000_000).default(8_000),
     max_tool_result_chars: z.number().int().min(1_000).max(4_000_000).default(120_000),

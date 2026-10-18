@@ -54,6 +54,7 @@ export interface ProvisionMuseContainerOptions {
   imageId?: string
   limits: SandboxLimits
   network: 'restricted' | 'none' | 'open'
+  customNetwork?: string
   rootDir: string
   workspacesRoot: string
 }
@@ -73,6 +74,7 @@ export async function provisionMuseContainer(
     ...(opts.imageId !== undefined ? { imageId: opts.imageId } : {}),
     limits: opts.limits,
     network: opts.network,
+    ...(opts.customNetwork !== undefined ? { customNetwork: opts.customNetwork } : {}),
     mounts: museContainerMounts({
       muse: opts.muse,
       rootDir: opts.rootDir,

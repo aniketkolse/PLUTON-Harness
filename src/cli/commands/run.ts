@@ -187,6 +187,12 @@ export async function prepareContainerMode(
     if (!muse.enabled) continue
     if (allowed !== null && !allowed.has(muse.id)) continue
     const mounts = museContainerMounts({ muse, rootDir: ctx.rootDir, workspacesRoot })
+    const museConfig = ctx.loaded.config.muses[muse.id]
+    const networkPolicy = museConfig?.network_policy ?? runtime.network_policy
+    const customNetwork =
+      networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
+        ? runtime.internal_network_name
+        : undefined
     await provisionMuseContainer({
       manager,
       store,
@@ -199,7 +205,8 @@ export async function prepareContainerMode(
         memoryMb: runtime.default_memory_mb,
         pids: CONTAINER_PIDS_LIMIT,
       },
-      network: runtime.network_policy,
+      network: networkPolicy,
+      ...(customNetwork !== undefined ? { customNetwork } : {}),
       rootDir: ctx.rootDir,
       workspacesRoot,
     })

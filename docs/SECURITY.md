@@ -140,8 +140,11 @@ Stated plainly so nobody over-reads the guarantees above:
 4. **Container hardening is Docker's defaults plus the configured resource
    limits.** No custom seccomp/AppArmor profile, no read-only root filesystem
    guarantee for the worker image beyond what the Dockerfile sets.
-5. **Network policy `restricted` is declarative.** The config accepts the value;
-   per-Muse network enforcement beyond container defaults is not implemented.
+5. **Network policy supports per-Muse overrides and internal network binding.**
+   The runtime default is configured in `runtime.network_policy` (`restricted` | `none` | `open`).
+   Individual Muses can override this via `network_policy: 'none' | 'restricted' | 'open'` in `muses.<id>`.
+   When `restricted`, Pluton binds to `runtime.internal_network_name` when specified (e.g. an egress-filtered
+   or internal Docker bridge), and `--network none` disconnects egress completely for offline Muses.
 6. **The operator's terminal is trusted.** `pluton attach`-style inspection and
    human commands are not sandboxed against the host.
 7. **Deny lists are conservative blocklists**, not capability systems. They

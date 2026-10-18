@@ -265,6 +265,12 @@ async function provisionApprovedMuse(
     )
   }
   const runtime = config.runtime
+  const museConfig = config.muses[muse.id]
+  const networkPolicy = museConfig?.network_policy ?? runtime.network_policy
+  const customNetwork =
+    networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
+      ? runtime.internal_network_name
+      : undefined
   return provisionMuseContainer({
     manager,
     store,
@@ -277,7 +283,8 @@ async function provisionApprovedMuse(
       memoryMb: runtime.default_memory_mb,
       pids: CONTAINER_PIDS_LIMIT,
     },
-    network: runtime.network_policy,
+    network: networkPolicy,
+    ...(customNetwork !== undefined ? { customNetwork } : {}),
     rootDir: ctx.rootDir,
     workspacesRoot: workspaceDir(ctx.rootDir),
   })

@@ -92,7 +92,7 @@ export class DockerSandboxManager implements SandboxManager {
       '--tmpfs',
       TMPFS,
       '--network',
-      spec.network === 'none' ? 'none' : 'bridge',
+      spec.network === 'none' ? 'none' : spec.customNetwork ?? 'bridge',
     ]
     for (const host of spec.extraHosts ?? []) {
       args.push('--add-host', host)
@@ -129,6 +129,12 @@ export class DockerSandboxManager implements SandboxManager {
     }
     if (typeof cpus !== 'number' || !Number.isFinite(cpus) || cpus <= 0) {
       throw new ValidationError(`sandbox cpus must be a finite number > 0 (docker treats 0 as unlimited), got ${String(cpus)}`)
+    }
+    if (spec.customNetwork !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(spec.customNetwork)) {
+      throw new ValidationError(
+        `customNetwork must be a valid docker network name, got '${spec.customNetwork}'`,
+        { details: { customNetwork: spec.customNetwork } },
+      )
     }
     for (const mount of spec.mounts) {
       const absoluteHost = /^([A-Za-z]:[\\/]|\\\\|\/)/.test(mount.hostPath)

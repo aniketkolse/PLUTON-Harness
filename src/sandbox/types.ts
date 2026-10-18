@@ -36,6 +36,8 @@ export interface SandboxSpec {
   /** Explicit allowlist only — never host env passthrough (ADR-0004/0008). */
   env: Record<string, string>
   network: 'restricted' | 'none' | 'open'
+  /** Custom Docker network identifier (e.g. internal network name); applied when network is not 'none'. */
+  customNetwork?: string
   /** Extra `/etc/hosts` entries as `name:ip` (e.g. the host gateway); validated by the docker manager. */
   extraHosts?: string[]
 }
