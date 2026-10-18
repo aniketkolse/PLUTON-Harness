@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { Readable, Writable } from 'node:stream'
 import { EngineProtocolError } from '../../domain/errors.ts'
+import { withRetry, type RetryOptions } from './retry.ts'
 
 /**
  * Minimal Agent Client Protocol (ACP) transport: newline-delimited JSON-RPC
@@ -57,6 +58,8 @@ export interface AcpClientOptions {
   cwd: string
   env: Record<string, string>
   spawnFn?: AcpSpawnFn
+  /** Retry options for process spawn (exponential backoff + jitter). */
+  spawnRetry?: RetryOptions
   /** Default timeout for control requests (initialize/session/new/load/close). */
   requestTimeoutMs?: number
   /** A single stdout frame longer than this is a protocol violation. */
@@ -130,10 +133,19 @@ export class AcpClient {
     return this.stderrTail.join('\n')
   }
 
-  /** Spawns the agent and resolves once the OS confirms the process started. */
-  async start(): Promise<void> {
-    if (this.state !== 'idle') throw new EngineProtocolError('acp client already started')
-    this.state = 'starting'
+  private cleanupChild(): void {
+    if (this.child) {
+      try {
+        this.child.kill('SIGKILL')
+      } catch {
+        // ignore
+      }
+      this.child = null
+    }
+    this.lineBuffer = ''
+  }
+
+  private async spawnOnce(): Promise<void> {
     const child = (this.opts.spawnFn ?? defaultSpawn)(this.opts.command, this.opts.args ?? [], {
       cwd: this.opts.cwd,
       env: this.opts.env,
@@ -150,12 +162,14 @@ export class AcpClient {
       this.onStderr(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
     })
     child.on('error', (err) => {
-      this.die(new EngineProtocolError(`acp transport error: ${err.message}`, { cause: err }))
+      if (this.state === 'running') {
+        this.die(new EngineProtocolError(`acp transport error: ${err.message}`, { cause: err }))
+      }
     })
     child.on('exit', (code, signal) => {
       this.exitInfo = { code, signal }
       this.exitResolve?.()
-      if (this.state !== 'dead') {
+      if (this.state === 'running') {
         this.dieNow(
           new EngineProtocolError(
             `acp agent exited unexpectedly (code=${String(code)}, signal=${String(signal)})`,
@@ -170,7 +184,6 @@ export class AcpClient {
       child.on('spawn', () => {
         if (settled) return
         settled = true
-        this.state = 'running'
         resolve()
       })
       child.on('error', (err) => {
@@ -189,6 +202,36 @@ export class AcpClient {
         )
       })
     })
+  }
+
+  /** Spawns the agent and resolves once the OS confirms the process started. */
+  async start(): Promise<void> {
+    if (this.state !== 'idle') throw new EngineProtocolError('acp client already started')
+    this.state = 'starting'
+
+    const retryOpts = this.opts.spawnRetry
+    const maxRetries = retryOpts?.maxRetries ?? 0
+
+    try {
+      if (maxRetries > 0) {
+        await withRetry(
+          async () => {
+            await this.spawnOnce()
+          },
+          retryOpts,
+          () => {
+            this.cleanupChild()
+          },
+        )
+      } else {
+        await this.spawnOnce()
+      }
+      this.state = 'running'
+    } catch (err) {
+      this.state = 'dead'
+      this.cleanupChild()
+      throw err
+    }
   }
 
   async request<T>(method: string, params: unknown, opts: AcpRequestOptions = {}): Promise<T> {

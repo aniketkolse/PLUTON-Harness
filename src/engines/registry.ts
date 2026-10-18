@@ -1,5 +1,6 @@
 import { ValidationError } from '../domain/errors.ts'
 import type { AcpSpawnFn } from './acp/client.ts'
+import type { RetryOptions } from './acp/retry.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { MockEngineAdapter } from './mock/adapter.ts'
 import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
@@ -13,6 +14,7 @@ export interface EngineCreateOptions {
   spawnFn?: AcpSpawnFn
   binaryPath?: string
   platform?: NodeJS.Platform
+  spawnRetry?: RetryOptions
   /**
    * Maps a host working directory to the engine's namespace (container mode:
    * the ACP session cwd must name a container path; the process spawn cwd is

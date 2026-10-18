@@ -11,6 +11,7 @@ import { newId } from '../../domain/ids.ts'
 import { firstLine, run } from '../../util/exec.ts'
 import type { RunOptions, RunResult } from '../../util/exec.ts'
 import { AcpClient, type AcpServerRequestResponse, type AcpSpawnFn } from '../acp/client.ts'
+import { withRetry, type RetryOptions } from '../acp/retry.ts'
 import { copyPlatformEnv } from '../acp/env.ts'
 import { asRecord, readModelOption, toAcpMcpServers } from '../acp/options.ts'
 import { AcpEngineSessionBase, CANCEL_GRACE_MS } from '../acp/session-base.ts'
@@ -63,6 +64,7 @@ const MODEL_SET_TIMEOUT_MS = 20_000
 export interface OpenCodeAdapterOptions {
   /** Injection for tests: replaces node:child_process.spawn for the ACP child. */
   spawnFn?: AcpSpawnFn
+  spawnRetry?: RetryOptions
   /** Skip PATH resolution (tests, or an operator-pinned binary). */
   binaryPath?: string
   platform?: NodeJS.Platform
@@ -284,34 +286,54 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     const resolved = this.resolveBinary()
     if (!resolved.ok) throw new EngineMissingError(this.kind, resolved.fix)
 
-    const holder: { session: OpenCodeEngineSession | null } = { session: null }
-    const client = new AcpClient({
-      command: resolved.binary.path,
-      args: ['acp', '--log-level', 'warn'],
-      cwd: req.workdir,
-      env: buildEngineEnv(req.configDir, req.env, this.opts.platform ?? process.platform),
-      spawnFn: this.opts.spawnFn,
-      requestTimeoutMs: this.opts.requestTimeoutMs ?? 30_000,
-      onNotification: (method, params) => holder.session?.handleNotification(method, params),
-      onServerRequest: (method, params) => holder.session?.handleServerRequest(method, params) ?? null,
-    })
+    const retryOpts = this.opts.spawnRetry
+    const maxRetries = retryOpts?.maxRetries ?? (this.opts.spawnFn ? 0 : 2)
+    const effectiveRetry = { ...retryOpts, maxRetries }
 
+    let activeClient: AcpClient | null = null
     try {
-      await client.start()
-      const init = await client.request<Record<string, unknown>>(
-        'initialize',
-        {
-          protocolVersion: 1,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        },
-        { timeoutMs: INITIALIZE_TIMEOUT_MS },
-      )
-      const agentCapabilities = asRecord(init['agentCapabilities'])
-      if (!agentCapabilities) {
-        throw new EngineProtocolError('initialize response is missing agentCapabilities', {
-          details: { init },
+      const createAndInitialize = async (): Promise<{
+        client: AcpClient
+        holder: { session: OpenCodeEngineSession | null }
+        agentCapabilities: Record<string, unknown>
+      }> => {
+        const holder: { session: OpenCodeEngineSession | null } = { session: null }
+        const client = new AcpClient({
+          command: resolved.binary.path,
+          args: ['acp', '--log-level', 'warn'],
+          cwd: req.workdir,
+          env: buildEngineEnv(req.configDir, req.env, this.opts.platform ?? process.platform),
+          spawnFn: this.opts.spawnFn,
+          requestTimeoutMs: this.opts.requestTimeoutMs ?? 30_000,
+          onNotification: (method, params) => holder.session?.handleNotification(method, params),
+          onServerRequest: (method, params) => holder.session?.handleServerRequest(method, params) ?? null,
         })
+
+        try {
+          await client.start()
+          const init = await client.request<Record<string, unknown>>(
+            'initialize',
+            {
+              protocolVersion: 1,
+              clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+            },
+            { timeoutMs: INITIALIZE_TIMEOUT_MS },
+          )
+          const agentCapabilities = asRecord(init['agentCapabilities'])
+          if (!agentCapabilities) {
+            throw new EngineProtocolError('initialize response is missing agentCapabilities', {
+              details: { init },
+            })
+          }
+          return { client, holder, agentCapabilities }
+        } catch (err) {
+          await client.close().catch(() => {})
+          throw err
+        }
       }
+
+      const { client, holder, agentCapabilities } = await withRetry(createAndInitialize, effectiveRetry)
+      activeClient = client
 
       const mcpServers = toAcpMcpServers(req.mcpServers)
       // Container mode: the ACP session cwd is a path in the engine's
@@ -355,9 +377,11 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       holder.session = session
       return session
     } catch (err) {
-      await client.close().catch(() => {
-        // cleanup is best-effort; the original error is what matters
-      })
+      if (activeClient) {
+        await activeClient.close().catch(() => {
+          // cleanup is best-effort; the original error is what matters
+        })
+      }
       if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new EngineMissingError(
           this.kind,

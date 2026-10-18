@@ -60,6 +60,17 @@ export const runtimeConfigSchema = z
     heartbeat_seconds: z.number().int().min(2).max(600).default(30),
     /** Minutes until a pending approval expires and is swept to `expired`; 0 = approvals never expire. */
     approval_timeout_minutes: z.number().int().min(0).max(10_080).default(60),
+
+    // Usage budgets (PR-1): absent = no limit on that axis. The supervisor
+    // interrupts the session at the first usage event that pushes recorded
+    // usage past a configured limit. Token counts are the dependable axis —
+    // engines may report `cost_usd` as 0 on free/local models.
+    max_run_input_tokens: z.number().int().min(1).max(1_000_000_000).optional(),
+    max_run_output_tokens: z.number().int().min(1).max(1_000_000_000).optional(),
+    max_run_cost_usd: z.number().positive().max(1_000_000).optional(),
+    max_muse_input_tokens: z.number().int().min(1).max(1_000_000_000).optional(),
+    max_muse_output_tokens: z.number().int().min(1).max(1_000_000_000).optional(),
+    max_muse_cost_usd: z.number().positive().max(1_000_000).optional(),
   })
   .strict()
   .prefault({})

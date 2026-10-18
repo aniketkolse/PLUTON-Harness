@@ -13,7 +13,12 @@ import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
-import { runBudgetFromRuntime, supervisorSettingsFromRuntime } from '../../orchestrator/run-setup.ts'
+import {
+  runBudgetFromRuntime,
+  supervisorSettingsFromRuntime,
+  usageBudgetsFromRuntime,
+} from '../../orchestrator/run-setup.ts'
+import { UsageLedger } from '../../orchestrator/usage-ledger.ts'
 import { RunSupervisor, type RunOutcome } from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
@@ -252,6 +257,7 @@ export function createRunSupervisor(args: {
 }): RunSupervisor {
   const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, containerContexts, deps, diagnostic } = args
   const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
+  const budgets = usageBudgetsFromRuntime(ctx.loaded.config.runtime)
   let supervisorAdapterFor = deps.adapterFor
   if (supervisorAdapterFor === undefined && containerContexts !== null) {
     const contexts = containerContexts
@@ -268,6 +274,8 @@ export function createRunSupervisor(args: {
     maxConcurrentWorkers: settings.maxConcurrentWorkers,
     defaultTaskTimeoutMs: settings.defaultTaskTimeoutMs,
     runDeadlineMs: settings.runDeadlineMs,
+    maxRetriesPerTask: settings.maxRetriesPerTask,
+    ...(budgets !== undefined ? { usageLedger: new UsageLedger(run.id, budgets, store) } : {}),
     verificationConfigured: ctx.loaded.config.project.verification.length > 0,
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
     workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),

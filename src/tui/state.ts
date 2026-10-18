@@ -23,7 +23,8 @@ export interface ChatViewState {
   toolExpanded: boolean
   inspectorOpen: boolean
   scrollOffset: number
-  usage: { inputTokens: number; outputTokens: number } | null
+  /** Accumulated tokens as reported; `costUsd` stays null until an engine reports one. */
+  usage: { inputTokens: number; outputTokens: number; costUsd: number | null } | null
   approvalsPending: number
   pendingApprovalList: ApprovalViewData[]
   run: { id: string; state: string } | null
@@ -89,11 +90,15 @@ export function applyEngineEvent(s: ChatViewState, ev: EngineEvent): ChatViewSta
     case 'usage': {
       const curIn = s.usage?.inputTokens ?? 0
       const curOut = s.usage?.outputTokens ?? 0
+      // `costUsd` stays null until an engine reports one — never estimated.
+      const curCost = s.usage?.costUsd ?? null
+      const costUsd = ev.costUsd !== undefined ? (curCost ?? 0) + ev.costUsd : curCost
       return {
         ...s,
         usage: {
           inputTokens: curIn + (ev.inputTokens ?? 0),
           outputTokens: curOut + (ev.outputTokens ?? 0),
+          costUsd,
         },
       }
     }

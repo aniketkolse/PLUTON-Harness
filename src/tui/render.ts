@@ -222,8 +222,8 @@ export interface FullScreenFrameOptions {
   inspectorOpen?: boolean
   brandHeader?: boolean
   mode?: string
-  contextPct?: number
-  cost?: number
+  contextPct?: number | null
+  cost?: number | null
 }
 
 export function shortenPath(fullPath: string, maxLength = 35): string {

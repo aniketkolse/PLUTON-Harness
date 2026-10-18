@@ -66,6 +66,7 @@ describe('ChatSession TUI 2.0 Presentation Integration', () => {
           events: [
             { kind: 'tool', phase: 'start', name: 'shell', callId: 'c1', input: { command: 'git status' } },
             { kind: 'tool', phase: 'end', name: 'shell', callId: 'c1', isError: false, output: 'clean' },
+            { kind: 'usage', inputTokens: 1200, outputTokens: 300, costUsd: 0.04 },
             { kind: 'text', text: 'Everything looks clean and ready.' },
           ],
         },
@@ -103,9 +104,13 @@ describe('ChatSession TUI 2.0 Presentation Integration', () => {
     expect(frameText).toContain('╭')
     expect(frameText).toContain('╰')
 
-    // 4. Live status bar has Context and Cost telemetry
-    expect(frameText).toContain('Context: 0%')
-    expect(frameText).toContain('$0.00')
+    // 4. Live status bar shows only real telemetry: the cost an engine
+    // actually reported, and "unknown" context (no engine reports a real
+    // context window — never fabricate one; G5 / PR-2).
+    expect(frameText).toContain('Context: unknown')
+    expect(frameText).toContain('$0.04')
+    expect(frameText).not.toContain('Context: 0%')
+    expect(frameText).not.toContain('$0.00')
 
     // 5. Zero duplicate session header noise in transcript
     expect(frameText).not.toContain('session chat_')

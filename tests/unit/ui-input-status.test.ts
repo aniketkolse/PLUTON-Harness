@@ -91,4 +91,26 @@ describe('Docked InputBox and Live StatusBar (Phase 7 & 8)', () => {
     const lineRed = renderStatusBar(propsRed, 100, theme)
     expect(lineRed).toContain('\x1b[38;2;248;113;113m') // error red
   })
+
+  it('renders Context: unknown when no real context window is known', () => {
+    const props: StatusBarProps = {
+      state: 'ready',
+      mode: 'chat',
+      model: 'model-a',
+      contextPct: null,
+    }
+    const plain = stripAnsi(renderStatusBar(props, 100, theme))
+    expect(plain).toContain('Context: unknown')
+    expect(plain).not.toMatch(/\d+%/)
+  })
+
+  it('omits the cost segment when no engine reported a cost, shows a reported $0.00', () => {
+    const base: StatusBarProps = { state: 'ready', mode: 'chat', model: 'model-a' }
+
+    const unreported = stripAnsi(renderStatusBar({ ...base, cost: null }, 100, theme))
+    expect(unreported).not.toMatch(/\$\d/)
+
+    const reportedZero = stripAnsi(renderStatusBar({ ...base, cost: 0 }, 100, theme))
+    expect(reportedZero).toContain('$0.00')
+  })
 })

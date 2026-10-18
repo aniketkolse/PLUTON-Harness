@@ -18,6 +18,7 @@ import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { optionalProject, requireProject } from './context.ts'
+import { appRun, type AppCommandOptions } from './commands/app.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachMuse } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
@@ -66,9 +67,28 @@ export function shouldOpenChat(opts: { isTty: boolean; hasProject: boolean }): b
 }
 
 program
+  .argument('[targetPath]', 'workspace directory or project path to open in Pluton')
   .option('--demo', 'run interactive failed CI build demo scenario')
-  .action(async (_opts: unknown, cmd: Command) => {
-    const cliOpts = cmd.opts() as { demo?: boolean }
+  .option('--tui', 'open terminal TUI chat instead of graphical application')
+  .option('--desktop', 'launch in standalone desktop application window (default)')
+  .option('--browser', 'launch in default web browser')
+  .option('--port <number>', 'port for the local application server', (v) => Number.parseInt(v, 10))
+  .option('--headless', 'start the server without opening a GUI window')
+  .option('--detach', 'detach the server process to run in the background')
+  .option('--stop', 'stop the active application server for this workspace')
+  .option('--status', 'check the status of the application server for this workspace')
+  .action(async (targetPath: string | undefined, _opts: Record<string, unknown>, cmd: Command) => {
+    const cliOpts = cmd.optsWithGlobals() as {
+      demo?: boolean
+      tui?: boolean
+      desktop?: boolean
+      browser?: boolean
+      port?: number
+      headless?: boolean
+      detach?: boolean
+      stop?: boolean
+      status?: boolean
+    }
     if (cliOpts.demo) {
       const { runTuiDemo } = await import('../ui/demo.ts')
       const { getUITheme } = await import('../ui/theme.ts')
@@ -87,25 +107,106 @@ program
 
     const json = jsonMode(cmd)
     const isTty = process.stdin.isTTY === true && process.stdout.isTTY === true
-    const project = optionalProject(process.cwd())
+    const effectiveDir = targetPath ?? process.cwd()
+    const project = optionalProject(effectiveDir)
     const hasProject = project !== null
 
-    if (json || !shouldOpenChat({ isTty, hasProject }) || project === null) {
+    // Explicit TUI mode request
+    if (cliOpts.tui) {
+      if (json || !shouldOpenChat({ isTty, hasProject }) || project === null) {
+        program.outputHelp()
+        if (!hasProject && isTty && !json) {
+          io.out('\nhint: run `pluton init` to set up a project')
+        }
+        return
+      }
+      try {
+        const { exitCode } = await chatRun(project, {})
+        process.exitCode = exitCode
+        return
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        io.err(msg)
+        process.exitCode = 1
+        return
+      }
+    }
+
+    // Stop or status actions
+    if (cliOpts.stop || cliOpts.status) {
+      await runCommand(io, json, async () => {
+        const res = await appRun(project, cliOpts, effectiveDir)
+        emitOk(
+          io,
+          json,
+          res.stopped
+            ? `pluton app server stopped for ${res.rootDir}`
+            : res.mode === 'status'
+              ? `pluton app server is running on ${res.url} (PID ${res.pid})`
+              : `pluton graphical workspace active on ${res.url}`,
+          res,
+        )
+      })
+      return
+    }
+
+    // Non-TTY bare invocation without path or app flags: output help (preserves bare-entry tests)
+    if (!targetPath && !isTty && !json && !cliOpts.desktop && !cliOpts.browser && !cliOpts.headless) {
       program.outputHelp()
-      if (!hasProject && isTty && !json) {
+      if (!hasProject && !json) {
         io.out('\nhint: run `pluton init` to set up a project')
       }
       return
     }
 
-    try {
-      const { exitCode } = await chatRun(project, {})
-      process.exitCode = exitCode
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      io.err(msg)
-      process.exitCode = 1
-    }
+    // Default primary experience: Launch Pluton Graphical Workspace (desktop window or browser)
+    await runCommand(io, json, async () => {
+      const res = await appRun(project, cliOpts, effectiveDir)
+      emitOk(
+        io,
+        json,
+        `pluton graphical workspace active on ${res.url} (${res.mode} mode)\nworkspace: ${res.rootDir}${res.waitForClose && !cliOpts.detach ? '\nPress Ctrl+C to close.' : ''}`,
+        res,
+      )
+      if (res.waitForClose && !cliOpts.detach) {
+        await res.waitForClose()
+      }
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// app
+// ---------------------------------------------------------------------------
+
+program
+  .command('app [targetPath]')
+  .description('launch the Pluton graphical workspace application (desktop window or browser)')
+  .option('--desktop', 'launch in standalone desktop application window (default)')
+  .option('--browser', 'launch in default web browser')
+  .option('--port <number>', 'port for the local application server', (v) => Number.parseInt(v, 10))
+  .option('--headless', 'start the server without opening a GUI window')
+  .option('--detach', 'detach the server process to run in the background')
+  .option('--stop', 'stop the active application server for this workspace')
+  .option('--status', 'check the status of the application server for this workspace')
+  .action(async (targetPath: string | undefined, _opts: Record<string, unknown>, cmd: Command) => {
+    const json = jsonMode(cmd)
+    const appOpts = cmd.optsWithGlobals() as AppCommandOptions
+    await runCommand(io, json, async () => {
+      const res = await appRun(null, appOpts, targetPath ?? process.cwd())
+      emitOk(
+        io,
+        json,
+        res.stopped
+          ? `pluton app server stopped for ${res.rootDir}`
+          : res.mode === 'status'
+            ? `pluton app server is running on ${res.url} (PID ${res.pid})`
+            : `pluton graphical workspace active on ${res.url} (${res.mode} mode)\nworkspace: ${res.rootDir}${res.waitForClose && !appOpts.detach ? '\nPress Ctrl+C to close.' : ''}`,
+        res,
+      )
+      if (res.waitForClose && !appOpts.detach && !appOpts.status && !appOpts.stop) {
+        await res.waitForClose()
+      }
+    })
   })
 
 // ---------------------------------------------------------------------------

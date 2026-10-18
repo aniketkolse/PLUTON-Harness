@@ -45,10 +45,32 @@ describe('chat view state reducer', () => {
   it('accumulates usage tokens', () => {
     let s = initialViewState()
     s = applyEngineEvent(s, { kind: 'usage', inputTokens: 100, outputTokens: 50 })
-    expect(s.usage).toEqual({ inputTokens: 100, outputTokens: 50 })
+    expect(s.usage).toEqual({ inputTokens: 100, outputTokens: 50, costUsd: null })
 
     s = applyEngineEvent(s, { kind: 'usage', inputTokens: 50, outputTokens: 25 })
-    expect(s.usage).toEqual({ inputTokens: 150, outputTokens: 75 })
+    expect(s.usage).toEqual({ inputTokens: 150, outputTokens: 75, costUsd: null })
+  })
+
+  it('accumulates cost only when an engine actually reported it (never fabricates)', () => {
+    let s = initialViewState()
+    s = applyEngineEvent(s, { kind: 'usage', inputTokens: 100, outputTokens: 50 })
+    expect(s.usage?.costUsd).toBeNull()
+
+    s = applyEngineEvent(s, { kind: 'usage', inputTokens: 100, outputTokens: 50, costUsd: 0.02 })
+    expect(s.usage).toEqual({ inputTokens: 200, outputTokens: 100, costUsd: 0.02 })
+
+    // A later event without cost keeps the reported total; unreported stays unreported.
+    s = applyEngineEvent(s, { kind: 'usage', inputTokens: 1, outputTokens: 1 })
+    expect(s.usage?.costUsd).toBe(0.02)
+
+    s = applyEngineEvent(s, { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 0.005 })
+    expect(s.usage?.costUsd).toBeCloseTo(0.025)
+  })
+
+  it('treats a reported zero cost as reported, not missing', () => {
+    let s = initialViewState()
+    s = applyEngineEvent(s, { kind: 'usage', inputTokens: 10, outputTokens: 5, costUsd: 0 })
+    expect(s.usage?.costUsd).toBe(0)
   })
 
   it('handles error and approval_request events', () => {

@@ -159,6 +159,42 @@ describe('renderFullScreenFrame', () => {
     expect(plain).toContain('/help')
   })
 
+  it('renders honest telemetry: Context: unknown without a real window, no fabricated cost', () => {
+    const frame = renderFullScreenFrame({
+      header: {
+        projectName: 'pluton-harness',
+        rootDir: 'Y:/Pluton',
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'claude-3-7-sonnet',
+        version: '0.1.0',
+      },
+      transcriptLines: ['Ready.'],
+      editor: { text: '', cursor: 0 },
+      statusView: {
+        museSlug: 'captain',
+        engine: 'opencode',
+        model: 'claude-3-7-sonnet',
+        busy: false,
+        run: null,
+        approvalsPending: 0,
+        usage: { inputTokens: 1200, outputTokens: 300 },
+      },
+      columns: 129,
+      rows: 48,
+      theme: plain,
+      brandHeader: true,
+      mode: 'chat',
+      contextPct: null,
+      cost: null,
+      museCount: 3,
+    })
+
+    const text = stripAnsi(frame.lines.join('\n'))
+    expect(text).toContain('Context: unknown')
+    expect(text).not.toMatch(/\$\d/)
+  })
+
   it('renders docked rounded input box when brandHeader is true', () => {
     const frame = renderFullScreenFrame({
       header: {

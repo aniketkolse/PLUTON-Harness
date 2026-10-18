@@ -68,9 +68,6 @@ import { renderUserMessage, renderAssistantMessage } from '../ui/messages.ts'
 import { renderToolGroup, type ToolItemData } from '../ui/tools.ts'
 import { getUITheme } from '../ui/theme.ts'
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
-const DEFAULT_COST_PER_MILLION_TOKENS = 2.0
-
 /** Map a durable approval record to its UI view data (target only when scope names one). */
 function approvalRecordToView(record: ApprovalRecord): ApprovalViewData {
   let target: string | undefined
@@ -1041,15 +1038,11 @@ export class ChatSession {
     const orchestraData = this.buildOrchestraData()
     const firstApproval = this.firstInboxApproval()
 
-    let contextPct = 0
-    let cost = 0.0
-    if (this.viewState?.usage) {
-      const totalTokens = this.viewState.usage.inputTokens + this.viewState.usage.outputTokens
-      if (totalTokens > 0) {
-        contextPct = Math.min(100, Math.round((totalTokens / DEFAULT_CONTEXT_WINDOW_TOKENS) * 100))
-        cost = Number(((totalTokens / 1_000_000) * DEFAULT_COST_PER_MILLION_TOKENS).toFixed(2))
-      }
-    }
+    // Real telemetry only (G5 / PR-2): no engine reports a context window, so
+    // the context segment renders "unknown" instead of a fabricated percentage,
+    // and cost appears only when an engine actually reported one.
+    const contextPct: number | null = null
+    const cost: number | null = this.viewState.usage?.costUsd ?? null
 
     return renderFullScreenFrame({
       header,

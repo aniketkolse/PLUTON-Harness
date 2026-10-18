@@ -12,6 +12,7 @@ import { newId } from '../../domain/ids.ts'
 import { firstLine, run } from '../../util/exec.ts'
 import type { RunOptions, RunResult } from '../../util/exec.ts'
 import { AcpClient, type AcpServerRequestResponse, type AcpSpawnFn } from '../acp/client.ts'
+import { withRetry, type RetryOptions } from '../acp/retry.ts'
 import {
   asRecord,
   assertNonEmptyModel,
@@ -84,6 +85,7 @@ export type QwenApprovalPolicy = 'deny' | 'allow_once' | 'allow_always'
 export interface QwenAdapterOptions {
   /** Injection for tests: replaces node:child_process.spawn for the ACP child. */
   spawnFn?: AcpSpawnFn
+  spawnRetry?: RetryOptions
   /** Path to cli-entry.js (or an executable/shim) — skips PATH resolution. */
   binaryPath?: string
   platform?: NodeJS.Platform
@@ -360,32 +362,52 @@ export class QwenEngineAdapter implements EngineAdapter {
     mkdirSync(req.configDir, { recursive: true })
     mkdirSync(qwenStateDir(req.configDir), { recursive: true })
 
-    const holder: { session: QwenEngineSession | null } = { session: null }
-    const client = new AcpClient({
-      command: invocation.command,
-      args: [...invocation.baseArgs, '--acp'],
-      cwd: req.workdir,
-      env: this.spawnEnv(req.configDir, req.env),
-      spawnFn: this.opts.spawnFn,
-      requestTimeoutMs: this.opts.requestTimeoutMs ?? 60_000,
-      onNotification: (method, params) => holder.session?.handleNotification(method, params),
-      onServerRequest: (method, params) => holder.session?.handleServerRequest(method, params) ?? null,
-    })
+    const retryOpts = this.opts.spawnRetry
+    const maxRetries = retryOpts?.maxRetries ?? (this.opts.spawnFn ? 0 : 2)
+    const effectiveRetry = { ...retryOpts, maxRetries }
 
+    let activeClient: AcpClient | null = null
     try {
-      await client.start()
-      const init = await client.request<Record<string, unknown>>(
-        'initialize',
-        {
-          protocolVersion: 1,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        },
-        { timeoutMs: INITIALIZE_TIMEOUT_MS },
-      )
-      const agentCapabilities = asRecord(init['agentCapabilities'])
-      if (!agentCapabilities) {
-        throw new EngineProtocolError('initialize response is missing agentCapabilities', { details: { init } })
+      const createAndInitialize = async (): Promise<{
+        client: AcpClient
+        holder: { session: QwenEngineSession | null }
+        agentCapabilities: Record<string, unknown>
+      }> => {
+        const holder: { session: QwenEngineSession | null } = { session: null }
+        const client = new AcpClient({
+          command: invocation.command,
+          args: [...invocation.baseArgs, '--acp'],
+          cwd: req.workdir,
+          env: this.spawnEnv(req.configDir, req.env),
+          spawnFn: this.opts.spawnFn,
+          requestTimeoutMs: this.opts.requestTimeoutMs ?? 60_000,
+          onNotification: (method, params) => holder.session?.handleNotification(method, params),
+          onServerRequest: (method, params) => holder.session?.handleServerRequest(method, params) ?? null,
+        })
+
+        try {
+          await client.start()
+          const init = await client.request<Record<string, unknown>>(
+            'initialize',
+            {
+              protocolVersion: 1,
+              clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+            },
+            { timeoutMs: INITIALIZE_TIMEOUT_MS },
+          )
+          const agentCapabilities = asRecord(init['agentCapabilities'])
+          if (!agentCapabilities) {
+            throw new EngineProtocolError('initialize response is missing agentCapabilities', { details: { init } })
+          }
+          return { client, holder, agentCapabilities }
+        } catch (err) {
+          await client.close().catch(() => {})
+          throw err
+        }
       }
+
+      const { client, holder, agentCapabilities } = await withRetry(createAndInitialize, effectiveRetry)
+      activeClient = client
 
       const mcpServers = toAcpMcpServers(req.mcpServers)
       // Container mode: the ACP session cwd is a path in the engine's
@@ -429,9 +451,11 @@ export class QwenEngineAdapter implements EngineAdapter {
       holder.session = session
       return session
     } catch (err) {
-      await client.close().catch(() => {
-        // cleanup is best-effort; the original error is what matters
-      })
+      if (activeClient) {
+        await activeClient.close().catch(() => {
+          // cleanup is best-effort; the original error is what matters
+        })
+      }
       if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new EngineMissingError(this.kind, `'${invocation.command}' could not be started (ENOENT). ${QWEN_MISSING_FIX}`)
       }

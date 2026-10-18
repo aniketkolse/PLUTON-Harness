@@ -210,7 +210,7 @@ _Phases 0–5 complete; Phase 6 essentially complete (bridge + supervisor + live
 engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring delivered as
 `pluton approvals`). Phase 7 complete (verification gate + integration checkout via `pluton integrate`).
 Phase 8 complete (interactive chat TUI for the operator Muse via `pluton`, `pluton chat [muse]`, and `pluton muse chat <muse>`).
-Live status: 602 tests / 50 files green
+Live status (2026-10-18): 777 tests / 90 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
@@ -245,6 +245,29 @@ running setup: `pluton attach --json` resolves the Muse container and ensures it
 The interactive chat TUI slice landed (ADR-0012, `521cd1d`…`168b2bf`): zero-dependency inline renderer (`src/tui/*`), v3 SQLite chat schema, operator tool catalog (`project.status`, `run.list`, `run.get`, `run.start`, `approvals.list`), streaming `ChatSession` with interrupt support, slash commands (`/help`, `/status`, `/runs`, `/run`, `/approvals`, `/approve`, `/deny`, `/new`), background run execution supervisor, and bare `pluton` TTY entry.
 Named follow-ups explicitly recorded: fullscreen/alt-screen mode, async engine-approval interactive prompts, tool-output detail / thinking chunk streaming, `@`-file completion in the input editor, dynamic steering prompts during active runs, and arrow-select approval decision panel.
 Documented honestly in `docs/SECURITY.md` and `docs/delivery-report.md`.
+P1 (audit roadmap PR-1) landed in the working tree 2026-10-18 (not yet committed): configured usage
+budgets (`runtime.max_run_input_tokens` / `max_run_output_tokens` / `max_run_cost_usd` plus optional
+per-Muse `max_muse_*` variants) are mapped by `usageBudgetsFromRuntime` into the supervisor's
+`UsageLedger`, and `runtime.max_retries_per_task` now reaches `RunSupervisor` (the CLI path previously
+used the implicit default 2, ignoring the configured default 1). A breach interrupts the session at the
+next usage event, with durable `run_usage` rows + a diagnostic (never silent). Covered by
+`tests/unit/run-setup.test.ts` and `tests/integration/supervisor-usage-budget.test.ts`; rollback =
+revert the change and remove the new keys from `pluton.yaml` first (strict schema).
+P1 (audit roadmap PR-2) landed in the working tree 2026-10-18 (not yet committed): the chat TUI
+status bar no longer fabricates usage. Cost appears only when an engine actually reported one
+(`costUsd` accumulated by `applyEngineEvent`; omitted otherwise), and the context segment renders
+`Context: unknown` because no engine reports a real context window — the fabricated
+`DEFAULT_CONTEXT_WINDOW_TOKENS` / `DEFAULT_COST_PER_MILLION_TOKENS` estimate is deleted. Covered by
+`tests/unit/tui-state.test.ts`, `tests/unit/ui-input-status.test.ts`,
+`tests/unit/tui-render-fullscreen.test.ts`, and `tests/integration/chat-session-ui-integration.test.ts`;
+rollback = revert (display-only).
+P1 (audit roadmap PR-3) landed in the working tree 2026-10-18 (not yet committed): transport retry with bounded exponential backoff and full jitter for side-effect-free phases (engine process spawn and initialize transport handshake) in `src/engines/acp/retry.ts`, wired into `AcpClient`, `OpenCodeEngineAdapter`, and `QwenEngineAdapter`. Prompt turns and mutations are never retried. Covered by `tests/unit/acp-retry.test.ts` and `tests/integration/transport-retry.test.ts`; rollback = revert (retry defaults to 0 when spawnFn is injected).
+Dual Desktop + Browser Graphical Application (ADR-0014) landed in the working tree 2026-10-18:
+1. Local Application Server (`src/server/*`) binding strictly to loopback (`127.0.0.1`), enforcing timing-safe token authentication (`X-Pluton-Token`), Origin/Host DNS-rebinding protection, and path sandboxing. Provides REST APIs (`/api/health`, `/api/workspace`, `/api/files`, `/api/sessions`, `/api/runs`, `/api/approvals`, `/api/muses`, `/api/models`) and Server-Sent Events (`/api/events`) for streaming tokens, tool states, and approval notifications.
+2. Shared Graphical Workspace Frontend (`src/server/static-assets.ts`) delivered as an offline-capable SPA supporting conversation management, real-time message streaming, markdown formatting, tool cards, agent orchestra inspector, security approvals, workspace file inspection, and runtime diagnostics.
+3. Desktop Shell Launcher (`src/desktop/launcher.ts`) launching dedicated app-mode windows via Microsoft Edge or Google Chrome (`--app=http://...`) on Windows/macOS/Linux with automatic browser fallback.
+4. Windows PowerShell CLI Launcher (`pluton`, `pluton .`, `pluton <path>`, `pluton app`) with `--desktop`, `--browser`, `--port`, `--headless`, `--detach`, `--status`, and `--stop` flags, supporting Windows paths with spaces and drive letters. TUI chat remains accessible via `pluton --tui` or `pluton chat`.
+Live test status: 800 tests / 96 files green (`npm run check` = typecheck + unit + integration tests).
 Next (not in this build): network policy `restricted` enforcement, container behavior on Linux
 hosts (mount ownership/uid alignment), re-dispatch after the verification gate, and an auto-continue
 path for `integration.apply` approvals._

@@ -12,9 +12,11 @@ export interface StatusBarProps {
   mode: string
   model: string
   engine?: string
-  contextPct?: number
+  /** Percent used, or null when no real context window is known (renders "unknown"). */
+  contextPct?: number | null
   museCount?: number
-  cost?: number
+  /** Cost in USD, only when an engine actually reported one (never estimated). */
+  cost?: number | null
   busy?: boolean
 }
 
@@ -49,21 +51,27 @@ export function renderStatusBar(props: StatusBarProps, width: number, theme: UIT
   segments.push(`${theme.paint('textMuted', 'Model:')} ${theme.paint('info', props.model)}`)
 
   if (props.contextPct !== undefined) {
-    let ctxRole: UIRole = 'info'
-    if (props.contextPct > 85) {
-      ctxRole = 'error'
-    } else if (props.contextPct >= 60) {
-      ctxRole = 'warning'
+    if (props.contextPct === null) {
+      // No real context window is known: say so instead of estimating (G5/PR-2).
+      segments.push(`${theme.paint('textMuted', 'Context:')} ${theme.paint('textMuted', 'unknown')}`)
+    } else {
+      let ctxRole: UIRole = 'info'
+      if (props.contextPct > 85) {
+        ctxRole = 'error'
+      } else if (props.contextPct >= 60) {
+        ctxRole = 'warning'
+      }
+      const ctxText = theme.paint(ctxRole, `${Math.round(props.contextPct)}%`)
+      segments.push(`${theme.paint('textMuted', 'Context:')} ${ctxText}`)
     }
-    const ctxText = theme.paint(ctxRole, `${Math.round(props.contextPct)}%`)
-    segments.push(`${theme.paint('textMuted', 'Context:')} ${ctxText}`)
   }
 
   if (props.museCount !== undefined) {
     segments.push(`${theme.paint('textMuted', 'Muses:')} ${theme.paint('textPrimary', String(props.museCount))}`)
   }
 
-  if (props.cost !== undefined) {
+  if (typeof props.cost === 'number') {
+    // Only shown when the engine reported a cost; `null` means unreported.
     const formattedCost = `$${props.cost.toFixed(2)}`
     segments.push(theme.paint('warning', formattedCost))
   }
