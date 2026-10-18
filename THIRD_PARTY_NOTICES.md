@@ -27,7 +27,7 @@ from them is copied or vendored in this milestone.
 
 | Engine | Version verified | License (as shipped) | Use |
 |---|---|---|---|
-| OpenCode CLI (`opencode` / `opencode-ai`) | v2.0.29 | MIT | first managed engine, driven over `opencode acp` (stdio JSON-RPC) |
+| OpenCode CLI (`opencode` / `opencode-ai`) | v2.0.32 | MIT | first managed engine, driven over `opencode acp` (stdio JSON-RPC) |
 | Qwen Code (`@qwen-code/qwen-code`) | 0.25.2 | Apache-2.0 (LICENSE file in package) | second managed engine, driven over `qwen --acp` |
 
 Both engines are separate products installed outside this repository. Pluton starts them as child

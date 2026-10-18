@@ -140,7 +140,7 @@ program
           io,
           json,
           res.stopped
-            ? `pluton app server stopped for ${res.rootDir}`
+            ? `pluton app server stopped for ${res.rootDir}${res.warning ? `\nwarning: ${res.warning}` : ''}`
             : res.mode === 'status'
               ? `pluton app server is running on ${res.url} (PID ${res.pid})`
               : `pluton graphical workspace active on ${res.url}`,
@@ -197,7 +197,7 @@ program
         io,
         json,
         res.stopped
-          ? `pluton app server stopped for ${res.rootDir}`
+          ? `pluton app server stopped for ${res.rootDir}${res.warning ? `\nwarning: ${res.warning}` : ''}`
           : res.mode === 'status'
             ? `pluton app server is running on ${res.url} (PID ${res.pid})`
             : `pluton graphical workspace active on ${res.url} (${res.mode} mode)\nworkspace: ${res.rootDir}${res.waitForClose && !appOpts.detach ? '\nPress Ctrl+C to close.' : ''}`,

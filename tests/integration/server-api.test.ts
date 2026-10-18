@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
@@ -301,6 +302,72 @@ describe('Pluton application server REST & SSE API', () => {
       } finally {
         store.close()
       }
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('sets Referrer-Policy on assets and API responses so the URL token never leaks', async () => {
+    const { appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const html = await fetch(`http://127.0.0.1:${server.port}/`)
+      expect(html.headers.get('referrer-policy')).toBe('no-referrer')
+      const api = await fetch(`http://127.0.0.1:${server.port}/api/health`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(api.headers.get('referrer-policy')).toBe('no-referrer')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('refuses to follow directory links out of the workspace (junction/symlink containment)', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+
+    const outsideDir = mkdtempSync(join(tmpdir(), 'pluton-outside-'))
+    tmpDirs.push(outsideDir)
+    writeFileSync(join(outsideDir, 'outside-secret.txt'), 'TOP_SECRET_OUTSIDE_WORKSPACE', 'utf8')
+
+    const linkPath = join(rootDir, 'linked-outside')
+    let linked = false
+    try {
+      if (process.platform === 'win32') {
+        execFileSync('cmd', ['/c', 'mklink', '/J', linkPath, outsideDir], { stdio: 'pipe' })
+      } else {
+        symlinkSync(outsideDir, linkPath, 'dir')
+      }
+      linked = true
+    } catch {
+      linked = false
+    }
+
+    try {
+      if (!linked) {
+        // Hosts without link privileges: containment cannot be exercised here.
+        return
+      }
+      const escape = await fetch(
+        `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('linked-outside/outside-secret.txt')}`,
+        { headers: { 'x-pluton-token': server.token } },
+      )
+      expect(escape.status).toBe(403)
+
+      const files = await fetch(`http://127.0.0.1:${server.port}/api/files`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      const listing = (await files.json()) as { ok: boolean; files: string[] }
+      expect(listing.files.some((f) => f.startsWith('linked-outside'))).toBe(false)
+
+      // Normal in-workspace reads still work.
+      const ok = await fetch(
+        `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('sample.txt')}`,
+        { headers: { 'x-pluton-token': server.token } },
+      )
+      expect(ok.status).toBe(200)
+      const body = (await ok.json()) as { content: string }
+      expect(body.content).toBe('Hello Pluton Server')
     } finally {
       await server.close()
     }

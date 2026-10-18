@@ -85,5 +85,10 @@ describe('server security', () => {
     expect(safeResolvePath(root, 'package.json')).toBe('Y:\\Pluton\\package.json')
     expect(safeResolvePath(root, '../../windows/system32/cmd.exe')).toBeNull()
     expect(safeResolvePath(root, '..\\..\\secret.env')).toBeNull()
+    // Windows case insensitivity safety
+    if (process.platform === 'win32') {
+      const lowerRoot = 'y:\\pluton'
+      expect(safeResolvePath(lowerRoot, 'src/main.ts')).not.toBeNull()
+    }
   })
 })

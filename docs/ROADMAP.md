@@ -210,7 +210,7 @@ _Phases 0–5 complete; Phase 6 essentially complete (bridge + supervisor + live
 engines containerized via run-wiring Tasks 5–7; dynamic-specialist operator wiring delivered as
 `pluton approvals`). Phase 7 complete (verification gate + integration checkout via `pluton integrate`).
 Phase 8 complete (interactive chat TUI for the operator Muse via `pluton`, `pluton chat [muse]`, and `pluton muse chat <muse>`).
-Live status (2026-10-18): 777 tests / 90 files green
+Live status (2026-10-18): 837 tests / 102 files green
 (`npm run check` = typecheck + tests). Engines: `mock` (tests/dev only), `opencode`
 (live-verified v2.0.29), `qwen` (live-verified v0.25.2 via `qwen --acp`; on this host backed by the
 operator's local 9router gateway — no new external credentials). Working CLI: `init`, `doctor`,
@@ -267,10 +267,19 @@ Dual Desktop + Browser Graphical Application (ADR-0014) landed in the working tr
 2. Shared Graphical Workspace Frontend (`src/server/static-assets.ts`) delivered as an offline-capable SPA supporting conversation management, real-time message streaming, markdown formatting, tool cards, agent orchestra inspector, security approvals, workspace file inspection, and runtime diagnostics.
 3. Desktop Shell Launcher (`src/desktop/launcher.ts`) launching dedicated app-mode windows via Microsoft Edge or Google Chrome (`--app=http://...`) on Windows/macOS/Linux with automatic browser fallback.
 4. Windows PowerShell CLI Launcher (`pluton`, `pluton .`, `pluton <path>`, `pluton app`) with `--desktop`, `--browser`, `--port`, `--headless`, `--detach`, `--status`, and `--stop` flags, supporting Windows paths with spaces and drive letters. TUI chat remains accessible via `pluton --tui` or `pluton chat`.
-Live test status: 815 tests / 100 files green (`npm run check` = typecheck + unit + integration tests).
+Live test status: 837 tests / 102 files green (`npm run check` = typecheck + unit + integration tests).
 P1 (audit roadmap PR-4) landed in the working tree 2026-10-18:
 1. Verification Gate Re-dispatch: unblocks downstream dependent tasks once upstream verification verdicts succeed and enables continuous multi-stage pipeline execution without manual re-orchestration via `finalizeRunVerdict`, `pluton verify --dispatch`, and `pluton run --resume`.
 2. Structured Network Policy (Audit Gap L7): per-Muse network isolation overrides (`muses.<id>.network_policy`: `none` | `restricted` | `open`), custom Docker network binding (`runtime.internal_network_name`), validated in `src/config/schema.ts`, `src/sandbox/docker.ts`, `src/sandbox/muse-containers.ts`, `src/cli/commands/run.ts`, and `src/cli/commands/approvals.ts`. Covered by `tests/unit/muse-network-policy.test.ts`.
 3. Auto-continue Path for Approvals (ADR-0005): automatic multi-stage progression when approving `integration.apply` or resuming parked runs via `decideApproval(..., { autoContinue: true })` and `pluton approvals approve <id> --continue`. Covered by `tests/unit/approvals-autocontinue.test.ts`.
 4. Graphical Workspace Enhancements: Interactive Task DAG visualizer with dependency edge tags and task actions in `Agent Orchestra`, interactive approval decision buttons ("Approve & Continue", "Approve", "Deny") with scope inspection in `Security & Operator Approvals`, and Worktree Diff viewer with unified additions/deletions/hunk highlighting in `Workspace Files & Diffs`. Covered by `tests/integration/server-api.test.ts`.
+Public-release gate hardening landed in the working tree 2026-10-18 (not yet committed), each item
+reproduced before the fix and covered by a regression test:
+1. Instance matching now compares workspace paths with platform semantics (`sameDirPath`): on Windows/macOS `y:\Pluton` and `Y:\Pluton` are one workspace, so a healthy server is no longer rejected (and duplicated) across path-case variants.
+2. `pluton --stop` only signals a PID that passes the authenticated health check; a stale instance file whose PID was recycled by an unrelated process is no longer killed (it reports a warning instead).
+3. Startup failures are actionable: `EADDRINUSE`/`EACCES` are wrapped with guidance (`--port`) and a failed start leaves no instance metadata behind; malformed instance files are cleared by `--stop`.
+4. One workspace = one server is now enforced by an atomic claim file (`.pluton/run/server.claim`): concurrent launches converge on a single healthy server instead of racing to bind two ports.
+5. `/api/files/content` and `/api/files` canonicalize through `realpath` and refuse directory junctions/symlinks that resolve outside the workspace (parity with the engine tool bridge).
+6. Token exposure hardening: `Referrer-Policy: no-referrer` on asset and API responses, and the detached `server.log` (which contains the tokenized URL) is created `0600`.
+7. Repeatable release gate: `npm run release:check` (typecheck + tests + build + package-content audit + version/working-tree checks) and the staged publish/rollback procedure in `docs/RELEASE.md`.
 Next: Linux container user-namespace/mount UID alignment._

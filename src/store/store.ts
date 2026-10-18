@@ -141,11 +141,11 @@ export interface NewRunSpec {
 
 export interface NewTaskSpec {
   runId: string
-  parentTaskId: string | null
+  parentTaskId?: string | null
   title: string
   brief: string
   acceptanceCriteria: string[]
-  assigneeMuseId: string | null
+  assigneeMuseId?: string | null
   writeScope?: string[]
 }
 
@@ -440,14 +440,14 @@ export class Store {
         .run(
           id,
           spec.runId,
-          spec.parentTaskId,
+          spec.parentTaskId ?? null,
           parent ? parent.rootTaskId : id,
           parent ? parent.depth + 1 : 0,
           spec.title,
           spec.brief,
           stringifyJson(spec.acceptanceCriteria),
           stringifyJson(spec.writeScope ?? []),
-          spec.assigneeMuseId,
+          spec.assigneeMuseId ?? null,
           now,
         )
     } catch (e) {

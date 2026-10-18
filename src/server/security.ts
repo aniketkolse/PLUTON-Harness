@@ -97,8 +97,12 @@ export function safeResolvePath(rootDir: string, relativePath: string): string |
   const normRoot = normalize(rootDir)
   const normResolved = normalize(resolved)
 
+  const isWin = process.platform === 'win32'
+  const checkRoot = isWin ? normRoot.toLowerCase() : normRoot
+  const checkResolved = isWin ? normResolved.toLowerCase() : normResolved
+
   // Ensure resolved path starts with rootDir + separator (or equals rootDir)
-  if (normResolved === normRoot) return normResolved
-  if (normResolved.startsWith(normRoot + sep)) return normResolved
+  if (checkResolved === checkRoot) return normResolved
+  if (checkResolved.startsWith(checkRoot + sep)) return normResolved
   return null
 }

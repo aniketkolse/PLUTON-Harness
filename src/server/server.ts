@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import type { LoadedConfig } from '../config/load.ts'
 import type { Store } from '../store/store.ts'
+import { InternalError } from '../domain/errors.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { clearServerInstance, writeServerInstance } from './instance.ts'
 import { ApiRouter } from './routes.ts'
@@ -77,6 +78,8 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
         'Content-Type': asset.contentType,
         'Content-Length': Buffer.byteLength(asset.content, 'utf8'),
         'Cache-Control': 'no-cache',
+        // The session token travels in the page URL; never forward it via Referer.
+        'Referrer-Policy': 'no-referrer',
       })
       res.end(asset.content)
       return
@@ -108,7 +111,27 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
 
   // Start listening strictly on 127.0.0.1
   await new Promise<void>((resolvePromise, reject) => {
-    server.once('error', reject)
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(
+          new InternalError(
+            `port ${String(boundPort)} on 127.0.0.1 is already in use — stop the process using it, or pick another port with \`pluton --port <number>\``,
+            { cause: err, details: { port: boundPort, code: err.code } },
+          ),
+        )
+        return
+      }
+      if (err.code === 'EACCES') {
+        reject(
+          new InternalError(
+            `permission denied binding 127.0.0.1:${String(boundPort)} — choose a port above 1024 with \`pluton --port <number>\``,
+            { cause: err, details: { port: boundPort, code: err.code } },
+          ),
+        )
+        return
+      }
+      reject(err)
+    })
     server.listen(boundPort, '127.0.0.1', () => {
       resolvePromise()
     })

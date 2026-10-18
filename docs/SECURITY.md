@@ -164,6 +164,21 @@ Stated plainly so nobody over-reads the guarantees above:
     echoes a secret into its own output (e.g. a request header it was handed)
     could persist it in event payloads; redaction removes known secret-keyed
     fields, not arbitrary value patterns.
+11. **The graphical workspace token travels in the launch URL.** In `--browser`
+    mode the address bar (and therefore that browser profile's history) shows
+    `http://127.0.0.1:<port>/?token=…`; app-mode windows hide it. In `--detach`
+    mode the tokenized URL also lands in `.pluton/run/server.log` (created
+    owner-only `0600`), and `.pluton/run/server.json` stores it `0600`. The token
+    is 256-bit, regenerated on every server start, invalidated when the instance
+    file is cleared, sent to the page at most once via the URL (then held in
+    `sessionStorage`), and never forwarded to third parties: the SPA loads no
+    external subresources and responses carry `Referrer-Policy: no-referrer`.
+    The residual exposure is a local same-user process/browser-profile reader —
+    the host user is trusted, as everywhere else in this document.
+12. **The operator file viewer resolves links before reading.** `/api/files` and
+    `/api/files/content` refuse symlinks/junctions that canonicalize outside the
+    workspace root (same realpath containment as the engine tool bridge), so a
+    malicious repository cannot turn the viewer into an arbitrary-file read.
 
 ## 9. Reporting
 

@@ -41,15 +41,42 @@ provides the missing control plane for local multi-agent development:
 | An engine CLI | e.g. OpenCode v2 (`opencode acp` protocol); model auth configured per engine |
 
 Linux is fully supported as the daemon host; macOS is untested. Native PowerShell has no tmux —
-worker terminals live inside Linux containers. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
-and the WSL2 notes in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+worker terminals live inside Linux containers. See
+[`docs/PLUTON_ARCHITECTURE.md`](docs/PLUTON_ARCHITECTURE.md) and the WSL2 notes in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Quick start (intended flow)
 
+### Installation
+
 ```bash
-npm install
-npm link                           # installs `pluton` globally into PATH (or run `node src/cli/main.ts`)
-pluton                             # opens the interactive chat TUI with the operator Muse (in a Pluton project)
+# From package registry or local tarball
+npm install -g pluton-harness
+# Or from local repository checkout
+npm install && npm run build && npm link
+```
+
+Releasing this package is a staged, gated process — see
+[`docs/RELEASE.md`](docs/RELEASE.md) and run `npm run release:check`.
+
+### Launching the Graphical Workspace (Primary UX)
+
+Pluton launches as a dedicated graphical application workspace by default:
+
+```bash
+pluton                             # opens the graphical workspace for current directory (desktop window)
+pluton .                           # explicitly opens current workspace
+pluton "C:\path\to\my project"     # opens a workspace with spaces in path
+pluton --browser                   # opens graphical workspace in default web browser
+pluton --headless --detach         # runs local control plane as a background daemon
+pluton --status                    # checks running workspace server status and port
+pluton --stop                      # cleanly stops the background server for this workspace
+pluton --tui                       # launches interactive terminal chat TUI instead of graphical window
+```
+
+### Command-line Operations
+
+```bash
 pluton doctor                      # checks OS/runtime, Docker, Git, tmux, engines, config
 pluton init                        # write pluton.yaml + .pluton/roles in the current project
 pluton chat [muse]                 # chat with an operator Muse (default: supervisor) or `pluton muse chat <muse>`
@@ -58,8 +85,32 @@ pluton verify --run <id>           # run the project's verification checks, appl
 pluton attach <muse>               # live tmux session inside the Muse's container
 pluton integrate --run <id>        # merge verified task branches into the integration checkout (never main)
 pluton approvals list              # operator inbox: list/approve/deny pending approvals
-pluton status
+pluton status                      # shows recent runs and task counts from durable state
 ```
+
+## Desktop Delivery Architecture & Packaging (ADR-0015)
+
+Pluton uses a two-tier desktop delivery model with **one shared graphical frontend** and **one authoritative SQLite runtime**:
+
+1. **Tier 1 (Verified Production Default): App-Mode Window Launcher**
+   - Distributed via npm (`npm install -g pluton-harness`).
+   - Automatically detects and launches Microsoft Edge (`msedge.exe --app=URL`) on Windows or Google Chrome/Chromium on Linux and macOS.
+   - Provides a distraction-free window without URL bars or browser chrome, with native window frame and taskbar grouping.
+   - Falls back gracefully to the default system browser if no Chromium engine is detected.
+   - Zero heavyweight runtime downloads (keeps package size under 2MB).
+
+2. **Tier 2 (Future Standalone Installer Distribution): Tauri v2 WebView2 Wrapper**
+   - For standalone Windows installers (`.msi`, `.exe`) distributed via GitHub Releases or `winget`.
+   - Connects to the local Pluton server without duplicating UI code or runtime logic.
+   - Requires the Rust toolchain (`cargo`, `rustc` ≥ 1.75) and MSVC C++ Build Tools to compile.
+
+## Troubleshooting & Lifecycle Management
+
+- **Port in use or existing server:** Pluton automatically reuses an existing healthy server instance running for the same workspace (`checkServerHealth` verifies token, project ID, and workspace path — path comparison is case-insensitive where the filesystem is, e.g. `Y:\Pluton` = `y:\pluton`). If an explicitly requested port is taken, the error names the port and suggests `--port`.
+- **Stale instance after crash:** If a previous server process terminated abruptly, `pluton` detects dead PIDs and cleans up stale `.pluton/run/server.json` files automatically.
+- **Stopping servers:** Run `pluton --stop` in the workspace directory to cleanly terminate background daemons. For safety, `--stop` only signals a process that passes the authenticated health check for this workspace; a stale PID that was recycled by an unrelated process is reported, not killed.
+- **Concurrent launches:** Launching twice at once is serialized by an atomic workspace claim (`.pluton/run/server.claim`); the second launch waits for and reuses the first server instead of starting a duplicate.
+- **Log inspection:** When run with `--detach`, stdout and stderr are recorded in `.pluton/run/server.log` (owner-only `0600`; it contains the tokenized workspace URL — treat it as a credential).
 
 ## Interactive Chat TUI
 
@@ -115,11 +166,10 @@ docs/               product, architecture, security, ADRs, reverse-engineering
 
 ## Documentation index
 
-[PRODUCT](docs/PRODUCT.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [SECURITY](docs/SECURITY.md)
-· [ENGINE_ADAPTERS](docs/ENGINE_ADAPTERS.md) · [TASK_LIFECYCLE](docs/TASK_LIFECYCLE.md) ·
-[MUSE_CONFIGURATION](docs/MUSE_CONFIGURATION.md) · [WORKSPACES_AND_GIT](docs/WORKSPACES_AND_GIT.md)
-· [TMUX](docs/TMUX.md) · [DEVELOPMENT](docs/DEVELOPMENT.md) · [ROADMAP](docs/ROADMAP.md) ·
-[ADRs](docs/adr/) · [Reverse engineering](docs/reverse-engineering/)
+[ROADMAP](docs/ROADMAP.md) · [SECURITY](docs/SECURITY.md) · [RELEASE](docs/RELEASE.md) ·
+[ARCHITECTURE](docs/PLUTON_ARCHITECTURE.md) · [BASELINE](docs/PLUTON_BASELINE_REPORT.md) ·
+[DELIVERY REPORT](docs/delivery-report.md) · [ADRs](docs/adr/) ·
+[Reverse engineering](docs/reverse-engineering/)
 
 ## Independence & licensing
 

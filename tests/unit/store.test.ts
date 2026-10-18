@@ -229,6 +229,29 @@ describe('runs + tasks lifecycle', () => {
     expect(() => store.setTaskState(task.id, 'running')).toThrow(StateTransitionError)
   })
 
+  it('allows createTask without explicit parentTaskId or assigneeMuseId (undefined bindings)', () => {
+    const { store } = freshStore('optional-task-fields')
+    const projectId = seedProject(store)
+    const run = store.createRun({
+      projectId,
+      goal: 'test optional fields',
+      origin: 'cli',
+      requestedBy: 'tester',
+      acceptanceCriteria: [],
+      managerMuseId: 'worker-a',
+      budget: BUDGET,
+    })
+    const task = store.createTask({
+      runId: run.id,
+      title: 'task without parent',
+      brief: 'brief',
+      acceptanceCriteria: ['check'],
+    })
+    expect(task.state).toBe('created')
+    expect(task.parentTaskId).toBeNull()
+    expect(task.assigneeMuseId).toBeNull()
+  })
+
   it('rejects tasks with an unknown assignee (FK enforced)', () => {
     const { store } = freshStore('fk')
     const projectId = seedProject(store)

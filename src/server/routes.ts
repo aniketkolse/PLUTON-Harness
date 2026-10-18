@@ -3,8 +3,8 @@
  * Single authoritative bridge connecting frontend clients to the Pluton runtime.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { isAbsolute, join, relative } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
 import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
@@ -118,16 +118,39 @@ export class ApiRouter {
           this.sendJson(res, 403, { ok: false, error: 'access denied: path outside workspace' })
           return true
         }
-        if (!existsSync(resolved) || statSync(resolved).isDirectory()) {
+        // Canonicalize before trusting the path: junctions/symlinks inside the
+        // workspace must not expose files outside it (parity with the engine
+        // tool bridge's realpath containment).
+        let canonical: string
+        let canonicalRoot: string
+        try {
+          canonicalRoot = realpathSync(this.ctx.loaded.rootDir)
+          canonical = realpathSync(resolved)
+        } catch {
           this.sendJson(res, 404, { ok: false, error: 'file not found' })
           return true
         }
-        const stat = statSync(resolved)
+        const canonicalRel = relative(canonicalRoot, canonical)
+        if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
+          this.sendJson(res, 403, { ok: false, error: 'access denied: path resolves outside workspace (via a link)' })
+          return true
+        }
+        let stat
+        try {
+          stat = statSync(canonical)
+        } catch {
+          this.sendJson(res, 404, { ok: false, error: 'file not found' })
+          return true
+        }
+        if (stat.isDirectory()) {
+          this.sendJson(res, 404, { ok: false, error: 'file not found' })
+          return true
+        }
         if (stat.size > 2 * 1024 * 1024) {
           this.sendJson(res, 413, { ok: false, error: 'file too large to inspect in editor (> 2MB)' })
           return true
         }
-        const content = readFileSync(resolved, 'utf8')
+        const content = readFileSync(canonical, 'utf8')
         this.sendJson(res, 200, { ok: true, path: target, content, size: stat.size })
         return true
       }
@@ -652,6 +675,9 @@ export class ApiRouter {
         for (const entry of entries) {
           if (ignored.has(entry.name)) continue
           const fullPath = join(dir, entry.name)
+          // Never follow links/junctions: a junction inside the workspace must not
+          // expose listings (or contents) of directories outside it.
+          if (entry.isSymbolicLink()) continue
           if (entry.isDirectory()) {
             scan(fullPath)
           } else if (entry.isFile()) {
@@ -695,6 +721,8 @@ export class ApiRouter {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Length': Buffer.byteLength(json),
       'Cache-Control': 'no-store',
+      // The session token travels in the page URL; never forward it via Referer.
+      'Referrer-Policy': 'no-referrer',
     })
     res.end(json)
   }
