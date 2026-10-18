@@ -57,6 +57,8 @@ export interface ProvisionMuseContainerOptions {
   customNetwork?: string
   rootDir: string
   workspacesRoot: string
+  /** Numeric non-root container user (uid or uid:gid) for file ownership alignment. */
+  containerUser?: string
 }
 
 /**
@@ -75,6 +77,7 @@ export async function provisionMuseContainer(
     limits: opts.limits,
     network: opts.network,
     ...(opts.customNetwork !== undefined ? { customNetwork: opts.customNetwork } : {}),
+    ...(opts.containerUser !== undefined ? { containerUser: opts.containerUser } : {}),
     mounts: museContainerMounts({
       muse: opts.muse,
       rootDir: opts.rootDir,

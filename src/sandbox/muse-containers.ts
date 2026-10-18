@@ -1,5 +1,6 @@
 import { SandboxUnavailableError } from '../domain/errors.ts'
 import type { Store } from '../store/store.ts'
+import { resolveContainerUser } from './user-mapping.ts'
 import {
   sandboxContainerName,
   type SandboxInspect,
@@ -52,6 +53,11 @@ export interface MuseContainerSpec {
   network: 'restricted' | 'none' | 'open'
   customNetwork?: string
   mounts: SandboxMount[]
+  /**
+   * Numeric non-root container user (uid or uid:gid) for file ownership alignment.
+   * If omitted, resolved via resolveContainerUser().
+   */
+  containerUser?: string
 }
 
 /**
@@ -96,13 +102,15 @@ export async function ensureMuseContainer(
     }
   }
 
+  const resolvedUser = spec.containerUser ?? resolveContainerUser().containerUser
+
   if (!reusable) {
     const result = await manager.create({
       projectId: spec.projectId,
       museId: spec.museId,
       image: spec.image,
       containerName,
-      containerUser: MUSE_CONTAINER_USER,
+      containerUser: resolvedUser,
       limits: { ...spec.limits },
       mounts: spec.mounts.map((m) => ({ ...m })),
       // Container creation carries no secrets or engine config: identity and
@@ -132,7 +140,8 @@ export async function ensureMuseContainer(
 
 /** Reuse predicate: the container must still serve the requested spec exactly. */
 function containerMatchesSpec(spec: MuseContainerSpec, info: SandboxInspect): boolean {
-  if (info.user !== MUSE_CONTAINER_USER) return false
+  const expectedUser = spec.containerUser ?? resolveContainerUser().containerUser
+  if (info.user !== expectedUser) return false
   if (spec.imageId !== undefined && info.imageId !== '' && info.imageId !== spec.imageId) return false
   if (!info.extraHosts.includes(HOST_GATEWAY_ADD_HOST)) return false
   if (info.mounts.length !== spec.mounts.length) return false
