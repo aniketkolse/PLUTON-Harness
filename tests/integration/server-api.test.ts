@@ -227,4 +227,105 @@ describe('Pluton application server REST & SSE API', () => {
     // Instance file cleared after close
     expect(readServerInstance(rootDir)).toBeNull()
   })
+
+  it('decides approval via API with autoContinue', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const loaded = loadConfig(rootDir)
+      const { store, projectId } = bootstrapStore(loaded)
+      try {
+        const approval = store.createApproval({
+          projectId,
+          runId: null,
+          taskId: null,
+          requestedByMuseId: null,
+          action: 'tool.execute',
+          reason: 'Allow sensitive script execution',
+          scope: { command: 'npm test' },
+          expiresAt: null,
+        })
+
+        const decideRes = await fetch(`http://127.0.0.1:${server.port}/api/approvals/${approval.id}/decide`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-pluton-token': server.token,
+          },
+          body: JSON.stringify({ decision: 'approved', autoContinue: true }),
+        })
+
+        expect(decideRes.status).toBe(200)
+        const decideData = (await decideRes.json()) as { ok: boolean; approval: { status: string }; report: unknown }
+        expect(decideData.ok).toBe(true)
+        expect(decideData.approval.status).toBe('approved')
+        expect(decideData.report).toBeDefined()
+      } finally {
+        store.close()
+      }
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('serves task and run diff endpoints', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const loaded = loadConfig(rootDir)
+      const { store, projectId } = bootstrapStore(loaded)
+      try {
+        const run = store.createRun({
+          projectId,
+          goal: 'test diff endpoint',
+          origin: 'cli',
+          requestedBy: 'operator',
+          acceptanceCriteria: [],
+          managerMuseId: 'supervisor',
+          budget: {
+            maxConcurrentWorkers: 2,
+            maxTasks: 10,
+            maxDelegationDepth: 2,
+            maxRunMinutes: 10,
+            defaultTaskMinutes: 5,
+          },
+        })
+
+        const diffRes = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}/diff`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(diffRes.status).toBe(200)
+        const diffData = (await diffRes.json()) as { ok: boolean; diffs: unknown[] }
+        expect(diffData.ok).toBe(true)
+        expect(diffData.diffs).toBeInstanceOf(Array)
+      } finally {
+        store.close()
+      }
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('serves enhanced SPA assets with Task DAG, Worktree Diffs tab, and Approve & Continue button', async () => {
+    const { appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const resHtml = await fetch(`http://127.0.0.1:${server.port}/`)
+      expect(resHtml.status).toBe(200)
+      const htmlText = await resHtml.text()
+      expect(htmlText).toContain('btnBannerApproveContinue')
+      expect(htmlText).toContain('btnVerifyRedispatch')
+      expect(htmlText).toContain('tabDiffs')
+      expect(htmlText).toContain('dagContainer')
+
+      const resJs = await fetch(`http://127.0.0.1:${server.port}/app.js`)
+      expect(resJs.status).toBe(200)
+      const jsText = await resJs.text()
+      expect(jsText).toContain('loadRunDetail')
+      expect(jsText).toContain('renderDiffContent')
+      expect(jsText).toContain('plutonVerifyTask')
+    } finally {
+      await server.close()
+    }
+  })
 })

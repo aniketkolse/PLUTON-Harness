@@ -7,12 +7,18 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
-import type { LoadedConfig } from '../config/load.ts'
+import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
 import type { EngineSession } from '../engines/contract/types.ts'
+import { GitWorkspaceManager } from '../workspace/manager.ts'
+import { run as execRun } from '../util/exec.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath } from './security.ts'
 import type { ServerEventBroadcaster } from './events.ts'
+import { decideApproval } from '../cli/commands/approvals.ts'
+import { resumeRun } from '../cli/commands/run.ts'
+import type { ProjectContext } from '../cli/context.ts'
+import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import type {
   HealthResponse,
   RunDetailView,
@@ -309,7 +315,7 @@ export class ApiRouter {
       const approvalMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decide$/)
       if (approvalMatch && method === 'POST') {
         const approvalId = approvalMatch[1]!
-        const payload = await this.readJsonBody<{ decision?: 'approved' | 'denied' }>(req)
+        const payload = await this.readJsonBody<{ decision?: 'approved' | 'denied'; autoContinue?: boolean }>(req)
         if (!payload.decision || !['approved', 'denied'].includes(payload.decision)) {
           this.sendJson(res, 400, { ok: false, error: "decision must be 'approved' or 'denied'" })
           return true
@@ -323,25 +329,190 @@ export class ApiRouter {
           this.sendJson(res, 409, { ok: false, error: `approval is already '${approval.status}'` })
           return true
         }
-        const updated = this.ctx.store.setApprovalStatus(approvalId, payload.decision, {
-          decidedBy: 'operator:ui',
+
+        const projectCtx: ProjectContext = {
+          rootDir: this.ctx.loaded.rootDir,
+          configPath: this.ctx.loaded.configPath,
+          loaded: this.ctx.loaded,
+        }
+        const report = await decideApproval(projectCtx, {
+          approvalRef: approvalId,
+          decision: payload.decision === 'approved' ? 'approve' : 'deny',
+          autoContinue: payload.autoContinue,
         })
+        const updated = this.ctx.store.getApproval(approvalId)
         this.ctx.broadcaster.broadcast({
           type: 'approval_decided',
           approval: updated,
         })
-        this.sendJson(res, 200, { ok: true, approval: updated })
+        this.sendJson(res, 200, { ok: true, approval: updated, report })
         return true
       }
 
-      // 13. Muses list
+      // 13. Run Verification Gate & Re-dispatch
+      const runVerifyMatch = pathname.match(/^\/api\/runs\/([^/]+)\/verify$/)
+      if (runVerifyMatch && method === 'POST') {
+        const runId = runVerifyMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const payload = await this.readJsonBody<{ taskId?: string; dispatch?: boolean }>(req)
+        const checks = this.ctx.loaded.config.project.verification
+        if (checks.length === 0) {
+          this.sendJson(res, 400, { ok: false, error: 'no verification checks configured in project' })
+          return true
+        }
+        const artifactsDir = join(stateDir(this.ctx.loaded.rootDir), 'artifacts')
+        const candidates = payload.taskId
+          ? [this.ctx.store.getTask(payload.taskId)]
+          : this.ctx.store.listTasks(runId).filter((t) => t.state === 'verifying')
+        if (candidates.length === 0) {
+          this.sendJson(res, 400, { ok: false, error: 'no candidate tasks in verifying state available for verification' })
+          return true
+        }
+        const taskReports = []
+        for (const task of candidates) {
+          const ws = this.ctx.store.getWorkspaceByTask(task.id)
+          const report = await runVerificationChecks({
+            store: this.ctx.store,
+            projectId: this.ctx.projectId,
+            runId: run.id,
+            taskId: task.id,
+            checks,
+            cwd: ws !== null ? ws.path : this.ctx.loaded.rootDir,
+            workspaceId: ws !== null ? ws.id : null,
+            artifactsDir,
+          })
+          let diffText = ''
+          let changedFiles: string[] = []
+          if (ws !== null) {
+            const diffRes = await execRun(['git', '-C', ws.path, 'diff', `${ws.baseCommit}...HEAD`], {
+              timeoutMs: 15_000,
+              maxOutputBytes: 100_000,
+            }).catch(() => null)
+            if (diffRes && diffRes.exitCode === 0) diffText = diffRes.stdout
+            const nameRes = await execRun(['git', '-C', ws.path, 'diff', '--name-only', `${ws.baseCommit}...HEAD`], {
+              timeoutMs: 10_000,
+              maxOutputBytes: 50_000,
+            }).catch(() => null)
+            if (nameRes && nameRes.exitCode === 0) {
+              changedFiles = nameRes.stdout.split('\n').map((s: string) => s.trim()).filter(Boolean)
+            }
+          }
+          const verdict = applyTaskVerificationVerdict(this.ctx.store, task.id, { diffText, changedFiles })
+          taskReports.push({
+            taskId: task.id,
+            title: task.title,
+            verdict: verdict.state,
+            summary: verdict.summary,
+            checks: report.results.map((r) => ({
+              name: r.name,
+              status: r.status,
+              exitCode: r.exitCode,
+              note: r.note,
+            })),
+          })
+        }
+        const finalVerdict = finalizeRunVerdict(this.ctx.store, runId)
+        let resumed = null
+        if (payload.dispatch && finalVerdict !== null && finalVerdict.outcome === 'redispatched') {
+          const projectCtx: ProjectContext = {
+            rootDir: this.ctx.loaded.rootDir,
+            configPath: this.ctx.loaded.configPath,
+            loaded: this.ctx.loaded,
+          }
+          resumed = await resumeRun(projectCtx, runId, { skipManager: true })
+        }
+        this.sendJson(res, 200, {
+          ok: true,
+          taskReports,
+          finalVerdict,
+          resumed,
+        })
+        return true
+      }
+
+      // 14. Run Resume Execution
+      const runResumeMatch = pathname.match(/^\/api\/runs\/([^/]+)\/resume$/)
+      if (runResumeMatch && method === 'POST') {
+        const runId = runResumeMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const projectCtx: ProjectContext = {
+          rootDir: this.ctx.loaded.rootDir,
+          configPath: this.ctx.loaded.configPath,
+          loaded: this.ctx.loaded,
+        }
+        const summary = await resumeRun(projectCtx, runId, { skipManager: true })
+        this.sendJson(res, 200, { ok: true, summary })
+        return true
+      }
+
+      // 15. Task Worktree Diff
+      const taskDiffMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/diff$/)
+      if (taskDiffMatch && method === 'GET') {
+        const taskId = taskDiffMatch[1]!
+        const task = this.ctx.store.getTaskOrNull(taskId)
+        if (!task) {
+          this.sendJson(res, 404, { ok: false, error: `task '${taskId}' not found` })
+          return true
+        }
+        const ws = this.ctx.store.getWorkspaceByTask(taskId)
+        if (!ws || !existsSync(ws.path)) {
+          this.sendJson(res, 200, { ok: true, diff: '', untracked: [], truncated: false, hasWorkspace: false })
+          return true
+        }
+        const gitMgr = new GitWorkspaceManager({ workspacesRoot: workspaceDir(this.ctx.loaded.rootDir) })
+        const diffResult = await gitMgr.captureDiff(ws.path)
+        this.sendJson(res, 200, { ok: true, ...diffResult, hasWorkspace: true, path: ws.path })
+        return true
+      }
+
+      // 16. Run Worktrees Combined Diff
+      const runDiffMatch = pathname.match(/^\/api\/runs\/([^/]+)\/diff$/)
+      if (runDiffMatch && method === 'GET') {
+        const runId = runDiffMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const gitMgr = new GitWorkspaceManager({ workspacesRoot: workspaceDir(this.ctx.loaded.rootDir) })
+        const diffs: { taskId: string | null; taskTitle?: string; path: string; diff: string; untracked: string[] }[] = []
+        const workspaces = this.ctx.store.listWorkspaces(this.ctx.projectId)
+          .filter((w) => w.runId === runId && existsSync(w.path))
+        for (const ws of workspaces) {
+          try {
+            const d = await gitMgr.captureDiff(ws.path)
+            const task = ws.taskId ? this.ctx.store.getTaskOrNull(ws.taskId) : null
+            diffs.push({
+              taskId: ws.taskId,
+              taskTitle: task?.title,
+              path: ws.path,
+              diff: d.diff,
+              untracked: d.untracked,
+            })
+          } catch {
+            // Ignore unreadable or transient checkout diffs
+          }
+        }
+        this.sendJson(res, 200, { ok: true, diffs })
+        return true
+      }
+
+      // 17. Muses list
       if (pathname === '/api/muses' && method === 'GET') {
         const muses = this.ctx.store.listMuses()
         this.sendJson(res, 200, { ok: true, muses })
         return true
       }
 
-      // 14. Models list
+      // 18. Models list
       if (pathname === '/api/models' && method === 'GET') {
         const muses = this.ctx.store.listMuses()
         const modelsByEngine: Record<string, unknown[]> = {}

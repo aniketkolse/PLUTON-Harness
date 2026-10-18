@@ -94,7 +94,8 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
               <div class="approval-banner-desc" id="approvalReason">Run test suite in workspace</div>
             </div>
             <div class="approval-banner-actions">
-              <button class="btn-success-sm" id="btnBannerApprove">Approve</button>
+              <button class="btn-success-sm" id="btnBannerApproveContinue">Approve & Continue</button>
+              <button class="btn-primary-sm" id="btnBannerApprove">Approve</button>
               <button class="btn-danger-sm" id="btnBannerDeny">Deny</button>
             </div>
           </div>
@@ -186,10 +187,18 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <div class="panel-card">
             <div class="card-header-action">
               <h3>Orchestration Tasks & DAG</h3>
-              <button class="btn-primary-sm" id="btnStartRun">Start New Run</button>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <button class="btn-success-sm hidden" id="btnVerifyRedispatch">Verify & Re-dispatch</button>
+                <button class="btn-primary-sm hidden" id="btnResumeRun">Resume Run</button>
+                <button class="btn-secondary-sm hidden" id="btnViewRunDiff">View Run Diff</button>
+                <button class="btn-primary-sm" id="btnStartRun">Start New Run</button>
+              </div>
             </div>
             <div id="runsContainer">
               <!-- Dynamically populated -->
+            </div>
+            <div id="dagContainer" class="dag-container">
+              <!-- Dynamically populated tasks DAG -->
             </div>
           </div>
 
@@ -221,11 +230,17 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <p>Inspect project files, modified worktree artifacts, and test outputs.</p>
         </div>
         <div class="files-split">
-          <aside class="files-list-panel" id="filesList">
-            <!-- Dynamic files tree -->
+          <aside class="files-list-panel">
+            <div class="files-nav-tabs">
+              <button class="files-tab-btn active" id="tabFiles">Files</button>
+              <button class="files-tab-btn" id="tabDiffs">Worktree Diffs</button>
+            </div>
+            <div id="filesList" class="files-sublist">
+              <!-- Dynamic files tree -->
+            </div>
           </aside>
           <div class="file-content-panel">
-            <div class="file-content-header" id="activeFileName">Select a file to inspect</div>
+            <div class="file-content-header" id="activeFileName">Select a file or diff to inspect</div>
             <pre class="file-content-body"><code id="fileCodeBody">// Select a file from the workspace</code></pre>
           </div>
         </div>
@@ -1153,6 +1168,159 @@ body {
   color: var(--text-primary);
 }
 
+/* DAG Container & Cards */
+.dag-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.dag-task-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  transition: border-color 0.15s ease;
+}
+
+.dag-task-card.state-completed {
+  border-left: 4px solid var(--status-success);
+}
+
+.dag-task-card.state-running, .dag-task-card.state-active {
+  border-left: 4px solid var(--status-info);
+}
+
+.dag-task-card.state-verifying, .dag-task-card.state-needs_approval {
+  border-left: 4px solid var(--status-warn);
+}
+
+.dag-task-card.state-failed, .dag-task-card.state-cancelled {
+  border-left: 4px solid var(--status-danger);
+}
+
+.dag-task-card.state-queued, .dag-task-card.state-admitted {
+  border-left: 4px solid var(--text-muted);
+}
+
+.dag-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.dag-task-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.dag-task-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dag-task-deps {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--accent-purple-light);
+}
+
+.dag-task-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Files Nav Tabs */
+.files-nav-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 8px;
+}
+
+.files-tab-btn {
+  flex: 1;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.files-tab-btn.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-purple);
+}
+
+.files-sublist {
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Diff lines */
+.diff-line {
+  display: block;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.diff-line.add {
+  background: rgba(40, 167, 69, 0.15);
+  color: #7ee787;
+}
+
+.diff-line.del {
+  background: rgba(220, 53, 69, 0.15);
+  color: #ffa198;
+}
+
+.diff-line.hunk {
+  background: rgba(56, 139, 253, 0.15);
+  color: #79c0ff;
+  font-weight: bold;
+}
+
+.diff-line.info {
+  color: var(--text-muted);
+}
+
+/* Toast Notifications */
+.pluton-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-purple);
+  color: var(--text-primary);
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.85rem;
+  z-index: 9999;
+  animation: toastIn 0.2s ease;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Utilities */
 .hidden {
   display: none !important;
@@ -1237,9 +1405,16 @@ body {
   const elPinnedApproval = document.getElementById('pinnedApprovalBanner');
   const elApprovalAction = document.getElementById('approvalAction');
   const elApprovalReason = document.getElementById('approvalReason');
+  const elBtnBannerApproveContinue = document.getElementById('btnBannerApproveContinue');
   const elBtnBannerApprove = document.getElementById('btnBannerApprove');
   const elBtnBannerDeny = document.getElementById('btnBannerDeny');
   const elApprovalsBadge = document.getElementById('approvalsBadge');
+  const elBtnVerifyRedispatch = document.getElementById('btnVerifyRedispatch');
+  const elBtnResumeRun = document.getElementById('btnResumeRun');
+  const elBtnViewRunDiff = document.getElementById('btnViewRunDiff');
+  const elDagContainer = document.getElementById('dagContainer');
+  const elTabFiles = document.getElementById('tabFiles');
+  const elTabDiffs = document.getElementById('tabDiffs');
 
   // Tab Switching
   elNavButtons.forEach((btn) => {
@@ -1570,14 +1745,29 @@ body {
 
   let currentPendingApprovalId = null;
 
+  function showToast(text) {
+    const toast = document.createElement('div');
+    toast.className = 'pluton-toast';
+    toast.textContent = text;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      toast.style.transition = 'opacity 0.3s ease';
+      setTimeout(() => toast.remove(), 300);
+    }, 3500);
+  }
+
   function showPendingApproval(approval) {
     currentPendingApprovalId = approval.id;
     elApprovalAction.textContent = 'Approval Required: ' + (approval.action || 'Execute Action');
     elApprovalReason.textContent = approval.reason || 'Requested by ' + (approval.requestedByMuse || 'agent');
     elPinnedApproval.classList.remove('hidden');
 
-    elBtnBannerApprove.onclick = () => decidePendingApproval(approval.id, 'approved');
-    elBtnBannerDeny.onclick = () => decidePendingApproval(approval.id, 'denied');
+    if (elBtnBannerApproveContinue) {
+      elBtnBannerApproveContinue.onclick = () => decidePendingApproval(approval.id, 'approved', true);
+    }
+    elBtnBannerApprove.onclick = () => decidePendingApproval(approval.id, 'approved', false);
+    elBtnBannerDeny.onclick = () => decidePendingApproval(approval.id, 'denied', false);
   }
 
   function hidePendingApproval() {
@@ -1585,13 +1775,22 @@ body {
     currentPendingApprovalId = null;
   }
 
-  async function decidePendingApproval(id, decision) {
+  async function decidePendingApproval(id, decision, autoContinue) {
     try {
-      await apiFetch('/api/approvals/' + id + '/decide', {
+      const res = await apiFetch('/api/approvals/' + id + '/decide', {
         method: 'POST',
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, autoContinue: Boolean(autoContinue) }),
       });
       hidePendingApproval();
+      if (res.report && res.report.run && res.report.run.resumed) {
+        showToast('Approval recorded. Run ' + res.report.run.id + ' resumed execution.');
+      } else if (res.report && res.report.integrationReport) {
+        showToast('Approval recorded. Integrated ' + res.report.integrationReport.integrated.length + ' task(s).');
+      } else {
+        showToast('Approval recorded: ' + decision);
+      }
+      if (activeTab === 'approvals') loadApprovalsView();
+      if (activeTab === 'orchestra') loadOrchestraView();
     } catch (err) {
       alert('Failed to record approval decision: ' + err.message);
     }
@@ -1606,7 +1805,9 @@ body {
     }
   }
 
-  // 2. Orchestra View Loader
+  // 2. Orchestra View Loader & Interactive Task DAG
+  let selectedRunId = null;
+
   async function loadOrchestraView() {
     const res = await apiFetch('/api/workspace');
     const muses = res.workspace.muses || [];
@@ -1624,15 +1825,179 @@ body {
     const runsContainer = document.getElementById('runsContainer');
     if (runs.length === 0) {
       runsContainer.innerHTML = '<p style="color:var(--text-muted)">No multi-agent runs recorded yet.</p>';
-    } else {
-      runsContainer.innerHTML = runs.map((r) =>
-        '<div style="padding:10px; border-bottom:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center;">' +
-          '<div><strong>Run ' + escapeHtml(r.id) + '</strong>: ' + escapeHtml(r.goal) + '</div>' +
-          '<span class="tool-status-pill ' + (r.state === 'completed' ? 'succeeded' : r.state === 'running' ? 'running' : 'failed') + '">' + r.state + '</span>' +
+      if (elDagContainer) elDagContainer.innerHTML = '';
+      hideRunHeaderActions();
+      return;
+    }
+
+    if (!selectedRunId || !runs.some((r) => r.id === selectedRunId)) {
+      const activeRun = runs.find((r) => r.state === 'running' || r.state === 'active' || r.state === 'verifying' || r.state === 'awaiting_approval');
+      selectedRunId = activeRun ? activeRun.id : runs[0].id;
+    }
+
+    runsContainer.innerHTML = '<div style="display:flex; flex-direction:column; gap:8px;">' +
+      runs.map((r) =>
+        '<div class="dag-task-card" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;' + (r.id === selectedRunId ? ' border-color:var(--accent-purple);' : '') + '" onclick="window.plutonSelectRun(\\'' + r.id + '\\')">' +
+          '<div>' +
+            '<div style="font-weight:700; color:var(--text-primary);">Run ' + escapeHtml(r.id) + ': ' + escapeHtml(r.goal) + '</div>' +
+            '<div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">Requested by ' + escapeHtml(r.requestedBy || 'operator') + ' · ' + new Date(r.createdAt).toLocaleString() + '</div>' +
+          '</div>' +
+          '<span class="tool-status-pill ' + (r.state === 'completed' ? 'succeeded' : r.state === 'running' || r.state === 'active' ? 'running' : r.state === 'failed' ? 'failed' : 'pending') + '">' + r.state + '</span>' +
         '</div>'
-      ).join('');
+      ).join('') +
+    '</div>';
+
+    await loadRunDetail(selectedRunId);
+  }
+
+  window.plutonSelectRun = (runId) => {
+    selectedRunId = runId;
+    loadOrchestraView();
+  };
+
+  function hideRunHeaderActions() {
+    if (elBtnVerifyRedispatch) elBtnVerifyRedispatch.classList.add('hidden');
+    if (elBtnResumeRun) elBtnResumeRun.classList.add('hidden');
+    if (elBtnViewRunDiff) elBtnViewRunDiff.classList.add('hidden');
+  }
+
+  async function loadRunDetail(runId) {
+    try {
+      const detailRes = await apiFetch('/api/runs/' + runId);
+      const detail = detailRes.run;
+      const run = detail.run;
+      const tasks = detail.tasks || [];
+      const edges = detail.edges || [];
+      const usage = detail.usage || { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+
+      // Header action buttons
+      if (elBtnVerifyRedispatch) {
+        elBtnVerifyRedispatch.classList.toggle('hidden', run.state !== 'verifying' && run.state !== 'active' && run.state !== 'awaiting_approval');
+        elBtnVerifyRedispatch.onclick = async () => {
+          try {
+            elBtnVerifyRedispatch.disabled = true;
+            elBtnVerifyRedispatch.textContent = 'Verifying…';
+            const vRes = await apiFetch('/api/runs/' + runId + '/verify', {
+              method: 'POST',
+              body: JSON.stringify({ dispatch: true }),
+            });
+            showToast('Verification complete. Outcome: ' + (vRes.finalVerdict ? vRes.finalVerdict.outcome : 'finished'));
+            loadOrchestraView();
+          } catch (e) {
+            alert('Verification failed: ' + e.message);
+          } finally {
+            elBtnVerifyRedispatch.disabled = false;
+            elBtnVerifyRedispatch.textContent = 'Verify & Re-dispatch';
+          }
+        };
+      }
+
+      if (elBtnResumeRun) {
+        elBtnResumeRun.classList.toggle('hidden', run.state !== 'active' && run.state !== 'awaiting_approval');
+        elBtnResumeRun.onclick = async () => {
+          try {
+            elBtnResumeRun.disabled = true;
+            elBtnResumeRun.textContent = 'Resuming…';
+            const rRes = await apiFetch('/api/runs/' + runId + '/resume', { method: 'POST', body: '{}' });
+            showToast('Run resumed. Outcome: ' + rRes.summary.outcome);
+            loadOrchestraView();
+          } catch (e) {
+            alert('Failed to resume run: ' + e.message);
+          } finally {
+            elBtnResumeRun.disabled = false;
+            elBtnResumeRun.textContent = 'Resume Run';
+          }
+        };
+      }
+
+      if (elBtnViewRunDiff) {
+        elBtnViewRunDiff.classList.remove('hidden');
+        elBtnViewRunDiff.onclick = () => {
+          switchTab('files');
+          loadDiffsTab(runId);
+        };
+      }
+
+      // Render Task DAG
+      if (elDagContainer) {
+        if (tasks.length === 0) {
+          elDagContainer.innerHTML = '<p style="color:var(--text-muted); font-size:0.85rem; padding:8px 0;">No tasks admitted for this run yet.</p>';
+        } else {
+          elDagContainer.innerHTML = '<h4 style="margin:14px 0 8px; font-size:0.85rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Run Tasks DAG (' + tasks.length + ' tasks)</h4>' +
+            tasks.map((t) => {
+              const prereqs = edges.filter((e) => e.toTaskId === t.id).map((e) => e.fromTaskId);
+              const blocks = edges.filter((e) => e.fromTaskId === t.id).map((e) => e.toTaskId);
+              return (
+                '<div class="dag-task-card state-' + t.state + '">' +
+                  '<div class="dag-card-header">' +
+                    '<div class="dag-task-title">' + escapeHtml(t.title) + '</div>' +
+                    '<span class="tool-status-pill ' + (t.state === 'completed' ? 'succeeded' : t.state === 'running' ? 'running' : t.state === 'failed' ? 'failed' : 'pending') + '">' + t.state + '</span>' +
+                  '</div>' +
+                  (t.brief ? '<div style="font-size:0.85rem; color:var(--text-secondary);">' + escapeHtml(t.brief) + '</div>' : '') +
+                  '<div class="dag-task-meta">' +
+                    '<span>👤 ' + escapeHtml(t.assigneeMuseId || 'coordinator') + '</span>' +
+                    '<span>🆔 <code>' + escapeHtml(t.id) + '</code></span>' +
+                    (prereqs.length > 0 ? '<span class="dag-task-deps">Depends on: ' + prereqs.map((p) => '<span class="dag-edge-tag">' + escapeHtml(p) + '</span>').join(' ') + '</span>' : '') +
+                    (blocks.length > 0 ? '<span class="dag-task-deps">Blocks: ' + blocks.map((b) => '<span class="dag-edge-tag">' + escapeHtml(b) + '</span>').join(' ') + '</span>' : '') +
+                  '</div>' +
+                  '<div class="dag-task-actions">' +
+                    '<button class="btn-secondary-sm" onclick="window.plutonViewTaskDiff(\\'' + t.id + '\\')">View Diff</button>' +
+                    (t.state === 'verifying'
+                      ? '<button class="btn-success-sm" onclick="window.plutonVerifyTask(\\'' + runId + '\\', \\'' + t.id + '\\')">Verify Task</button>'
+                      : '') +
+                  '</div>' +
+                '</div>'
+              );
+            }).join('');
+        }
+      }
+
+      // Usage & Budget Ledger
+      const usageContainer = document.getElementById('usageLedgerView');
+      if (usageContainer) {
+        const totalTokens = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+        usageContainer.innerHTML =
+          '<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">' +
+            '<div class="muse-card">' +
+              '<div class="muse-card-name">Tokens Consumed</div>' +
+              '<div style="font-size:1.1rem; font-weight:700; color:var(--accent-purple-light);">' + totalTokens.toLocaleString() + '</div>' +
+              '<div style="font-size:0.75rem; color:var(--text-muted);">' + (usage.inputTokens || 0).toLocaleString() + ' in · ' + (usage.outputTokens || 0).toLocaleString() + ' out</div>' +
+            '</div>' +
+            '<div class="muse-card">' +
+              '<div class="muse-card-name">Computed Cost</div>' +
+              '<div style="font-size:1.1rem; font-weight:700; color:var(--status-warn);">$' + Number(usage.costUsd || 0).toFixed(4) + '</div>' +
+              '<div style="font-size:0.75rem; color:var(--text-muted)">Live tracked billing</div>' +
+            '</div>' +
+            '<div class="muse-card">' +
+              '<div class="muse-card-name">Tasks in Run</div>' +
+              '<div style="font-size:1.1rem; font-weight:700; color:var(--status-info);">' + tasks.length + '</div>' +
+              '<div style="font-size:0.75rem; color:var(--text-muted);">' + tasks.filter((t) => t.state === 'completed').length + ' completed</div>' +
+            '</div>' +
+          '</div>';
+      }
+    } catch (err) {
+      console.error('Failed to load run detail:', err);
     }
   }
+
+  window.plutonViewTaskDiff = (taskId) => {
+    switchTab('files');
+    loadTaskDiff(taskId);
+  };
+
+  window.plutonVerifyTask = async (runId, taskId) => {
+    try {
+      showToast('Running verification checks on ' + taskId + '…');
+      const res = await apiFetch('/api/runs/' + runId + '/verify', {
+        method: 'POST',
+        body: JSON.stringify({ taskId, dispatch: true }),
+      });
+      showToast('Task verified. Report: ' + (res.taskReports && res.taskReports[0] ? res.taskReports[0].verdict : 'complete'));
+      loadOrchestraView();
+    } catch (e) {
+      alert('Verification error: ' + e.message);
+    }
+  };
 
   // 3. Approvals View Loader
   async function loadApprovalsView() {
@@ -1643,32 +2008,71 @@ body {
       container.innerHTML = '<div class="panel-card"><p style="color:var(--text-muted)">No approvals recorded in this project.</p></div>';
       return;
     }
-    container.innerHTML = list.map((a) =>
-      '<div class="approval-item-card">' +
-        '<div class="approval-item-info">' +
-          '<div class="approval-item-action">' + escapeHtml(a.action) + ' (' + a.status + ')</div>' +
-          '<div class="approval-item-reason">' + escapeHtml(a.reason) + '</div>' +
-          '<div class="approval-item-meta">Requested by: ' + escapeHtml(a.requestedByMuse || 'agent') + ' · ' + new Date(a.createdAt).toLocaleString() + '</div>' +
-        '</div>' +
-        (a.status === 'pending'
-          ? '<div class="approval-banner-actions">' +
-              '<button class="btn-success-sm" onclick="window.plutonDecide(\\'' + a.id + '\\', \\'approved\\')">Approve</button>' +
-              '<button class="btn-danger-sm" onclick="window.plutonDecide(\\'' + a.id + '\\', \\'denied\\')">Deny</button>' +
-            '</div>'
-          : '<span class="tool-status-pill ' + (a.status === 'approved' ? 'succeeded' : 'failed') + '">' + a.status + '</span>') +
-      '</div>'
-    ).join('');
+    container.innerHTML = list.map((a) => {
+      let scopeDetails = '';
+      if (a.scope) {
+        if (typeof a.scope === 'object' && a.scope.files && Array.isArray(a.scope.files)) {
+          scopeDetails = '<div style="margin-top:4px; font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted)">Protected files: ' +
+            a.scope.files.map((f) => '<span class="sb-item" style="background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px; margin-right:4px;">' + escapeHtml(f) + '</span>').join('') + '</div>';
+        } else if (typeof a.scope === 'object' && a.scope.command) {
+          scopeDetails = '<div style="margin-top:4px; font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted)">Command: ' + escapeHtml(String(a.scope.command)) + '</div>';
+        }
+      }
+      return (
+        '<div class="approval-item-card">' +
+          '<div class="approval-item-info">' +
+            '<div class="approval-item-action">' + escapeHtml(a.action) + ' <span class="tool-status-pill ' + (a.status === 'approved' ? 'succeeded' : a.status === 'pending' ? 'running' : 'failed') + '">' + a.status + '</span></div>' +
+            '<div class="approval-item-reason">' + escapeHtml(a.reason) + '</div>' +
+            scopeDetails +
+            '<div class="approval-item-meta">Requested by: ' + escapeHtml(a.requestedByMuse || 'agent') + ' · ' + new Date(a.createdAt).toLocaleString() + '</div>' +
+          '</div>' +
+          (a.status === 'pending'
+            ? '<div class="approval-banner-actions">' +
+                '<button class="btn-success-sm" onclick="window.plutonDecide(\\'' + a.id + '\\', \\'approved\\', true)">Approve & Continue</button>' +
+                '<button class="btn-primary-sm" onclick="window.plutonDecide(\\'' + a.id + '\\', \\'approved\\', false)">Approve</button>' +
+                '<button class="btn-danger-sm" onclick="window.plutonDecide(\\'' + a.id + '\\', \\'denied\\', false)">Deny</button>' +
+              '</div>'
+            : '') +
+        '</div>'
+      );
+    }).join('');
   }
 
-  window.plutonDecide = (id, decision) => {
-    decidePendingApproval(id, decision).then(loadApprovalsView);
+  window.plutonDecide = (id, decision, autoContinue = true) => {
+    decidePendingApproval(id, decision, autoContinue);
   };
 
-  // 4. Files View Loader
+  // 4. Files View & Diff Viewer Loader
+  let filesTabMode = 'files';
+
   async function loadFilesView() {
+    if (elTabFiles && elTabDiffs) {
+      elTabFiles.onclick = () => {
+        filesTabMode = 'files';
+        elTabFiles.classList.add('active');
+        elTabDiffs.classList.remove('active');
+        loadFilesList();
+      };
+      elTabDiffs.onclick = () => {
+        filesTabMode = 'diffs';
+        elTabDiffs.classList.add('active');
+        elTabFiles.classList.remove('active');
+        loadDiffsTab(selectedRunId);
+      };
+    }
+
+    if (filesTabMode === 'diffs') {
+      await loadDiffsTab(selectedRunId);
+    } else {
+      await loadFilesList();
+    }
+  }
+
+  async function loadFilesList() {
     const res = await apiFetch('/api/files');
     const files = res.files || [];
     const listPanel = document.getElementById('filesList');
+    if (!listPanel) return;
     listPanel.innerHTML = files.map((f) =>
       '<div class="file-tree-item" data-path="' + escapeHtml(f) + '">' + escapeHtml(f) + '</div>'
     ).join('');
@@ -1683,6 +2087,94 @@ body {
         document.getElementById('fileCodeBody').textContent = contentRes.content;
       });
     });
+  }
+
+  async function loadDiffsTab(runId) {
+    const listPanel = document.getElementById('filesList');
+    if (!listPanel) return;
+    if (elTabDiffs) elTabDiffs.classList.add('active');
+    if (elTabFiles) elTabFiles.classList.remove('active');
+    filesTabMode = 'diffs';
+
+    if (!runId) {
+      listPanel.innerHTML = '<div style="padding:10px; color:var(--text-muted); font-size:0.8rem;">Select a run to view worktree diffs.</div>';
+      return;
+    }
+
+    try {
+      const res = await apiFetch('/api/runs/' + runId + '/diff');
+      const diffs = res.diffs || [];
+      if (diffs.length === 0) {
+        listPanel.innerHTML = '<div style="padding:10px; color:var(--text-muted); font-size:0.8rem;">No worktree modifications recorded for run ' + escapeHtml(runId) + '.</div>';
+        document.getElementById('activeFileName').textContent = 'No worktree diffs';
+        document.getElementById('fileCodeBody').textContent = '// Workspace checkouts are clean';
+        return;
+      }
+
+      listPanel.innerHTML = diffs.map((d, idx) =>
+        '<div class="file-tree-item' + (idx === 0 ? ' active' : '') + '" data-diff-idx="' + idx + '">' +
+          '⚡ ' + escapeHtml(d.taskTitle || d.taskId || 'Worktree Diff') +
+        '</div>'
+      ).join('');
+
+      renderDiffContent(diffs[0].diff || '// Clean worktree (no changes)', diffs[0].taskTitle || diffs[0].taskId || 'Worktree Diff');
+
+      listPanel.querySelectorAll('.file-tree-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          listPanel.querySelectorAll('.file-tree-item').forEach((i) => i.classList.remove('active'));
+          item.classList.add('active');
+          const idx = Number(item.getAttribute('data-diff-idx'));
+          const selected = diffs[idx];
+          if (selected) {
+            renderDiffContent(selected.diff || '// Clean worktree (no changes)', selected.taskTitle || selected.taskId || 'Worktree Diff');
+          }
+        });
+      });
+    } catch (e) {
+      listPanel.innerHTML = '<div style="padding:10px; color:var(--status-danger); font-size:0.8rem;">Failed to load diffs: ' + escapeHtml(e.message) + '</div>';
+    }
+  }
+
+  async function loadTaskDiff(taskId) {
+    if (elTabDiffs) elTabDiffs.classList.add('active');
+    if (elTabFiles) elTabFiles.classList.remove('active');
+    filesTabMode = 'diffs';
+
+    try {
+      const res = await apiFetch('/api/tasks/' + taskId + '/diff');
+      document.getElementById('activeFileName').textContent = 'Task Worktree Diff: ' + taskId;
+      renderDiffContent(res.diff || '// No uncommitted or staged changes in task checkout', taskId);
+    } catch (e) {
+      document.getElementById('activeFileName').textContent = 'Error loading diff';
+      document.getElementById('fileCodeBody').textContent = '// Error: ' + e.message;
+    }
+  }
+
+  function renderDiffContent(diffText, title) {
+    const header = document.getElementById('activeFileName');
+    const codeBody = document.getElementById('fileCodeBody');
+    if (header) header.textContent = title;
+    if (!codeBody) return;
+
+    if (!diffText || diffText.trim() === '') {
+      codeBody.innerHTML = '<span class="diff-line info">// No changes</span>';
+      return;
+    }
+
+    const lines = diffText.split('\\n');
+    codeBody.innerHTML = lines.map((l) => {
+      const escaped = escapeHtml(l);
+      if (l.startsWith('+') && !l.startsWith('+++')) {
+        return '<span class="diff-line add">' + escaped + '</span>';
+      }
+      if (l.startsWith('-') && !l.startsWith('---')) {
+        return '<span class="diff-line del">' + escaped + '</span>';
+      }
+      if (l.startsWith('@@')) {
+        return '<span class="diff-line hunk">' + escaped + '</span>';
+      }
+      return '<span class="diff-line info">' + escaped + '</span>';
+    }).join('');
   }
 
   // 5. Settings View Loader
