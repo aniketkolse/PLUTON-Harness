@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { rename } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { ValidationError, WorkspaceError } from '../domain/errors.ts'
 import { slugify } from '../domain/ids.ts'
@@ -70,7 +71,12 @@ export interface IntegrateBranchResult {
   detail: string | null
 }
 
-interface MarkerFile {
+/**
+ * Ownership proof written inside every Pluton-created checkout
+ * (`<checkout>/.git/pluton-workspace.json`). Recovery decisions (reattach vs
+ * archive) rest on it; checkout removal refuses any directory without one.
+ */
+export interface CheckoutMarker {
   managed: true
   kind: CheckoutRequest['kind']
   branch: string
@@ -81,6 +87,7 @@ interface MarkerFile {
 export type WorkspaceRunFn = (argv: string[], options?: RunOptions) => Promise<RunResult>
 
 const RUN_ID_RE = /^[a-z]+_[0-9a-z]+$/
+const ARCHIVE_TAG_RE = /^[A-Za-z0-9._-]+$/
 const COMMIT_OPTS = ['-c', 'user.name=Pluton', '-c', 'user.email=pluton@localhost']
 
 export function checkoutBranchName(req: Pick<CheckoutRequest, 'kind' | 'runId' | 'slug'>): string {
@@ -111,13 +118,34 @@ export class GitWorkspaceManager {
     return join(checkoutPath, '.git', 'pluton-workspace.json')
   }
 
-  private readMarker(checkoutPath: string): MarkerFile | null {
+  /** Raw marker parse (callers assert root containment first). */
+  private parseMarker(checkoutPath: string): CheckoutMarker | null {
     try {
-      const raw = JSON.parse(readFileSync(this.markerPath(checkoutPath), 'utf8')) as MarkerFile
+      const raw = JSON.parse(readFileSync(this.markerPath(checkoutPath), 'utf8')) as CheckoutMarker
       return raw.managed === true ? raw : null
     } catch {
       return null
     }
+  }
+
+  private readMarker(checkoutPath: string): CheckoutMarker | null {
+    return this.parseMarker(checkoutPath)
+  }
+
+  /** Absolute path of the checkout this manager provisions for `destName` (pure). */
+  resolveCheckoutPath(destName: string): string {
+    return resolve(join(this.workspacesRoot, destName))
+  }
+
+  /**
+   * Read a checkout's ownership marker without requiring the checkout to exist.
+   * Paths outside the workspaces root are refused up front — the marker is the
+   * ownership proof every recovery decision rests on. Returns null when the
+   * marker is missing, unreadable, or does not assert `managed: true`.
+   */
+  readCheckoutMarker(checkoutPath: string): CheckoutMarker | null {
+    this.assertInsideRoot(checkoutPath, 'read checkout marker')
+    return this.parseMarker(checkoutPath)
   }
 
   private assertInsideRoot(path: string, verb: string): void {
@@ -205,7 +233,7 @@ export class GitWorkspaceManager {
         })
       }
 
-      const marker: MarkerFile = {
+      const marker: CheckoutMarker = {
         managed: true,
         kind: req.kind,
         branch,
@@ -288,18 +316,38 @@ export class GitWorkspaceManager {
     })
   }
 
-  /** `git diff --name-only <from>..<to>` inside a Pluton-managed checkout. */
+  /**
+   * `git diff --name-status -z -M <from>..<to>` inside a Pluton-managed
+   * checkout. `-z` keeps path names verbatim (NUL-terminated, never C-quoted):
+   * the integration gate matches these names against protected-path patterns,
+   * so git's quoted `"\303\244…"` form must never reach the matcher. Rename
+   * detection stays on and BOTH sides of an `R`/`C` entry (old and new path)
+   * are returned: `--name-only` would report only the destination, letting a
+   * protected path be renamed past the ADR-0009 approval gate.
+   */
   async changedFiles(checkoutPath: string, from: string, to = 'HEAD'): Promise<string[]> {
     const abs = resolve(checkoutPath)
     this.assertInsideRoot(abs, 'changed files')
     if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
-    const diff = await this.git(['diff', '--name-only', `${from}..${to}`], abs)
+    const diff = await this.git(['diff', '--name-status', '-z', '-M', `${from}..${to}`], abs)
     if (diff.exitCode !== 0) {
       throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(diff.stderr, 300)}`)
     }
-    return diff.stdout
-      .split(/\r?\n/)
-      .filter((line) => line.trim() !== '')
+    const tokens = diff.stdout.split('\0').filter((token) => token !== '')
+    const files: string[] = []
+    for (let i = 0; i < tokens.length; i += 1) {
+      const status = tokens[i] as string
+      // `-z` shape is `<status>\0<path>\0` per file, and
+      // `<status>\0<old>\0<new>\0` for renames/copies (`R100`/`C75`).
+      if (status.startsWith('R') || status.startsWith('C')) {
+        files.push(tokens[i + 1] as string, tokens[i + 2] as string)
+        i += 2
+      } else {
+        files.push(tokens[i + 1] as string)
+        i += 1
+      }
+    }
+    return files
   }
 
   /**
@@ -403,5 +451,46 @@ export class GitWorkspaceManager {
         { details: { path: abs, code }, cause: error },
       )
     }
+  }
+
+  /**
+   * Move a stale Pluton checkout into the archive root (`.pluton/workspaces-attic`)
+   * instead of deleting it: the dirty state of a checkout left behind by a dead
+   * process may be the only copy of its in-flight work. A pure rename — no
+   * copy+delete fallback, no rmSync, never an overwrite — so the archive either
+   * preserves the whole directory or nothing moved. Returns the archive path,
+   * or null when the source does not exist.
+   */
+  async archiveCheckout(checkoutPath: string, archiveRoot: string, tag: string): Promise<string | null> {
+    const source = resolve(checkoutPath)
+    const root = resolve(archiveRoot)
+    this.assertInsideRoot(source, 'archive checkout')
+    if (source === this.workspacesRoot) {
+      throw new WorkspaceError('refusing to archive the workspaces root itself')
+    }
+    if (!existsSync(source)) return null
+    if (!ARCHIVE_TAG_RE.test(tag)) {
+      throw new ValidationError(`archive tag '${tag}' must match ${ARCHIVE_TAG_RE.source}`)
+    }
+    // '.' and '..' match the charset but are path aliases, not archive names:
+    // they would resolve onto the archive root or its parent.
+    if (tag === '.' || tag === '..') {
+      throw new ValidationError(`archive tag '${tag}' must not be a path alias`)
+    }
+    const target = resolve(join(root, tag))
+    if (existsSync(target)) {
+      throw new WorkspaceError(`archive target already exists: ${target} (refusing to overwrite an archived checkout)`)
+    }
+    mkdirSync(root, { recursive: true })
+    try {
+      await rename(source, target)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? 'unknown'
+      throw new WorkspaceError(
+        `failed to archive checkout '${source}': ${error instanceof Error ? error.message : String(error)}`,
+        { details: { source, target, code }, cause: error },
+      )
+    }
+    return target
   }
 }

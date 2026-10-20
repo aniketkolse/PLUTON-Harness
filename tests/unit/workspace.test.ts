@@ -2,9 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { GitWorkspaceManager, checkoutBranchName } from '../../src/workspace/manager.ts'
+import { matchProtectedPath } from '../../src/workspace/protected-paths.ts'
 import { ValidationError, WorkspaceError } from '../../src/domain/errors.ts'
 import { run } from '../../src/util/exec.ts'
 
@@ -448,6 +449,44 @@ describe('GitWorkspaceManager integration primitives (real git)', () => {
     await expect(manager.changedFiles(root, 'HEAD')).rejects.toThrowError(/not a Pluton-managed checkout/)
   })
 
+  it('lists special-character paths verbatim so protected matching sees them (no git C-quoting)', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task } = await makePair(manager, repo)
+
+    mkdirSync(join(task.path, 'secrets'), { recursive: true })
+    writeFileSync(join(task.path, 'secrets', 'ämter.txt'), 'KEY=value\n')
+    await manager.commitAll(task.path, 'task: non-ascii path')
+
+    const files = await manager.changedFiles(task.path, task.baseCommit)
+    // Raw names only — never git's C-quoted '"secrets/\303\244mter.txt"' form,
+    // which would silently fail protected-path matching at the integration gate.
+    expect(files).toEqual(['secrets/ämter.txt'])
+  })
+
+  it('reports both sides of a detected rename so a protected path cannot slip past the gate', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const { task } = await makePair(manager, repo)
+
+    // `git mv` a file that the protected-path gate would match (the repo's
+    // README.md stands in for a configured protected path) to a neutral name.
+    await git(['mv', 'README.md', 'moved.md'], task.path)
+    await git(
+      ['-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-m', 'task: rename out of a protected path'],
+      task.path,
+    )
+
+    const files = await manager.changedFiles(task.path, task.baseCommit)
+    // A rename must report BOTH the old and the new path: with only the
+    // destination, `matchProtectedPath('README.md', …)` would see nothing and
+    // the ADR-0009 integration approval could be bypassed by a rename.
+    expect([...files].sort()).toEqual(['README.md', 'moved.md'])
+    expect(files.some((f) => matchProtectedPath('README.md', f))).toBe(true)
+  })
+
   it('merges a diverged task branch with --no-ff and reports already_integrated on rerun', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
@@ -610,12 +649,135 @@ describe('GitWorkspaceManager integration primitives (real git)', () => {
       'FETCH_HEAD',
     ])
     await spying.changedFiles(task.path, task.baseCommit)
-    expect(argvLog).toContainEqual(['git', 'diff', '--name-only', `${task.baseCommit}..HEAD`])
+    expect(argvLog).toContainEqual(['git', 'diff', '--name-status', '-z', '-M', `${task.baseCommit}..HEAD`])
 
     const flat = argvLog.flat()
     expect(flat).not.toContain('--abort')
     expect(flat).not.toContain('reset')
     expect(flat).not.toContain('clean')
     expect(flat).not.toContain('--force')
+  })
+})
+
+describe('GitWorkspaceManager restart reconciliation helpers', () => {
+  it('resolveCheckoutPath is pure and names the directory createCheckout provisions for a destName', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    expect(manager.resolveCheckoutPath('task_abc123')).toBe(resolve(join(root, 'task_abc123')))
+
+    const info = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'task-checkout',
+      runId: 'run_abc123ff',
+      slug: 'path probe',
+      destName: 'task_abc123',
+    })
+    expect(manager.resolveCheckoutPath('task_abc123')).toBe(info.path)
+  })
+
+  it('readCheckoutMarker reads managed markers and yields null for missing or unmanaged ones', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const info = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'task-checkout',
+      runId: 'run_abc123ff',
+      slug: 'marker probe',
+      destName: 'task_marker1',
+    })
+
+    const marker = manager.readCheckoutMarker(info.path)
+    expect(marker).toMatchObject({
+      managed: true,
+      kind: 'task-checkout',
+      branch: info.branch,
+      baseCommit: info.baseCommit,
+    })
+    expect(typeof marker?.createdAt).toBe('string')
+
+    // Missing directory, and an existing directory without a marker file.
+    expect(manager.readCheckoutMarker(join(root, 'never-created'))).toBeNull()
+    const unmarked = join(root, 'user-dir')
+    mkdirSync(unmarked, { recursive: true })
+    expect(manager.readCheckoutMarker(unmarked)).toBeNull()
+
+    // A marker file that does not assert `managed: true` is no ownership proof.
+    const fake = join(root, 'fake-checkout')
+    mkdirSync(join(fake, '.git'), { recursive: true })
+    writeFileSync(
+      join(fake, '.git', 'pluton-workspace.json'),
+      JSON.stringify({ managed: false, kind: 'task-checkout', branch: 'b', baseCommit: 'c', createdAt: 't' }),
+    )
+    expect(manager.readCheckoutMarker(fake)).toBeNull()
+  })
+
+  it('readCheckoutMarker refuses paths outside the workspaces root', () => {
+    const root = tempDir('pluton-ws-root-')
+    const outside = tempDir('pluton-ws-outside-')
+    expect(() => makeManager(root).readCheckoutMarker(outside)).toThrowError(
+      /outside Pluton's workspaces root/,
+    )
+  })
+
+  it('archiveCheckout moves a checkout — dirty state included — into the attic, never deletes it', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const info = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'task-checkout',
+      runId: 'run_abc123ff',
+      slug: 'archive me',
+      destName: 'task_at1',
+    })
+    writeFileSync(join(info.path, 'dirty.txt'), 'uncommitted work\n')
+    const archiveRoot = join(tempDir('pluton-ws-attic-'), 'workspaces-attic')
+    const tag = 'task_at1-2026-10-18T08-00-00-000Z'
+
+    const target = await manager.archiveCheckout(info.path, archiveRoot, tag)
+
+    expect(target).toBe(resolve(join(archiveRoot, tag)))
+    expect(existsSync(info.path)).toBe(false)
+    expect(readFileSync(join(target as string, 'dirty.txt'), 'utf8')).toBe('uncommitted work\n')
+    // The archive is a move of the SAME checkout: the marker travels with it.
+    expect(existsSync(join(target as string, '.git', 'pluton-workspace.json'))).toBe(true)
+  })
+
+  it('archiveCheckout returns null for a missing source and refuses existing targets, bad tags, outsiders, the root', async () => {
+    const repo = await makeRepo()
+    const root = tempDir('pluton-ws-root-')
+    const manager = makeManager(root)
+    const info = await manager.createCheckout({
+      repoPath: repo,
+      kind: 'task-checkout',
+      runId: 'run_abc123ff',
+      slug: 'guards',
+      destName: 'task_at2',
+    })
+    const archiveRoot = join(tempDir('pluton-ws-attic-'), 'workspaces-attic')
+
+    expect(await manager.archiveCheckout(join(root, 'gone'), archiveRoot, 'gone-1')).toBeNull()
+
+    await expect(manager.archiveCheckout(info.path, archiveRoot, 'bad/tag')).rejects.toThrowError(ValidationError)
+    await expect(manager.archiveCheckout(info.path, archiveRoot, '')).rejects.toThrowError(ValidationError)
+    // '.' and '..' match the tag charset but are path aliases, not archive names.
+    await expect(manager.archiveCheckout(info.path, archiveRoot, '.')).rejects.toThrowError(ValidationError)
+    await expect(manager.archiveCheckout(info.path, archiveRoot, '..')).rejects.toThrowError(ValidationError)
+
+    const outside = tempDir('pluton-ws-outside-')
+    await expect(manager.archiveCheckout(outside, archiveRoot, 'outside-1')).rejects.toThrowError(
+      /outside Pluton's workspaces root/,
+    )
+
+    // Never archive the workspaces root itself (removeCheckout parity).
+    await expect(manager.archiveCheckout(root, archiveRoot, 'root-1')).rejects.toThrowError(/root itself/)
+
+    // An existing target refuses the move; the source stays intact.
+    const tag = 'taken'
+    mkdirSync(join(archiveRoot, tag), { recursive: true })
+    await expect(manager.archiveCheckout(info.path, archiveRoot, tag)).rejects.toThrowError(WorkspaceError)
+    expect(existsSync(join(info.path, 'README.md'))).toBe(true)
   })
 })
