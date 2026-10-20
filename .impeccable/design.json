@@ -1,0 +1,252 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-20T01:05:00Z",
+  "title": "Design System: PLUTON — The Bridge",
+  "extensions": {
+    "colorMeta": {
+      "signal-violet": {
+        "role": "primary",
+        "displayName": "Signal Violet",
+        "canonical": "#8b5cf6",
+        "tonalRamp": ["#110032", "#2f0071", "#4e02a4", "#6d3bcd", "#8e63f7", "#b28aff", "#d4beff", "#efe9ff"]
+      },
+      "lantern-violet": {
+        "role": "primary",
+        "displayName": "Lantern Violet",
+        "canonical": "#a78bfa",
+        "tonalRamp": ["#0f0127", "#2b075c", "#4a288a", "#6a4cb0", "#8c71d8", "#b096ff", "#d4c4ff", "#efeaff"]
+      },
+      "signal-cyan": {
+        "role": "secondary",
+        "displayName": "Signal Cyan",
+        "canonical": "#38bdf8",
+        "tonalRamp": ["#000d22", "#002851", "#004a7c", "#006da2", "#0092c9", "#3cb8f1", "#91dcff", "#d9f3ff"]
+      },
+      "signal-ok": {
+        "role": "tertiary",
+        "displayName": "Signal Ok",
+        "canonical": "#34d399",
+        "tonalRamp": ["#001303", "#003410", "#00582a", "#007b4a", "#00a16c", "#30c790", "#8fe7be", "#d9f7e8"]
+      },
+      "signal-warn": {
+        "role": "tertiary",
+        "displayName": "Signal Warn",
+        "canonical": "#fbbf24",
+        "tonalRamp": ["#1a0500", "#411600", "#683400", "#8c5700", "#b27b00", "#d9a100", "#f3cb79", "#fbedd1"]
+      },
+      "signal-danger": {
+        "role": "tertiary",
+        "displayName": "Signal Danger",
+        "canonical": "#f87171",
+        "tonalRamp": ["#240000", "#550000", "#830016", "#ab3037", "#d55759", "#ff7d7c", "#ffb4b0", "#ffe5e2"]
+      },
+      "hull-black": {
+        "role": "neutral",
+        "displayName": "Hull Black",
+        "canonical": "#09080e",
+        "tonalRamp": ["#0b0b0e", "#242329", "#424149", "#63626a", "#86858d", "#aba9b2", "#d1d0d6", "#eeeef0"]
+      },
+      "deck-plate": {
+        "role": "neutral",
+        "displayName": "Deck Plate",
+        "canonical": "#12101b",
+        "tonalRamp": ["#0b0a0f", "#24222c", "#42404d", "#63616f", "#868492", "#aba9b8", "#d1cfda", "#eeeef2"]
+      },
+      "card-plate": {
+        "role": "neutral",
+        "displayName": "Card Plate",
+        "canonical": "#151221",
+        "tonalRamp": ["#0d0b12", "#272430", "#45434f", "#666471", "#8a8794", "#aeaab8", "#d3d0dc", "#eeedf3"]
+      },
+      "inset-well": {
+        "role": "neutral",
+        "displayName": "Inset Well",
+        "canonical": "#0e0d16",
+        "tonalRamp": ["#0a0a0e", "#22212a", "#403f48", "#5f5e68", "#82808a", "#a9a6b0", "#ceccd4", "#ebeaf0"]
+      },
+      "chalk": {
+        "role": "neutral",
+        "displayName": "Chalk",
+        "canonical": "#f3f0fa",
+        "tonalRamp": ["#0b0b0e", "#252329", "#434148", "#64626a", "#87848d", "#aca9b2", "#d2d0d6", "#efeef0"]
+      },
+      "chalk-soft": {
+        "role": "neutral",
+        "displayName": "Chalk Soft",
+        "canonical": "#e2e0ec",
+        "tonalRamp": ["#0c0b10", "#25242b", "#43424a", "#63626b", "#85838c", "#aaa8b1", "#d0ced6", "#eeedf1"]
+      },
+      "sea-fog": {
+        "role": "neutral",
+        "displayName": "Sea Fog",
+        "canonical": "#a49fb4",
+        "tonalRamp": ["#0c0a11", "#25222f", "#443f50", "#656072", "#878396", "#aca7bc", "#d2cedd", "#efedf3"]
+      },
+      "sea-fog-dim": {
+        "role": "neutral",
+        "displayName": "Sea Fog Dim",
+        "canonical": "#8e8a9f",
+        "tonalRamp": ["#0b0a0f", "#232129", "#403e4a", "#5f5d6a", "#82808d", "#a6a3b1", "#cecad8", "#edeaf1"]
+      },
+      "rivet-line": {
+        "role": "neutral",
+        "displayName": "Rivet Line",
+        "canonical": "#242036",
+        "tonalRamp": ["#0b0a13", "#242133", "#423f56", "#636078", "#86829d", "#aba7c2", "#d1cee2", "#eeedf5"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "The h1 inside a transcript. Rare by design." },
+      "headline": { "displayName": "Headline", "purpose": "Transcript h2 and modal titles." },
+      "title": { "displayName": "Title", "purpose": "Transcript h3/h4, form input text, the composer." },
+      "body": { "displayName": "Body", "purpose": "Message prose, list items, field values." },
+      "label": { "displayName": "Label", "purpose": "Button labels, tab labels, card titles, field labels." },
+      "micro": { "displayName": "Micro", "purpose": "Tags, badges, timestamps, section headings, meta rows. Never below 11px." },
+      "mono": { "displayName": "Mono", "purpose": "Every machine-produced string: ids, paths, counts, status, the status strip." }
+    },
+    "shadows": [
+      { "name": "overlay", "value": "0 18px 44px rgba(0,0,0,0.55)", "purpose": "Popovers and toasts only. Neutral, offset, only while open." },
+      { "name": "modal", "value": "0 24px 60px rgba(0,0,0,0.6)", "purpose": "The modal card inside its scrim." },
+      { "name": "control-press", "value": "0 1px 2px rgba(0,0,0,0.4)", "purpose": "The selected segment of a switch, lifted one step off its track." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "120ms ease", "purpose": "Default transition for background, border, and color state changes." },
+      { "name": "ease-emphasis", "value": "90ms ease", "purpose": "Sidebar width collapse/expand." },
+      { "name": "anchor-bob", "value": "2s ease-in-out infinite", "purpose": "The anchor mark while a Muse is working. Suppressed under prefers-reduced-motion." },
+      { "name": "caret-blink", "value": "1s steps(2, start) infinite", "purpose": "The streaming caret. Suppressed under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "wide", "value": "1001px", "purpose": "Sidebar occupies layout space at 280px (440px with Settings open)." },
+      { "name": "drawer", "value": "1000px", "purpose": "Sidebar becomes an off-canvas drawer over the main column, closed by default, behind a scrim." },
+      { "name": "compact", "value": "720px", "purpose": "Dock and transcript padding compress, brand badge hides, toolbar labels collapse to icons, status strip wraps." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one action in a row. A raised dark plate with violet text, never a saturated fill.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Approve &amp; Continue</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px; border-radius: 6px; background: #1b172a; border: 1px solid #3b2d63; color: #c4b5fd; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; transition: background 120ms ease, border-color 120ms ease; } .ds-btn-primary:hover { background: #252038; } .ds-btn-primary:active { transform: scale(0.97); } .ds-btn-primary:focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A supporting action. Flat deck plate, soft text, hairline border.",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">Reload model registry</button>",
+      "css": ".ds-btn-secondary { padding: 5px 10px; border-radius: 6px; background: #1c192b; border: 1px solid #2a2440; color: #b5b1c9; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; transition: background 120ms ease, color 120ms ease; } .ds-btn-secondary:hover { background: #25213b; color: #fff; } .ds-btn-secondary:focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }"
+    },
+    {
+      "name": "Filled Approval Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "A destructive-or-committal action, used only in the approval banner. Signal Violet at #7c3aed so white text clears 4.5:1.",
+      "html": "<button class=\"ds-btn-filled\" type=\"button\">Approve</button>",
+      "css": ".ds-btn-filled { padding: 4px 9px; border-radius: 6px; background: #7c3aed; border: 1px solid #7c3aed; color: #fff; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; transition: background 120ms ease; } .ds-btn-filled:hover { background: #6d28d9; } .ds-btn-filled:focus-visible { outline: 2px solid #d8b4fe; outline-offset: 2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "A refusal. Deep red plate, light red text, never a bright red fill.",
+      "html": "<button class=\"ds-btn-danger\" type=\"button\">Deny</button>",
+      "css": ".ds-btn-danger { padding: 4px 9px; border-radius: 6px; background: #7f1d1d; border: 1px solid #991b1b; color: #fee2e2; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; transition: background 120ms ease; } .ds-btn-danger:hover { background: #991b1b; } .ds-btn-danger:focus-visible { outline: 2px solid #f87171; outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "text-input",
+      "description": "A single-line field. Focus shifts the border and adds a ring, because a border shift alone is not a focus indicator.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Session Name</span><input class=\"ds-input\" type=\"text\" placeholder=\"e.g. Code Refactor &amp; Bugfix\"></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 5px; } .ds-field-label { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 500; color: #b5b1c9; } .ds-input { width: 100%; box-sizing: border-box; background: #0c0b12; border: 1px solid #2a2440; border-radius: 10px; padding: 8px 10px; color: #fff; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.4; } .ds-input::placeholder { color: #8e8a9f; } .ds-input:hover { border-color: #3b2d63; } .ds-input:focus { outline: 2px solid #8b5cf6; outline-offset: 1px; border-color: #a78bfa; }"
+    },
+    {
+      "name": "Sidebar Tab",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "A sidebar destination. Always labelled in text; the icon is a secondary cue, never the only one.",
+      "html": "<button class=\"ds-tab is-active\" type=\"button\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z\"/></svg><span>Sessions</span></button>",
+      "css": ".ds-tab { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #a49fb4; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 500; line-height: 1.4; cursor: pointer; transition: background 120ms ease, color 120ms ease; } .ds-tab svg { width: 14px; height: 14px; flex-shrink: 0; } .ds-tab:hover { color: #e2e0ec; } .ds-tab.is-active { background: #251c3d; color: #d8b4fe; border-color: rgba(76,53,117,0.6); } .ds-tab:focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }"
+    },
+    {
+      "name": "File Tree Row",
+      "kind": "custom",
+      "refersTo": "file-tree-row",
+      "description": "One row of the workspace tree. Directories carry a chevron, a violet folder mark, the name, and a file count; files carry a neutral document mark and the filename only. Depth is indentation, never truncation.",
+      "html": "<div class=\"ds-file-row ds-file-dir\"><svg class=\"ds-file-chevron\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 18l6-6-6-6\"/></svg><svg class=\"ds-file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z\"/></svg><span class=\"ds-file-name\">src</span><span class=\"ds-file-count\">87</span></div>",
+      "css": ".ds-file-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; line-height: 1.4; color: #a49fb4; cursor: pointer; user-select: none; } .ds-file-row:hover { background: #14121f; color: #f3f0fa; } .ds-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-file-chevron { width: 12px; height: 12px; flex-shrink: 0; color: #8e8a9f; transition: transform 120ms ease; } .ds-file-dir.is-open .ds-file-chevron { transform: rotate(90deg); } .ds-file-icon { width: 13px; height: 13px; flex-shrink: 0; } .ds-file-dir .ds-file-icon { color: #a78bfa; } .ds-file-count { margin-left: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; color: #8e8a9f; }"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "A container for a value, not a status. The MCP count badge uses the pill variant.",
+      "html": "<span class=\"ds-chip\"><span class=\"ds-chip-folder\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z\"/></svg></span><span>Y:\\Pluton</span></span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 6px; background: #14121f; border: 1px solid #252238; color: #e2e0ec; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; line-height: 1.4; } .ds-chip-folder { display: inline-flex; } .ds-chip-folder svg { width: 14px; height: 14px; color: #a49fb4; }"
+    },
+    {
+      "name": "Message Card — User",
+      "kind": "custom",
+      "refersTo": "message-user",
+      "description": "The operator's own prompt. Violet-tinted with a violet seam, and it shrinks to its content instead of spanning the measure.",
+      "html": "<div class=\"ds-msg-user\"><div class=\"ds-msg-head\"><span class=\"ds-msg-mark\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2\"/><circle cx=\"12\" cy=\"7\" r=\"4\"/></svg></span><span class=\"ds-msg-name ds-msg-name-you\">You</span></div><div class=\"ds-msg-body\">which agent found which info</div></div>",
+      "css": ".ds-msg-user { display: block; width: fit-content; max-width: 100%; background: #19132a; border: 1px solid #332656; border-radius: 10px; padding: 10px 14px; } .ds-msg-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; } .ds-msg-mark { display: inline-flex; width: 16px; height: 16px; } .ds-msg-mark svg { width: 14px; height: 14px; } .ds-msg-name { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; } .ds-msg-name-you { color: #a78bfa; } .ds-msg-body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.6; color: #f1eff7; overflow-wrap: anywhere; }"
+    },
+    {
+      "name": "Message Card — PLUTON",
+      "kind": "custom",
+      "refersTo": "message-pluton",
+      "description": "A Muse's reply. Neutral plate, cyan PLUTON label, full measure. The anchor mark is the product's signature.",
+      "html": "<div class=\"ds-msg-ai\"><div class=\"ds-msg-head\"><span class=\"ds-msg-mark\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M12 3v18M5 8h14M3 8l3 8h12l3-8M3 8h18\"/></svg></span><span class=\"ds-msg-name ds-msg-name-pluton\">PLUTON</span></div><div class=\"ds-msg-body\">All three were the same agent type, each in its own separate session.</div></div>",
+      "css": ".ds-msg-ai { display: block; width: 100%; background: #12111a; border: 1px solid #1f1d2e; border-radius: 10px; padding: 12px 14px; } .ds-msg-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; } .ds-msg-mark { display: inline-flex; width: 16px; height: 16px; } .ds-msg-mark svg { width: 14px; height: 14px; } .ds-msg-name { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; } .ds-msg-name-pluton { color: #38bdf8; } .ds-msg-body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.6; color: #e2e0ec; overflow-wrap: anywhere; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "surface-card",
+      "description": "A grouped block of configuration. Flat at rest; the border and one-step tone do all the separating work.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-head\"><span class=\"ds-card-title\">Pluton Runtime</span><span class=\"ds-badge\">Connected</span></div><div class=\"ds-kv\"><span class=\"ds-kv-key\">Muses</span><span class=\"ds-kv-val\">6</span></div></div>",
+      "css": ".ds-card { background: #151221; border: 1px solid #2f2749; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; } .ds-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; } .ds-card-title { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 600; color: #fff; } .ds-badge { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 11px; font-weight: 500; padding: 2px 7px; border-radius: 999px; background: rgba(16,185,129,0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); } .ds-kv { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; } .ds-kv-key { color: #a49fb4; } .ds-kv-val { color: #f3f0fa; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Bridge",
+    "overview": "PLUTON is the operator's station on a working vessel. The product is a control plane for a crew of persistent AI Muses; the interface is the bridge you stand on while they work. Everything about the visual language follows from that: instruments that are legible in low light, controls that are within reach, and a horizon that stays visible when the work gets loud. The maritime motif in PLUTON is not decoration — the ship mark, the anchor, the sailing crew — it is the product's honest self-description, and this system extends it rather than restating it.\n\nQuiet instrument, loud state. The interface recedes; only state changes speak. A run that stalls, an approval that arrives, a model that changes, a tool that fails — these earn color, weight, and motion. Everything else stays a dark panel with a hairline seam. This is a dense operator tool, not a consumer product, so the surface area does the quiet work: layered near-black plates, one-pixel rivet lines, monospaced data, and a single violet signal that marks identity rather than decoration.\n\nThe system explicitly refuses: neon glow, floating glass cards, rainbow status palettes, and anything that reads as a consumer chatbot. It also refuses ornament without meaning — a gradient that carries no hierarchy, a shadow that expresses no elevation, an emoji that arrives from another product's icon set.",
+    "keyCharacteristics": [
+      "Flat by default, lifted on state.",
+      "Dense and machined.",
+      "One signal color, used sparingly.",
+      "State is never color alone.",
+      "Same system, two shells."
+    ],
+    "rules": [
+      { "name": "The One Signal Rule", "body": "Signal Violet marks PLUTON itself and nothing else. If a violet element is not the product, the current selection, or the current Muse, it does not exist. Status colors carry state; they never carry identity.", "section": "colors" },
+      { "name": "The Luminous Floor Rule", "body": "The darkest text allowed anywhere is Sea Fog Dim (#8e8a9f) on the darkest plate it ever sits on, and only at 11px or larger. No functional text drops below 4.5:1 against its own background.", "section": "colors" },
+      { "name": "The No-Glow Rule", "body": "No chromatic halo, no zero-offset colored shadow, no blurred color bloom. A live state is announced by a solid mark and a word, not by a glow.", "section": "colors" },
+      { "name": "The Six-Step Ramp Rule", "body": "The system has exactly six text sizes (11, 12, 13, 14, 15, 17px) and one mono size (12px). Nothing sits between two steps, and nothing sits below 11px.", "section": "typography" },
+      { "name": "The Mono Means Machine Rule", "body": "If a string came out of the runtime, it is set in mono. If a human wrote it, it is set in Inter.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. If a component needs to float to be understood, it is not resting — it is an overlay, and overlays are the only things that float.", "section": "elevation" },
+      { "name": "The No-Chromatic-Shadow Rule", "body": "Shadows are neutral black, never violet, cyan, green, or red, and never zero-offset. A colored halo is a glow, and a glow is a lie about the surface.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep the violet signal scarce: identity, current selection, and the PLUTON mark only.",
+      "Do announce state with a word and a mark together, never with color alone.",
+      "Do set machine-produced strings in mono and human-written strings in Inter.",
+      "Do keep functional text at 11px or larger, and body text at 13px or larger.",
+      "Do let overlays be the only floating things on screen.",
+      "Do honour prefers-reduced-motion: the anchor bob and the streaming caret stop.",
+      "Do draw icons as inline SVG in a single 2px-stroke style, at 14–16px."
+    ],
+    "donts": [
+      "Don't use a chromatic glow, a zero-offset colored shadow, or a colored blur. The connection dot is a solid mark, not a bloom.",
+      "Don't use emoji as interface icons. The anchor, the folder, the ship, and the warning are SVG marks drawn in the same stroke style as everything else.",
+      "Don't put a thick colored bar on the side of a card. A task's state is named in text and shown with a 1px tinted border plus a status word.",
+      "Don't run text below 11px, and don't ship a size ramp with more than six steps.",
+      "Don't fill a button with Signal Violet at #8b5cf6 and white text; it fails contrast.",
+      "Don't let the sidebar cover the transcript at narrow widths. It is off-canvas there.",
+      "Don't center the transcript. It is a left-aligned reading column with one stable edge."
+    ]
+  }
+}
