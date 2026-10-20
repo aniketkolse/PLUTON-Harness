@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLeakPatterns,
+  evaluatePublication,
   findBrokenRelativeLinks,
   findContentLeaks,
   findForbiddenPackFiles,
   formatErrorDetail,
+  parseChangedFiles,
   parsePackManifest,
   renderResultLine,
   sameDepMap,
@@ -38,6 +40,22 @@ describe('parsePackManifest', () => {
   it('throws on an unexpected manifest shape', () => {
     expect(() => parsePackManifest('[]')).toThrow(/unexpected npm pack manifest shape/)
     expect(() => parsePackManifest('[{"name":"x"}]')).toThrow(/unexpected npm pack manifest shape/)
+  })
+})
+
+describe('parseChangedFiles', () => {
+  it('keeps the first character of the first path in untrimmed porcelain output', () => {
+    const raw = ' M README.md\n M docs/RELEASE.md\n?? new file.txt\n'
+    expect(parseChangedFiles(raw)).toEqual(['README.md', 'docs/RELEASE.md', 'new file.txt'])
+  })
+
+  it('tolerates CRLF output, staged entries and rename lines', () => {
+    expect(parseChangedFiles('M  a.txt\r\nR  old.txt -> new.txt\r\n')).toEqual(['a.txt', 'old.txt -> new.txt'])
+  })
+
+  it('returns an empty list for a clean tree', () => {
+    expect(parseChangedFiles('')).toEqual([])
+    expect(parseChangedFiles('\n')).toEqual([])
   })
 })
 
@@ -204,5 +222,56 @@ describe('renderResultLine', () => {
       '[BLOCKED] c — owner decision',
     )
     expect(renderResultLine({ label: 'd', status: 'fail' })).toBe('[FAIL] d')
+  })
+})
+
+describe('evaluatePublication', () => {
+  it('grants eligibility only when validation is green, no blockers remain and no dirty override is active', () => {
+    const decision = evaluatePublication({ failed: 0, blocked: 0, dirtyOverride: false })
+    expect(decision.eligible).toBe(true)
+    expect(decision.reason).toContain('human approval')
+  })
+
+  it('blocks eligibility when a technical check failed (dirty tree without --allow-dirty)', () => {
+    const decision = evaluatePublication({ failed: 1, blocked: 0, dirtyOverride: false })
+    expect(decision.eligible).toBe(false)
+    expect(decision.reason).toContain('1 technical check(s) failed')
+  })
+
+  it('blocks eligibility while the dirty-tree override is active', () => {
+    const decision = evaluatePublication({ failed: 0, blocked: 0, dirtyOverride: true })
+    expect(decision.eligible).toBe(false)
+    expect(decision.reason).toContain('--allow-dirty override in effect')
+    expect(decision.reason).toContain('re-run on the committed release tree')
+  })
+
+  it('keeps owner blockers blocking eligibility with and without the dirty override', () => {
+    const ownersOnly = evaluatePublication({ failed: 0, blocked: 2, dirtyOverride: false })
+    expect(ownersOnly.eligible).toBe(false)
+    expect(ownersOnly.reason).toContain('2 owner/infrastructure blocker(s) unresolved')
+
+    const combined = evaluatePublication({ failed: 0, blocked: 2, dirtyOverride: true })
+    expect(combined.eligible).toBe(false)
+    expect(combined.reason).toContain('--allow-dirty override in effect')
+    expect(combined.reason).toContain('2 owner/infrastructure blocker(s) unresolved')
+  })
+
+  it('never reports eligibility while any condition is unmet and names every active condition', () => {
+    for (const failed of [0, 1]) {
+      for (const blocked of [0, 2]) {
+        for (const dirtyOverride of [false, true]) {
+          const decision = evaluatePublication({ failed, blocked, dirtyOverride })
+          expect(decision.eligible).toBe(failed === 0 && blocked === 0 && !dirtyOverride)
+          if (failed > 0) expect(decision.reason).toContain('technical check(s) failed')
+          if (blocked > 0) expect(decision.reason).toContain('owner/infrastructure blocker(s)')
+          if (dirtyOverride) expect(decision.reason).toContain('--allow-dirty override in effect')
+        }
+      }
+    }
+  })
+
+  it('defaults to eligibility when nothing is known to be wrong (previous behavior preserved)', () => {
+    const decision = evaluatePublication({})
+    expect(decision.eligible).toBe(true)
   })
 })

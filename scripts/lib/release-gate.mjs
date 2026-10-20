@@ -2,8 +2,8 @@
  * Pure helpers for the Pluton release gate (`scripts/release-check.mjs`).
  *
  * Dependency-free and side-effect-free so classification, manifest parsing,
- * leak scanning and link checking can be unit-tested directly. The CLI keeps
- * every filesystem/subprocess concern; this module decides nothing on its own.
+ * leak scanning, link checking and the publication-eligibility decision can be
+ * unit-tested directly. The CLI keeps every filesystem/subprocess concern.
  */
 
 /** Files that must be present in `npm pack` output for the CLI to run. */
@@ -40,6 +40,18 @@ const STATUS_TAGS = {
   fail: 'FAIL',
   'not-tested': 'NOT TESTED',
   blocked: 'BLOCKED',
+}
+
+/**
+ * Changed paths from `git status --porcelain` (v1) output. The leading two
+ * status columns are stripped per line — never by trimming the whole output
+ * first, which would eat the first path's leading character.
+ */
+export function parseChangedFiles(raw) {
+  return raw
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '')
+    .map((line) => line.slice(2).trimStart())
 }
 
 /** Parse the JSON array printed by `npm pack --dry-run --json`. */
@@ -200,6 +212,27 @@ export function summarize(results) {
     technical: failed === 0 ? 'PASS' : 'FAIL',
     exitCode: failed === 0 ? 0 : 1,
   }
+}
+
+/**
+ * Publication eligibility is a separate decision from technical validation:
+ * a failed check, an active dirty-tree override, and unresolved
+ * owner/infrastructure blockers each block publication independently, and the
+ * reason string names every condition that currently applies.
+ */
+export function evaluatePublication({ failed = 0, blocked = 0, dirtyOverride = false } = {}) {
+  const reasons = []
+  if (failed > 0) reasons.push(`${failed} technical check(s) failed`)
+  if (dirtyOverride) reasons.push('--allow-dirty override in effect; re-run on the committed release tree')
+  if (blocked > 0) reasons.push(`${blocked} owner/infrastructure blocker(s) unresolved`)
+  if (reasons.length === 0) {
+    return {
+      eligible: true,
+      reason: 'automated validation is green; publishing still requires explicit human approval (docs/RELEASE.md)',
+    }
+  }
+  const suffix = failed > 0 || blocked > 0 ? '; do not publish' : ''
+  return { eligible: false, reason: reasons.join('; ') + suffix }
 }
 
 /** One printable line per recorded result (plus an indented `fix:` hint). */

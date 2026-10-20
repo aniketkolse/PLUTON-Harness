@@ -3,7 +3,8 @@
  * Repeatable public-release gate (docs/RELEASE.md).
  *
  * Technical validation, in order:
- *   1. working tree cleanliness (use --allow-dirty for local pre-commit runs)
+ *   1. working tree cleanliness (use --allow-dirty for local pre-commit runs;
+ *      the override keeps publication blocked)
  *   2. version consistency (package.json === src/version.ts)
  *   3. package identity (name + bin mapping)
  *   4. engine requirement declared and satisfied by the running Node
@@ -23,11 +24,14 @@
  *   PASS / FAIL / NOT TESTED / BLOCKED.
  * Exit code is 0 only when no check FAILED; NOT TESTED and BLOCKED never
  * silently pass — they are printed with reasons and remediation, and the
- * publication line stays blocked until owner decisions are resolved.
+ * publication line stays blocked while owner decisions are unresolved or a
+ * dirty-tree --allow-dirty override is in effect.
  *
  * This script never publishes, tags, pushes, deletes repository files or
- * mutates package metadata. The only files it creates are a throwaway
- * permission-probe directory under the OS temp dir, removed in a finally block.
+ * mutates package metadata. Its filesystem writes are build output under the
+ * gitignored dist/ directory (check 8 and the prepack hook) plus, on POSIX,
+ * one throwaway permission-probe directory under the OS temp dir, removed in
+ * a finally block.
  */
 
 import { execSync } from 'node:child_process'
@@ -38,10 +42,12 @@ import { fileURLToPath } from 'node:url'
 import {
   STATUS,
   buildLeakPatterns,
+  evaluatePublication,
   findBrokenRelativeLinks,
   findContentLeaks,
   findForbiddenPackFiles,
   formatErrorDetail,
+  parseChangedFiles,
   parsePackManifest,
   renderResultLine,
   sameDepMap,
@@ -53,6 +59,10 @@ const { PASS, FAIL, NOT_TESTED, BLOCKED } = STATUS
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const allowDirty = process.argv.includes('--allow-dirty')
+
+// Set only when --allow-dirty actually lets validation continue on a dirty
+// tree; a clean tree with the flag is not an override and stays eligible.
+let dirtyOverride = false
 
 const results = []
 
@@ -83,13 +93,14 @@ try {
 
 // 1. Working tree cleanliness
 try {
-  const status = run('git status --porcelain').trim()
-  if (status === '') {
+  const status = run('git status --porcelain')
+  if (status.trim() === '') {
     record('worktree', 'working tree clean', PASS)
   } else if (allowDirty) {
+    dirtyOverride = true
     record('worktree', 'working tree clean', PASS, 'dirty tree allowed via --allow-dirty (NOT acceptable for a real release)')
   } else {
-    const files = status.split('\n').map((l) => l.slice(3))
+    const files = parseChangedFiles(status)
     record(
       'worktree',
       'working tree clean',
@@ -428,10 +439,11 @@ if (attention.length > 0) {
 }
 
 console.log(`\nTECHNICAL VALIDATION: ${summary.technical}`)
-if (summary.blocked > 0) {
-  console.log(`PUBLICATION: BLOCKED — ${summary.blocked} owner/infrastructure blocker(s) unresolved; do not publish`)
-} else {
-  console.log('PUBLICATION: ELIGIBLE — automated validation is green; publishing still requires explicit human approval (docs/RELEASE.md)')
-}
+const publication = evaluatePublication({
+  failed: summary.failed,
+  blocked: summary.blocked,
+  dirtyOverride,
+})
+console.log(`PUBLICATION: ${publication.eligible ? 'ELIGIBLE' : 'BLOCKED'} — ${publication.reason}`)
 
 process.exitCode = summary.exitCode

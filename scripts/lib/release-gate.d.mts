@@ -25,6 +25,11 @@ export interface GateSummary {
   exitCode: number
 }
 
+export interface PublicationDecision {
+  eligible: boolean
+  reason: string
+}
+
 export const REQUIRED_PACK_FILES: string[]
 export const STATUS: {
   readonly PASS: 'pass'
@@ -33,6 +38,7 @@ export const STATUS: {
   readonly BLOCKED: 'blocked'
 }
 export function parsePackManifest(raw: string): { files: string[] }
+export function parseChangedFiles(raw: string): string[]
 export function formatErrorDetail(err: unknown, maxLines?: number): string
 export function findForbiddenPackFiles(files: string[]): string[]
 export function buildLeakPatterns(opts: {
@@ -49,4 +55,9 @@ export function findContentLeaks(opts: {
 export function findBrokenRelativeLinks(text: string, exists: (target: string) => boolean): string[]
 export function sameDepMap(a: unknown, b: unknown): boolean
 export function summarize(results: GateResult[]): GateSummary
+export function evaluatePublication(options?: {
+  failed?: number
+  blocked?: number
+  dirtyOverride?: boolean
+}): PublicationDecision
 export function renderResultLine(result: GateResult): string
