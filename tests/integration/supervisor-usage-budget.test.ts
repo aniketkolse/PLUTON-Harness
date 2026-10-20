@@ -46,6 +46,7 @@ const LIMITS: ToolBridgeLimits = {
   defaultWaitSeconds: 5,
   waitHeartbeatSeconds: 15,
   approvalTtlMinutes: 60,
+  maxRevisionsPerTask: 1,
 }
 
 const WORKER_PERMISSIONS = ['task.delegate', 'task.inspect', 'result.collect', 'diff.inspect']

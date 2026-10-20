@@ -1,4 +1,4 @@
-import type { Store } from '../store/store.ts'
+import type { Store, SupervisorFence } from '../store/store.ts'
 
 export interface UsageRecord {
   museId: string
@@ -50,19 +50,28 @@ export class UsageLedger {
     this.store = store
   }
 
-  record(usage: UsageRecord): { withinBudget: boolean; limitExceededReason?: string } {
+  /**
+   * Record one usage sample and return the budget verdict. `fence` (optional)
+   * carries a supervisor's run-ownership proof: a stale owner's sample silently
+   * skips the durable write (advisory accounting) while the budget arithmetic
+   * stays exactly the same.
+   */
+  record(usage: UsageRecord, fence?: SupervisorFence): { withinBudget: boolean; limitExceededReason?: string } {
     this.inMemoryRecords.push({ ...usage, timestamp: usage.timestamp ?? new Date().toISOString() })
 
     if (this.store) {
-      this.store.recordUsage({
-        runId: this.runId,
-        museId: usage.museId,
-        taskId: usage.taskId,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cachedTokens: usage.cachedTokens,
-        costUsd: usage.costUsd,
-      })
+      this.store.recordUsage(
+        {
+          runId: this.runId,
+          museId: usage.museId,
+          taskId: usage.taskId,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cachedTokens: usage.cachedTokens,
+          costUsd: usage.costUsd,
+        },
+        fence,
+      )
     }
 
     return this.checkBudget()

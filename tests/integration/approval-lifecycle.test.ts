@@ -340,7 +340,7 @@ describe('approval lifecycle in the chat transcript', () => {
     await wait(120)
 
     const allCommits = io.commits.join('\n')
-    expect(allCommits).toContain('auto-denied, fail-closed')
+    expect(allCommits).toContain('engine permission request')
     expect(allCommits).toContain('req_engine_1')
     // Not rendered as an actionable approval card anywhere.
     expect(allCommits).not.toContain('[A] Approve once')
