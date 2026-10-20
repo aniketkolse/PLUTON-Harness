@@ -1,15 +1,17 @@
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
-import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, ValidationError } from '../domain/errors.ts'
-import type { JsonValue, MuseRecord, TaskRecord } from '../domain/models.ts'
+import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, StateTransitionError, ValidationError, WorkspaceError } from '../domain/errors.ts'
+import type { JsonValue, MuseRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
 import { wakeupChannelFor, type WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { Store } from '../store/store.ts'
 import { firstLine, run } from '../util/exec.ts'
+import { stripControlChars } from '../util/sanitize.ts'
 import { TOOL_SCHEMAS, type PlutonToolName } from './catalog.ts'
 import type { ToolBridgeLimits } from './bridge.ts'
 import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
+import type { GitWorkspaceManager } from '../workspace/manager.ts'
 
 /**
  * Tool implementations. Every handler receives the validated server-side
@@ -29,6 +31,12 @@ export interface ToolEnv {
   wakeups: WakeupRegistry
   now: () => number
   leaseManager?: FileLeaseManager
+  /**
+   * The project's workspace manager (when the caller runs inside a supervised
+   * run). Result composition uses it to report a task checkout's real changed
+   * files; without it that field stays honestly null.
+   */
+  workspaceManager?: GitWorkspaceManager
   /**
    * Set while the caller is still connected and the host is running; aborted
    * when the client disconnects or the runtime shuts the bridge down. Long
@@ -52,6 +60,18 @@ const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set(['completed', 'failed
 const GIT_TIMEOUT_MS = 30_000
 /** Bounded pending approvals per run: a model loop must not grow the table without bound. */
 const MAX_PENDING_APPROVALS = 3
+/**
+ * Approval actions Pluton's own subsystems consume from approved rows: the
+ * integration gate (`integration.apply`), muse instantiation (`muse.create`)
+ * and the engine permission channel (`engine.permission`). A Muse filing one
+ * of these through `approval.request` would forge the provenance those
+ * consumers trust, so the tool refuses them outright.
+ */
+const HOST_OWNED_APPROVAL_ACTIONS: ReadonlySet<string> = new Set([
+  'integration.apply',
+  'muse.create',
+  'engine.permission',
+])
 /** A workspace base commit must be a plain hex object id before it reaches git. */
 const BASE_COMMIT_RE = /^[0-9a-fA-F]{7,64}$/
 
@@ -77,6 +97,49 @@ function summarizeTask(t: TaskRecord): TaskSummary {
     createdAt: t.createdAt,
     completedAt: t.completedAt,
   }
+}
+
+/** The recorded outcome summary, only when the result row really carries a string one. */
+function resultSummaryOf(result: JsonValue | null): string | null {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return null
+  const summary = (result as { [k: string]: JsonValue }).summary
+  return typeof summary === 'string' ? summary : null
+}
+
+/**
+ * Changed files for a task checkout, lazily and fail-soft: a WorkspaceError —
+ * a missing/unmarked checkout or a failed `git diff`, both raised by the
+ * manager — reports null instead of failing the whole result read. `null` means
+ * "not determined", never "no changes" (`[]` does). Only non-WorkspaceError
+ * faults propagate.
+ */
+async function changedFilesFor(env: ToolEnv, ws: WorkspaceRecord | null): Promise<string[] | null> {
+  if (ws === null || ws.kind !== 'task-checkout' || env.workspaceManager === undefined) return null
+  try {
+    return await env.workspaceManager.changedFiles(ws.path, ws.baseCommit)
+  } catch (e) {
+    if (e instanceof WorkspaceError) return null
+    throw e
+  }
+}
+
+/**
+ * Unmet criteria from the latest verification row's `{criterion, status,
+ * evidence}` entries; malformed rows or entries contribute nothing.
+ */
+function unmetCriteriaOf(verification: { criteria: JsonValue } | null): { criterion: string; reason: JsonValue }[] {
+  const criteria = verification?.criteria
+  if (!Array.isArray(criteria)) return []
+  const unmet: { criterion: string; reason: JsonValue }[] = []
+  for (const entry of criteria) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const record = entry as { [k: string]: JsonValue }
+    if (record['status'] === 'verified') continue
+    const criterion = record['criterion']
+    if (typeof criterion !== 'string') continue
+    unmet.push({ criterion, reason: record['evidence'] ?? null })
+  }
+  return unmet
 }
 
 function tasksById(env: ToolEnv): Map<string, TaskRecord> {
@@ -357,12 +420,34 @@ export const TOOL_HANDLERS: ToolHandlers = {
     const task = visibleTask(env, a.taskId)
     const ws = env.store.getWorkspaceByTask(task.id)
     return {
-      task: summarizeTask(task),
+      taskId: task.id,
+      status: task.state,
+      summary: resultSummaryOf(task.result),
+      assignment: task.assignment ?? null,
       result: task.result,
       failure: task.failure,
+      changedFiles: await changedFilesFor(env, ws),
+      commit: ws?.headCommit ?? null,
+      tests: env.store.listVerificationChecksByTask(task.id).map((c) => ({
+        name: c.name,
+        status: c.status,
+        exitCode: c.exitCode,
+        durationMs: c.durationMs,
+      })),
+      blockers: {
+        failure: task.failure ?? null,
+        unmetCriteria: unmetCriteriaOf(env.store.getTaskVerification(task.id)),
+      },
       workspace: ws
-        ? { id: ws.id, branch: ws.branch, headCommit: ws.headCommit, state: ws.state }
+        ? {
+            id: ws.id,
+            branch: ws.branch,
+            baseCommit: ws.baseCommit,
+            state: ws.state,
+            cleanup: `pluton workspace clean --run ${task.runId}`,
+          }
         : null,
+      task: summarizeTask(task),
     }
   },
 
@@ -370,9 +455,31 @@ export const TOOL_HANDLERS: ToolHandlers = {
     const a = TOOL_SCHEMAS['task.cancel'].parse(args)
     const task = visibleTask(env, a.taskId)
     if (TERMINAL_TASK_STATES.has(task.state)) {
-      throw new ConflictError(`task '${task.id}' is already ${task.state}`, { taskId: task.id, state: task.state })
+      // CS-9: cancelling a terminal task is an idempotent ack, never a conflict.
+      // Multiple cancel sources (manager tool, operator signal, a retried call)
+      // are expected to race; a repeat must be a no-op — no state write, no event.
+      return {
+        task: summarizeTask(task),
+        alreadyTerminal: true,
+        note: `task is already '${task.state}'; nothing to cancel`,
+      }
     }
-    const updated = env.store.setTaskState(task.id, 'cancelled')
+    let updated: TaskRecord
+    try {
+      updated = env.store.setTaskState(task.id, 'cancelled')
+    } catch (e) {
+      // The CAS lost to a concurrent terminal write (another cancel source won
+      // the race): the intent is already satisfied — ack the durable winner,
+      // never mint a spurious error or a second cancel event.
+      if (!(e instanceof StateTransitionError)) throw e
+      const fresh = env.store.getTask(task.id)
+      if (!TERMINAL_TASK_STATES.has(fresh.state)) throw e
+      return {
+        task: summarizeTask(fresh),
+        alreadyTerminal: true,
+        note: `task is already '${fresh.state}'; nothing to cancel`,
+      }
+    }
     env.store.appendEvent({
       projectId: env.projectId,
       runId: env.runId,
@@ -383,8 +490,69 @@ export const TOOL_HANDLERS: ToolHandlers = {
     })
     return {
       task: summarizeTask(updated),
-      note: 'a live engine attempt for this task is stopped cooperatively by the runtime on its next check',
+      note: 'a live engine attempt for this task is interrupted by the runtime on its next control tick',
     }
+  },
+
+  'task.request_revision': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['task.request_revision'].parse(args)
+    // Manager scope is the caller's SESSION shape, not its permission set: a
+    // task-scoped session is refused even when its Muse was granted the
+    // permission, so no worker can ever send a task back.
+    if (env.callerTaskId !== null) {
+      throw new PolicyDeniedError('task.request_revision is manager-scoped (top-level manager session only)')
+    }
+    const task = visibleTask(env, a.taskId)
+    if (task.state !== 'failed') {
+      throw new PolicyDeniedError(
+        `task '${task.id}' is ${task.state}; only a failed task can be sent back for revision`,
+      )
+    }
+    // The cap is counted from durable events, never from memory: a restarted
+    // process (or a second supervisor) sees exactly the same revision budget.
+    // The 1_000-event bound is ample (the cap is at most 10 per task); the
+    // count is filtered by taskId afterwards, so over-permissive truncation is
+    // the only risk.
+    const scheduled = env.store
+      .listEvents(task.runId, { type: 'task.revision_scheduled', limit: 1_000 })
+      .filter((e) => e.taskId === task.id).length
+    if (scheduled >= env.limits.maxRevisionsPerTask) {
+      throw new PolicyDeniedError(
+        `revision cap reached for task '${task.id}': ${String(scheduled)} of ${String(env.limits.maxRevisionsPerTask)} already scheduled`,
+      )
+    }
+    const feedback = stripControlChars(a.feedback).trim()
+    if (feedback === '') {
+      throw new ValidationError('feedback is empty after control-character stripping')
+    }
+    const updated = env.store.setTaskStateIf(task.id, 'failed', 'queued', {
+      attempt: task.attempt + 1,
+      // The revision payload must never erase the real failure: the previous
+      // classification rides along under `previousFailure`.
+      failure: {
+        code: 'revision_requested',
+        feedback,
+        requestedByMuseId: env.callerMuseId,
+        previousFailure: task.failure,
+      },
+    })
+    if (updated === null) {
+      // Another writer moved the task between the eligibility check and the
+      // CAS (cancel, timeout, …): report the conflict, do not retry blindly.
+      throw new ConflictError(`task '${task.id}' state changed concurrently; re-inspect before retrying`)
+    }
+    env.store.appendEvent({
+      projectId: env.projectId,
+      runId: task.runId,
+      taskId: task.id,
+      museId: env.callerMuseId,
+      type: 'task.revision_scheduled',
+      payload: { attempt: updated.attempt },
+    })
+    // Wake the run loop exactly like the supervisor's own retry path, so the
+    // requeued task is dispatched without waiting out the poll cadence.
+    env.wakeups.notify(wakeupChannelFor(null, env.runId), task.id, updated.state)
+    return { task: summarizeTask(updated) }
   },
 
   'muse.propose_create': async (env, args): Promise<JsonValue> => {
@@ -442,6 +610,19 @@ export const TOOL_HANDLERS: ToolHandlers = {
 
   'approval.request': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['approval.request'].parse(args)
+    // Persistence strips control characters (store.createApproval), so the
+    // denylist must compare the stripped value: a raw 'muse.create\u0007'
+    // would otherwise pass this check and launder into a host-owned action
+    // name on the stored card.
+    const action = stripControlChars(a.action)
+    if (action === '') {
+      throw new ValidationError('action is empty after control-character stripping')
+    }
+    if (HOST_OWNED_APPROVAL_ACTIONS.has(action)) {
+      throw new PolicyDeniedError(
+        `action '${action}' is host-owned; muses cannot file it via approval.request (Pluton subsystems create these rows)`,
+      )
+    }
     const record = env.store.getRun(env.runId)
     if (TERMINAL_RUN_STATES.has(record.state)) {
       throw new ConflictError(`run '${record.id}' is already ${record.state}`, { runId: record.id, state: record.state })
@@ -457,7 +638,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       runId: env.runId,
       taskId: env.callerTaskId,
       requestedByMuseId: env.callerMuseId,
-      action: a.action,
+      action,
       reason: a.reason,
       scope: a.scope ?? {},
       expiresAt: approvalExpiresAt(env.now(), env.limits.approvalTtlMinutes),
@@ -468,7 +649,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       taskId: env.callerTaskId,
       museId: env.callerMuseId,
       type: 'approval.requested',
-      payload: { approvalId: approval.id, action: a.action },
+      payload: { approvalId: approval.id, action: approval.action },
     })
     const runState =
       record.state === 'active' ? env.store.setRunState(record.id, 'awaiting_approval').state : record.state
@@ -614,9 +795,31 @@ export const TOOL_HANDLERS: ToolHandlers = {
     const a = TOOL_SCHEMAS['run.stop'].parse(args)
     const record = env.store.getRun(env.runId)
     if (TERMINAL_RUN_STATES.has(record.state)) {
-      throw new ConflictError(`run '${record.id}' is already ${record.state}`, { runId: record.id, state: record.state })
+      // CS-9: same idempotent ack as task.cancel — a run that already stopped is
+      // not an error, and no second `run.stop_requested` event is minted.
+      return {
+        runId: record.id,
+        state: record.state,
+        alreadyTerminal: true,
+        note: `run is already '${record.state}'; nothing to stop`,
+      }
     }
-    const updated = env.store.setRunState(record.id, 'cancelled')
+    let updated: RunRecord
+    try {
+      updated = env.store.setRunState(record.id, 'cancelled')
+    } catch (e) {
+      // Same idempotent-ack rule as the pre-check above: a concurrent terminal
+      // write won the CAS — report the durable winner, no second event.
+      if (!(e instanceof StateTransitionError)) throw e
+      const fresh = env.store.getRun(record.id)
+      if (!TERMINAL_RUN_STATES.has(fresh.state)) throw e
+      return {
+        runId: fresh.id,
+        state: fresh.state,
+        alreadyTerminal: true,
+        note: `run is already '${fresh.state}'; nothing to stop`,
+      }
+    }
     env.store.appendEvent({
       projectId: env.projectId,
       runId: record.id,

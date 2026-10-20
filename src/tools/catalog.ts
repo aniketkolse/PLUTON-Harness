@@ -74,6 +74,12 @@ export const TOOL_SCHEMAS = {
       reason: z.string().min(1).max(1_000),
     })
     .strict(),
+  'task.request_revision': z
+    .object({
+      taskId: taskRef,
+      feedback: z.string().min(1).max(2_000),
+    })
+    .strict(),
   'muse.propose_create': z
     .object({
       museId: z
@@ -158,7 +164,13 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'task.cancel',
     mutating: true,
     description:
-      'Cancel a task that has not reached a terminal state. Recorded with your reason; a live engine attempt is stopped cooperatively by the runtime on its next check.',
+      'Cancel a task that has not reached a terminal state. Recorded with your reason; a live engine attempt is interrupted by the runtime on its next control tick (within about a second), and an already terminal task is acknowledged idempotently instead of raising a conflict.',
+  },
+  'task.request_revision': {
+    permission: 'task.request_revision',
+    mutating: true,
+    description:
+      'Manager-only: send a FAILED task back for one more attempt. Only a `failed` task is eligible; your feedback (bounded, sanitized) is recorded on the task and reaches the next attempt’s prompt, and the task is requeued with its attempt counter advanced. Rejected once the configured revision cap (runtime.max_revisions_per_task) is exhausted.',
   },
   'muse.propose_create': {
     permission: 'muse.propose_create',
@@ -188,7 +200,7 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'run.stop',
     mutating: true,
     description:
-      'Request that this run stops. Transitions the run state to cancelled where the state machine allows it and records your reason; in-flight attempts are wound down by the runtime.',
+      'Request that this run stops. Transitions the run state to cancelled where the state machine allows it and records your reason; in-flight attempts are wound down by the runtime. An already terminal run is acknowledged idempotently instead of raising a conflict.',
   },
   'scope.declare': {
     permission: 'scope.declare',

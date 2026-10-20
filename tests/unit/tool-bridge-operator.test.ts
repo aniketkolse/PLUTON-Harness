@@ -28,6 +28,7 @@ const BASE_LIMITS: ToolBridgeLimits = {
   defaultWaitSeconds: 5,
   waitHeartbeatSeconds: 15,
   approvalTtlMinutes: 60,
+  maxRevisionsPerTask: 1,
 }
 
 describe('Operator Tool Bridge Catalog Exposure', () => {

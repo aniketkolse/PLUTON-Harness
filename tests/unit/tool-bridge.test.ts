@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -5,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { NotFoundError } from '../../src/domain/errors.ts'
 import { PERMISSIONS } from '../../src/domain/permissions.ts'
 import { allowedTransitions } from '../../src/domain/state.ts'
-import type { RunRecord } from '../../src/domain/models.ts'
+import type { JsonValue, RunRecord, WorkspaceRecord } from '../../src/domain/models.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -13,6 +14,7 @@ import { notifyTaskSettled, taskAncestorIds, WakeupRegistry } from '../../src/or
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../src/tools/bridge.ts'
 import { wakeupChannelFor } from '../../src/tools/handlers.ts'
 import { McpStdioServer } from '../../src/tools/mcp-server.ts'
+import { GitWorkspaceManager, type CheckoutInfo } from '../../src/workspace/manager.ts'
 
 /**
  * Bridge conformance: the restricted Pluton tool surface (ADR-0007) is the ONLY
@@ -134,6 +136,7 @@ const BASE_LIMITS: ToolBridgeLimits = {
   defaultWaitSeconds: 5,
   waitHeartbeatSeconds: 15,
   approvalTtlMinutes: 60,
+  maxRevisionsPerTask: 1,
 }
 
 function makeBridge(
@@ -142,6 +145,7 @@ function makeBridge(
   callerTaskId: string | null = null,
   overrides: Partial<ToolBridgeLimits> = {},
   wakeups?: WakeupRegistry,
+  workspaceManager?: GitWorkspaceManager,
 ): PlutonToolBridge {
   return new PlutonToolBridge({
     store: fx.store,
@@ -152,6 +156,7 @@ function makeBridge(
     callerTaskId,
     limits: { ...BASE_LIMITS, ...overrides },
     ...(wakeups ? { wakeups } : {}),
+    ...(workspaceManager ? { workspaceManager } : {}),
   })
 }
 
@@ -194,6 +199,16 @@ function forceVerify(store: Store, taskId: string): void {
   }
 }
 
+/** Walk a freshly admitted task along legal edges to `failed`, with the given failure payload. */
+function forceFail(store: Store, taskId: string, failure: JsonValue): void {
+  for (const next of ['queued', 'admitted', 'running'] as const) {
+    const current = store.getTask(taskId)
+    if (current.state === next || !allowedTransitions(current.state).includes(next)) continue
+    store.setTaskState(taskId, next)
+  }
+  store.setTaskState(taskId, 'failed', { failure })
+}
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('toolBridgeLimitsFromRuntime', () => {
@@ -204,12 +219,19 @@ describe('toolBridgeLimitsFromRuntime', () => {
     max_tool_result_chars: 120_000,
     heartbeat_seconds: 30,
     approval_timeout_minutes: 60,
+    max_revisions_per_task: 1,
   }
 
   it('carries the operator-configurable approval TTL, including 0 = never', () => {
     expect(toolBridgeLimitsFromRuntime(RUNTIME).approvalTtlMinutes).toBe(60)
     expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, approval_timeout_minutes: 0 }).approvalTtlMinutes).toBe(0)
     expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, approval_timeout_minutes: 10_080 }).approvalTtlMinutes).toBe(10_080)
+  })
+
+  it('carries the operator-configurable revision cap, including 0 = revisions disabled', () => {
+    expect(toolBridgeLimitsFromRuntime(RUNTIME).maxRevisionsPerTask).toBe(1)
+    expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, max_revisions_per_task: 0 }).maxRevisionsPerTask).toBe(0)
+    expect(toolBridgeLimitsFromRuntime({ ...RUNTIME, max_revisions_per_task: 10 }).maxRevisionsPerTask).toBe(10)
   })
 })
 
@@ -226,6 +248,7 @@ describe('PlutonToolBridge — identity and permissions', () => {
       'task.wait',
       'task.get_result',
       'task.cancel',
+      'task.request_revision',
       'muse.propose_create',
       'approval.request',
       'diff.inspect',
@@ -342,16 +365,156 @@ describe('PlutonToolBridge — task lifecycle tools', () => {
     expect(deniedResult).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
   })
 
-  it('task.cancel refuses a terminal task with request_conflict', async () => {
+  it('task.cancel cancels once, then acks a terminal task idempotently (CS-9)', async () => {
     const fx = makeFixture()
     const manager = makeBridge(fx, 'manager')
     const taskId = await createTask(manager)
     const first = await manager.call('task.cancel', { taskId, reason: 'no longer needed' })
     expect(first.ok).toBe(true)
-    expect((first.data as { task: { state: string } }).task.state).toBe('cancelled')
+    const firstData = first.data as { task: { id: string; state: string }; note: string; alreadyTerminal?: boolean }
+    expect(firstData.task).toMatchObject({ id: taskId, state: 'cancelled' })
+    // The runtime now interrupts the live engine attempt itself on its next
+    // control tick — the note must say so (no more "cooperative only" wording).
+    expect(firstData.note).toMatch(/interrupt/i)
+    expect(firstData.alreadyTerminal).toBeUndefined()
+
+    // Repeats are an idempotent ack, never a conflict: no state write, no event.
     const second = await manager.call('task.cancel', { taskId, reason: 'again' })
-    expect(second).toMatchObject({ ok: false, error: { code: 'request_conflict' } })
+    expect(second.ok).toBe(true)
+    expect(second.data).toMatchObject({ alreadyTerminal: true, task: { id: taskId, state: 'cancelled' } })
+    expect((second.data as { note: string }).note).toContain("already 'cancelled'")
+    expect(fx.store.getTask(taskId).state).toBe('cancelled')
     expect(eventTypes(fx.store, fx.run.id, 'task.cancelled_by_tool')).toBe(1)
+
+    // A task that reached any other terminal state is acked the same way.
+    const done = await createTask(manager, { title: 'already done' })
+    forceComplete(fx.store, done)
+    const third = await manager.call('task.cancel', { taskId: done, reason: 'too late' })
+    expect(third.ok).toBe(true)
+    expect(third.data).toMatchObject({ alreadyTerminal: true, task: { id: done, state: 'completed' } })
+    expect((third.data as { note: string }).note).toContain("already 'completed'")
+    expect(fx.store.getTask(done).state).toBe('completed')
+    expect(eventTypes(fx.store, fx.run.id, 'task.cancelled_by_tool')).toBe(1)
+  })
+})
+
+describe('PlutonToolBridge — manager-requested revisions (CS-5)', () => {
+  /** A real failure payload on the task the revision must preserve. */
+  const FAILURE: JsonValue = { code: 'engine_crash', message: 'engine process exited with code 1' }
+
+  /** A task walked along legal edges to `failed`, carrying a real failure payload. */
+  async function seedFailedTask(fx: Fixture, failure: JsonValue = FAILURE): Promise<string> {
+    const taskId = await createTask(makeBridge(fx, 'manager'))
+    forceFail(fx.store, taskId, failure)
+    return taskId
+  }
+
+  it('requeues a failed task once with sanitized feedback and preserves the old failure', async () => {
+    const fx = makeFixture()
+    const registry = new WakeupRegistry()
+    const manager = makeBridge(fx, 'manager', null, {}, registry)
+    const taskId = await seedFailedTask(fx)
+    const before = fx.store.getTask(taskId)
+
+    // Bounded feedback: the schema refuses anything past 2 000 chars.
+    const tooLong = await manager.call('task.request_revision', { taskId, feedback: 'x'.repeat(2_001) })
+    expect(tooLong).toMatchObject({ ok: false, error: { code: 'invalid_arguments' } })
+    // Empty after sanitizing is a validation error, not a silent no-op feedback.
+    const controlOnly = await manager.call('task.request_revision', { taskId, feedback: '\u0007 \n' })
+    expect(controlOnly).toMatchObject({ ok: false, error: { code: 'validation_failed' } })
+
+    const notified = registry.waitFor(wakeupChannelFor(null, fx.run.id), 5_000)
+    const res = await manager.call('task.request_revision', { taskId, feedback: 'fix\u0007 the\nbug' })
+    expect(res.ok).toBe(true)
+
+    const task = fx.store.getTask(taskId)
+    expect(task.state).toBe('queued')
+    expect(task.attempt).toBe(before.attempt + 1)
+    expect(task.failure).toEqual({
+      code: 'revision_requested',
+      feedback: 'fix thebug', // control characters stripped before persisting
+      requestedByMuseId: 'manager',
+      previousFailure: FAILURE,
+    })
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(1)
+    // The run loop is woken exactly like the supervisor's own retry path.
+    await expect(notified).resolves.toMatchObject([{ childTaskId: taskId, childState: 'queued' }])
+  })
+
+  it('enforces the per-task revision cap from durable events', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager', null, { maxRevisionsPerTask: 1 })
+    const taskId = await seedFailedTask(fx)
+
+    const first = await manager.call('task.request_revision', { taskId, feedback: 'take two' })
+    expect(first.ok).toBe(true)
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(1)
+
+    // The revised attempt fails again: re-walk the task to `failed`.
+    forceFail(fx.store, taskId, { code: 'engine_crash', message: 'boom again' })
+    const second = await manager.call('task.request_revision', { taskId, feedback: 'take three' })
+    expect(second).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((second.error as { message: string }).message).toMatch(/revision cap/i)
+    expect((second.error as { message: string }).message).toContain('1 of 1')
+    // Rejected: no second event, no state change.
+    expect(fx.store.getTask(taskId).state).toBe('failed')
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(1)
+  })
+
+  it('rejects the first revision when the cap is 0 (revisions disabled)', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager', null, { maxRevisionsPerTask: 0 })
+    const taskId = await seedFailedTask(fx)
+
+    const res = await manager.call('task.request_revision', { taskId, feedback: 'one more' })
+    expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((res.error as { message: string }).message).toContain('0 of 0')
+    expect(fx.store.getTask(taskId).state).toBe('failed')
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(0)
+  })
+
+  it('rejects a task that is not failed — only a failed task can be sent back', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const taskId = await createTask(manager)
+
+    const queued = await manager.call('task.request_revision', { taskId, feedback: 'not yet' })
+    expect(queued).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((queued.error as { message: string }).message).toMatch(/only a failed task can be sent back/)
+
+    forceComplete(fx.store, taskId)
+    const completed = await manager.call('task.request_revision', { taskId, feedback: 'never' })
+    expect(completed).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((completed.error as { message: string }).message).toContain('is completed')
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(0)
+  })
+
+  it('denies a worker without the permission at the bridge, and a granted worker at the handler gate', async () => {
+    const fx = makeFixture()
+    const taskId = await seedFailedTask(fx)
+
+    // (a) No permission: the bridge denies before any handler runs.
+    const ungranted = await makeBridge(fx, 'worker-a', taskId).call('task.request_revision', {
+      taskId,
+      feedback: 'from a worker session',
+    })
+    expect(ungranted).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((ungranted.error as { message: string }).message).toMatch(/lacks permission 'task.request_revision'/)
+
+    // (b) Permission granted: the handler itself still refuses a task-scoped session.
+    fx.store.db
+      .prepare('UPDATE muses SET permissions_json = ? WHERE id = ?')
+      .run(JSON.stringify([...WORKER_PERMISSIONS, 'task.request_revision']), 'worker-a')
+    const granted = await makeBridge(fx, 'worker-a', taskId).call('task.request_revision', {
+      taskId,
+      feedback: 'from a worker session',
+    })
+    expect(granted).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    expect((granted.error as { message: string }).message).toMatch(/manager-scoped/)
+
+    // Nothing was scheduled, and the failed task is untouched.
+    expect(fx.store.getTask(taskId).state).toBe('failed')
+    expect(eventTypes(fx.store, fx.run.id, 'task.revision_scheduled')).toBe(0)
   })
 })
 
@@ -466,6 +629,191 @@ describe('PlutonToolBridge — task.wait', () => {
   })
 })
 
+describe('PlutonToolBridge — task.get_result composition', () => {
+  /** A real git source repository (the clone source), created fresh per test. */
+  function gitRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'pluton-getresult-repo-'))
+    tmpDirs.push(dir)
+    const git = (args: string[]): void => {
+      execFileSync('git', args, { cwd: dir, stdio: 'pipe', timeout: 30_000 })
+    }
+    git(['init', '-b', 'main'])
+    writeFileSync(join(dir, 'README.md'), 'seed\n')
+    git(['add', '-A'])
+    git(['-c', 'user.name=Pluton', '-c', 'user.email=pluton@localhost', 'commit', '-m', 'seed'])
+    return dir
+  }
+
+  function makeManager(fx: Fixture): GitWorkspaceManager {
+    return new GitWorkspaceManager({ workspacesRoot: join(fx.rootDir, '.pluton', 'workspaces') })
+  }
+
+  async function getResult(bridge: PlutonToolBridge, taskId: string): Promise<Record<string, unknown>> {
+    const res = await bridge.call('task.get_result', { taskId })
+    expect(res.ok).toBe(true)
+    return res.data as Record<string, unknown>
+  }
+
+  /** A task with a real managed checkout holding one committed file. */
+  async function seedCheckout(
+    fx: Fixture,
+    manager: GitWorkspaceManager,
+  ): Promise<{ taskId: string; ws: WorkspaceRecord; info: CheckoutInfo; commit: string | null }> {
+    const taskId = await createTask(makeBridge(fx, 'manager'))
+    const info = await manager.createCheckout({
+      repoPath: gitRepo(),
+      kind: 'task-checkout',
+      runId: fx.run.id,
+      slug: 'composed result',
+      destName: taskId,
+    })
+    const ws = fx.store.createWorkspace({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId,
+      museId: 'worker-a',
+      kind: 'task-checkout',
+      path: info.path,
+      branch: info.branch,
+      baseCommit: info.baseCommit,
+    })
+    writeFileSync(join(info.path, 'task-output.txt'), 'done\n')
+    const committed = await manager.commitAll(info.path, 'task: output')
+    return {
+      taskId,
+      ws: fx.store.updateWorkspace(ws.id, { headCommit: committed.commit }),
+      info,
+      commit: committed.commit,
+    }
+  }
+
+  it('reports changed files, commit and checkout from real rows and a real managed checkout', async () => {
+    const fx = makeFixture()
+    const manager = makeManager(fx)
+    const { taskId, ws, info, commit } = await seedCheckout(fx, manager)
+
+    const data = await getResult(makeBridge(fx, 'manager', null, {}, undefined, manager), taskId)
+    expect(data.taskId).toBe(taskId)
+    expect(data.status).toBe('queued')
+    // Real `git diff --name-only <base>..HEAD` inside the managed checkout.
+    expect(data.changedFiles).toEqual(['task-output.txt'])
+    expect(data.commit).toBe(commit)
+    expect(data.workspace).toEqual({
+      id: ws.id,
+      branch: info.branch,
+      baseCommit: info.baseCommit,
+      state: 'active',
+      cleanup: `pluton workspace clean --run ${fx.run.id}`,
+    })
+    expect(data.tests).toEqual([])
+    expect(data.blockers).toEqual({ failure: null, unmetCriteria: [] })
+    expect(data.task).toMatchObject({ id: taskId, state: 'queued' })
+  })
+
+  it('lists real verification check rows with exit codes and durations', async () => {
+    const fx = makeFixture()
+    const taskId = await createTask(makeBridge(fx, 'manager'))
+    const checks: { name: string; status: 'passed' | 'failed'; exitCode: number; durationMs: number }[] = [
+      { name: 'unit', status: 'passed', exitCode: 0, durationMs: 123 },
+      { name: 'lint', status: 'failed', exitCode: 1, durationMs: 45 },
+    ]
+    for (const check of checks) {
+      const row = fx.store.createVerificationCheck({
+        projectId: fx.projectId,
+        runId: fx.run.id,
+        taskId,
+        name: check.name,
+        command: ['npm', 'test'],
+        cwd: null,
+        workspaceId: null,
+      })
+      fx.store.setVerificationCheckResult(row.id, {
+        status: check.status,
+        exitCode: check.exitCode,
+        durationMs: check.durationMs,
+      })
+    }
+    // A pending check (never executed) must not be dressed up with exit evidence.
+    fx.store.createVerificationCheck({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId,
+      name: 'e2e',
+      command: ['npm', 'run', 'e2e'],
+      cwd: null,
+      workspaceId: null,
+    })
+
+    const data = await getResult(makeBridge(fx, 'manager'), taskId)
+    const tests = data.tests as unknown[]
+    expect(tests).toHaveLength(3)
+    expect(tests).toEqual(
+      expect.arrayContaining([
+        ...checks.map((c) => ({ name: c.name, status: c.status, exitCode: c.exitCode, durationMs: c.durationMs })),
+        { name: 'e2e', status: 'pending', exitCode: null, durationMs: null },
+      ]),
+    )
+  })
+
+  it('derives unmet criteria from the latest verification row and passes the failure through', async () => {
+    const fx = makeFixture()
+    const taskId = await createTask(makeBridge(fx, 'manager'))
+    fx.store.recordVerification({
+      runId: fx.run.id,
+      taskId,
+      verdict: 'failed',
+      criteria: [
+        { criterion: 'feature works', status: 'verified', evidence: 'checks passed' },
+        { criterion: 'docs updated', status: 'failed', evidence: 'no docs diff' },
+      ],
+    })
+    forceFail(fx.store, taskId, { code: 'verification_failed', checks: ['docs'] })
+
+    const data = await getResult(makeBridge(fx, 'manager'), taskId)
+    expect(data.blockers).toEqual({
+      failure: { code: 'verification_failed', checks: ['docs'] },
+      unmetCriteria: [{ criterion: 'docs updated', reason: 'no docs diff' }],
+    })
+    expect(data.failure).toEqual({ code: 'verification_failed', checks: ['docs'] })
+
+    // A malformed criteria payload is reported as no blockers, never as a crash.
+    fx.store.recordVerification({ runId: fx.run.id, taskId, verdict: 'failed', criteria: 'not-an-array' })
+    const malformed = await getResult(makeBridge(fx, 'manager'), taskId)
+    expect((malformed.blockers as { unmetCriteria: unknown[] }).unmetCriteria).toEqual([])
+  })
+
+  it('reports changedFiles as null — never a throw — when the manager is absent or the checkout is gone', async () => {
+    const fx = makeFixture()
+    const manager = makeManager(fx)
+    const { taskId, info } = await seedCheckout(fx, manager)
+
+    // No workspace manager wired: the composed result stays honest, not loud.
+    expect((await getResult(makeBridge(fx, 'manager'), taskId)).changedFiles).toBeNull()
+
+    // A manager whose checkout directory has disappeared (missing marker):
+    // the WorkspaceError is swallowed into null, not surfaced as a tool crash.
+    rmSync(info.path, { recursive: true, force: true })
+    expect((await getResult(makeBridge(fx, 'manager', null, {}, undefined, manager), taskId)).changedFiles).toBeNull()
+  })
+
+  it('passes the assignment snapshot through and keeps the legacy result/failure keys', async () => {
+    const fx = makeFixture()
+    const bridge = makeBridge(fx, 'manager')
+    const taskId = await createTask(bridge)
+    const assignment = { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' }
+    fx.store.setTaskStateIf(taskId, 'queued', 'admitted', { assignment })
+    fx.store.setTaskState(taskId, 'running', { result: { summary: 'did the thing', outcome: 'success' } })
+    fx.store.setTaskState(taskId, 'completed')
+
+    const data = await getResult(bridge, taskId)
+    expect(data.assignment).toEqual(assignment)
+    expect(data.summary).toBe('did the thing')
+    expect(data.result).toEqual({ summary: 'did the thing', outcome: 'success' })
+    expect(data.failure).toBeNull()
+    expect(data.task).toMatchObject({ id: taskId, state: 'completed', depth: 0, parentTaskId: null })
+  })
+})
+
 describe('PlutonToolBridge — team and approvals', () => {
   it('muse.propose_create records a pending approval and never instantiates silently', async () => {
     const fx = makeFixture()
@@ -503,7 +851,7 @@ describe('PlutonToolBridge — team and approvals', () => {
     expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
   })
 
-  it('approval.request parks the run; run.stop cancels it; repeats conflict', async () => {
+  it('approval.request parks the run; run.stop cancels it; repeats ack idempotently (CS-9)', async () => {
     const fx = makeFixture()
     const manager = makeBridge(fx, 'manager')
     fx.store.setRunState(fx.run.id, 'active')
@@ -517,8 +865,12 @@ describe('PlutonToolBridge — team and approvals', () => {
     expect((stopped.data as { state: string }).state).toBe('cancelled')
     expect(eventTypes(fx.store, fx.run.id, 'run.stop_requested')).toBe(1)
 
+    // Repeats are an idempotent ack: same durable state, no second event.
     const again = await manager.call('run.stop', { reason: 'operator decision' })
-    expect(again).toMatchObject({ ok: false, error: { code: 'request_conflict' } })
+    expect(again.ok).toBe(true)
+    expect(again.data).toMatchObject({ runId: fx.run.id, state: 'cancelled', alreadyTerminal: true })
+    expect(fx.store.getRun(fx.run.id).state).toBe('cancelled')
+    expect(eventTypes(fx.store, fx.run.id, 'run.stop_requested')).toBe(1)
   })
 
   it('stamps approval rows with the configured TTL (60m default, 0 = never expires)', async () => {
@@ -552,6 +904,36 @@ describe('PlutonToolBridge — team and approvals', () => {
     const proposalRow = fx.store.getApproval((proposal.data as { proposalId: string }).proposalId)
     expect(proposalRow.expiresAt).not.toBeNull()
     expect(Math.abs(Date.parse(proposalRow.expiresAt ?? '') - (before + 60 * 60_000))).toBeLessThan(5_000)
+  })
+
+  it('strips terminal control bytes from approval text at persistence (tool input boundary)', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    fx.store.setRunState(fx.run.id, 'active')
+
+    const asked = await manager.call('approval.request', {
+      action: 'tool\u001b[2J:evil',
+      reason: 'needs \u001b[31mred\u001b[0m \u202ereordered text',
+      scope: { note: 'keep\u0007 calm', path: 'a\u001b[2J.ts' },
+    })
+    expect(asked.ok).toBe(true)
+    const approval = fx.store.getApproval((asked.data as { approvalId: string }).approvalId)
+
+    // Text survives; bytes that could drive or spoof a terminal never reach the
+    // durable record, whichever surface later renders it.
+    expect(approval.action).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/)
+    expect(approval.action).toContain('tool')
+    expect(approval.reason).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/)
+    expect(approval.reason).toContain('reordered text')
+    expect((approval.scope as { note: string }).note).toBe('keep calm')
+    expect((approval.scope as { path: string }).path).toBe('a[2J.ts')
+
+    // The emitted event carries the stored (sanitized) action: one source of
+    // truth for UIs reading either surface.
+    const events = fx.store.listEvents(fx.run.id, { type: 'approval.requested' })
+    const payload = events.at(-1)?.payload as { action?: string }
+    expect(payload.action).toBe(approval.action)
+    expect(payload.action).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/)
   })
 })
 
@@ -726,6 +1108,28 @@ describe('PlutonToolBridge — review hardening', () => {
     }
     const over = await manager.call('approval.request', { action: 'tool:four', reason: 'r' })
     expect(over).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+  })
+
+  it('refuses host-owned approval actions a Muse must not file (forged-approval defense)', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    for (const action of ['integration.apply', 'muse.create', 'engine.permission']) {
+      const res = await manager.call('approval.request', { action, reason: 'sounds harmless' })
+      expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    }
+    // Persistence strips control characters (store.createApproval), so the
+    // denylist must compare the stripped action too: 'muse.create\u0007'
+    // would otherwise launder into a host-owned action name on the card.
+    for (const action of ['muse.create\u0007', 'integration.apply\u0007', 'engine.permission\u202e']) {
+      const res = await manager.call('approval.request', { action, reason: 'sounds harmless' })
+      expect(res).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
+    }
+    // An action that is nothing but control characters is empty once stripped.
+    const empty = await manager.call('approval.request', { action: '\u0007', reason: 'r' })
+    expect(empty).toMatchObject({ ok: false, error: { code: 'validation_failed' } })
+    // Nothing was recorded: a denied filing must not leave a pending row behind.
+    expect(fx.store.listApprovals(fx.run.id).filter((x) => x.status === 'pending')).toHaveLength(0)
+    expect(fx.store.listApprovals(fx.run.id).some((x) => x.action === 'muse.create')).toBe(false)
   })
 
   it('refuses to pass a malformed base commit to git', async () => {

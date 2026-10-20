@@ -4,6 +4,7 @@ import type { JsonValue } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import { WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
+import type { GitWorkspaceManager } from '../workspace/manager.ts'
 import { getToolDef, toolInfosForMcp } from './catalog.ts'
 import type { McpToolCallResult, McpToolHost, McpToolInfo } from './mcp-server.ts'
 import { TOOL_HANDLERS, type ToolEnv } from './handlers.ts'
@@ -44,6 +45,8 @@ export interface ToolBridgeLimits {
   waitHeartbeatSeconds: number
   /** runtime.approval_timeout_minutes: pending approvals expire after this TTL (0 = never). */
   approvalTtlMinutes: number
+  /** runtime.max_revisions_per_task: per-task cap on manager-requested revisions (0 = disabled). */
+  maxRevisionsPerTask: number
 }
 
 export const DEFAULT_TOOL_RESULT_CHARS = 120_000
@@ -59,6 +62,7 @@ export function toolBridgeLimitsFromRuntime(runtime: {
   max_tool_result_chars: number
   heartbeat_seconds: number
   approval_timeout_minutes: number
+  max_revisions_per_task: number
 }): ToolBridgeLimits {
   return {
     maxChildrenPerTask: runtime.max_child_tasks_per_task,
@@ -68,6 +72,7 @@ export function toolBridgeLimitsFromRuntime(runtime: {
     defaultWaitSeconds: DEFAULT_WAIT_SECONDS,
     waitHeartbeatSeconds: runtime.heartbeat_seconds,
     approvalTtlMinutes: runtime.approval_timeout_minutes,
+    maxRevisionsPerTask: runtime.max_revisions_per_task,
   }
 }
 
@@ -98,6 +103,8 @@ export interface PlutonToolBridgeOptions {
   callerTaskId?: string | null
   limits: ToolBridgeLimits
   leaseManager?: FileLeaseManager
+  /** The project's workspace manager, so result reads can diff real checkouts. */
+  workspaceManager?: GitWorkspaceManager
   /** Shared per-run registry; the runtime notifies it when tasks reach terminal states. */
   wakeups?: WakeupRegistry
   now?: () => number
@@ -177,6 +184,7 @@ export class PlutonToolBridge implements McpToolHost {
         callerTaskId: opts.callerTaskId ?? null,
         limits: opts.limits,
         leaseManager: opts.leaseManager,
+        workspaceManager: opts.workspaceManager,
         wakeups: opts.wakeups ?? new WakeupRegistry(),
         now: this.now,
       }

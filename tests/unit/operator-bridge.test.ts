@@ -17,6 +17,7 @@ const LIMITS: ToolBridgeLimits = {
   defaultWaitSeconds: 10,
   waitHeartbeatSeconds: 1,
   approvalTtlMinutes: 60,
+  maxRevisionsPerTask: 1,
 }
 
 describe('Operator-scoped PlutonToolBridge', () => {
