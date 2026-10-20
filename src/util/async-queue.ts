@@ -5,6 +5,9 @@
  * Rules:
  * - `push` never throws and never grows past `maxSize`: it returns false so the
  *   producer can fail the turn loudly instead of silently dropping events.
+ *   `false` means closed OR full; callers that must react differently consult
+ *   `isClosed` (a closed queue means the turn already settled — late frames are
+ *   stale, not overflow).
  * - Values must never be `undefined` (undefined is the internal close sentinel).
  * - After `close()`, queued items are still drained, then iteration ends.
  */

@@ -37,6 +37,21 @@ describe('AsyncQueue', () => {
     expect(q.push(4)).toBe(false)
   })
 
+  it('lets callers tell a full queue apart from a closed one via isClosed', () => {
+    // `push` fails for both conditions; the distinction is the caller's, and
+    // the session layer depends on it (a closed queue means the turn already
+    // settled, not that the engine overflowed the buffer).
+    const full = new AsyncQueue<number>(1)
+    expect(full.push(1)).toBe(true)
+    expect(full.push(2)).toBe(false)
+    expect(full.isClosed).toBe(false)
+
+    const closed = new AsyncQueue<number>(1)
+    closed.close()
+    expect(closed.push(3)).toBe(false)
+    expect(closed.isClosed).toBe(true)
+  })
+
   it('drains queued items after close, then ends iteration', async () => {
     const q = new AsyncQueue<string>()
     q.push('a')
