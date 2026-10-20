@@ -5,6 +5,7 @@
  */
 
 import type { EngineAdapter, EngineSession, McpServerSpec } from '../engines/contract/types.ts'
+import type { EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import type { ChatSessionRecord, MuseRecord, TaskRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import type { OperatorToolEnv } from '../tools/operator-catalog.ts'
@@ -99,6 +100,12 @@ export interface ChatSessionDeps {
   io: ChatIo
   session: ChatSessionRecord
   mcpServers: McpServerSpec[]
+  /**
+   * Operator approval channel for interactive engine policies (ask-* modes):
+   * engine permission requests become durable approvals the operator decides
+   * here (or in the SPA), and are held open — fail-closed — until decided.
+   */
+  engineApprovals?: EnginePermissionChannel
   instructions?: string
   resumeToken?: string | null
   startRun?: OperatorToolEnv['startRun']
@@ -162,6 +169,7 @@ export class ChatSession {
       instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
       resumeToken: this.deps.resumeToken ?? undefined,
       mcpServers: this.deps.mcpServers,
+      ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
     })
     this.engineSession = engineSession
 
@@ -239,6 +247,7 @@ export class ChatSession {
       instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
       resumeToken: undefined,
       mcpServers: this.deps.mcpServers,
+      ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
     })
     this.engineSession = nextEngineSession
     this.deps.store.updateChatSession(this.deps.session.id, {
@@ -575,6 +584,7 @@ export class ChatSession {
       configDir: this.deps.muse.engineHome,
       instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
       mcpServers: this.deps.mcpServers,
+      ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
     })
     this.engineSession = engineSession
     this.deps.store.updateChatSession(newSession.id, {
