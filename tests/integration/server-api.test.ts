@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
+import { admitTask } from '../../src/orchestrator/task-graph.ts'
 import { checkServerHealth, readServerInstance } from '../../src/server/instance.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
 
@@ -61,7 +62,10 @@ muses:
       - approvals.list
 `
 
-function setupTestProject(): { rootDir: string; appServer: Promise<AppServerInstance> } {
+function setupTestProject(options: { logWatcherIntervalMs?: number } = {}): {
+  rootDir: string
+  appServer: Promise<AppServerInstance>
+} {
   const root = mkdtempSync(join(tmpdir(), 'pluton-server-it-'))
   tmpDirs.push(root)
   writeFileSync(join(root, 'pluton.yaml'), TEST_CONFIG, 'utf8')
@@ -74,9 +78,66 @@ function setupTestProject(): { rootDir: string; appServer: Promise<AppServerInst
     store: bootstrapped.store,
     projectId: bootstrapped.projectId,
     loaded,
+    ...(options.logWatcherIntervalMs !== undefined ? { logWatcherIntervalMs: options.logWatcherIntervalMs } : {}),
   })
 
   return { rootDir: root, appServer: serverPromise }
+}
+
+interface SseReadResult {
+  frames: Array<Record<string, unknown>>
+  dataLines: string[]
+  timedOut: boolean
+}
+
+/**
+ * Reads `data:` frames from an SSE body until `isDone` or the deadline. The
+ * read is bounded so a missing-frame regression fails fast instead of hanging
+ * until the test timeout.
+ */
+async function readSseFrames(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  isDone: (frames: Array<Record<string, unknown>>) => boolean,
+  timeoutMs = 15_000,
+): Promise<SseReadResult> {
+  const decoder = new TextDecoder()
+  const frames: Array<Record<string, unknown>> = []
+  const dataLines: string[] = []
+  let buffer = ''
+  const deadline = Date.now() + timeoutMs
+
+  while (!isDone(frames)) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return { frames, dataLines, timedOut: true }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`SSE read timed out after ${String(timeoutMs)}ms`)),
+          remaining,
+        )
+      }),
+    ]).finally(() => {
+      if (timer !== null) clearTimeout(timer)
+    })
+    if (chunk.done) break
+
+    buffer += decoder.decode(chunk.value, { stream: true })
+    let separator = buffer.indexOf('\n\n')
+    while (separator !== -1) {
+      const block = buffer.slice(0, separator)
+      buffer = buffer.slice(separator + 2)
+      for (const line of block.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice('data: '.length)
+        dataLines.push(raw)
+        frames.push(JSON.parse(raw) as Record<string, unknown>)
+      }
+      separator = buffer.indexOf('\n\n')
+    }
+  }
+  return { frames, dataLines, timedOut: false }
 }
 
 describe('Pluton application server REST & SSE API', () => {
@@ -384,6 +445,13 @@ describe('Pluton application server REST & SSE API', () => {
       expect(htmlText).toContain('btnVerifyRedispatch')
       expect(htmlText).toContain('tabDiffs')
       expect(htmlText).toContain('dagContainer')
+      expect(htmlText).toContain('collapsedSidebarToggle')
+      expect(htmlText).toContain('btnRestoreSidebar')
+      expect(htmlText).toContain('accountInfoBox')
+      expect(htmlText).toContain('customModelNameInput')
+      expect(htmlText).toContain('customApiKeyInput')
+      expect(htmlText).toContain('toggleAutonomous')
+      expect(htmlText).toContain('thinkingEffortSelect')
 
       const resJs = await fetch(`http://127.0.0.1:${server.port}/app.js`)
       expect(resJs.status).toBe(200)
@@ -393,6 +461,203 @@ describe('Pluton application server REST & SSE API', () => {
       expect(jsText).toContain('plutonVerifyTask')
       expect(jsText).toContain('dag-flow-container')
       expect(jsText).toContain('btnToggleDagMode')
+      expect(jsText).toContain("ev.type === 'run_state'")
+      expect(jsText).toContain("ev.type === 'task_state'")
+      expect(jsText).toContain('loadSettings')
+      expect(jsText).toContain('verifyAndAddCustomModel')
+      expect(jsText).toContain('handleSignOutAccount')
+      expect(jsText).toContain('toggleVoiceInput')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('streams run_state and task_state frames on real run transitions', async () => {
+    const { rootDir, appServer } = setupTestProject({ logWatcherIntervalMs: 25 })
+    const server = await appServer
+    const loaded = loadConfig(rootDir)
+    const { store } = bootstrapStore(loaded)
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+    try {
+      // A real transition to observe: create a run, then let the mock-engine
+      // supervisor execute it through the resume route.
+      const createRes = await fetch(`http://127.0.0.1:${server.port}/api/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify({ goal: 'observe live state over SSE' }),
+      })
+      expect(createRes.status).toBe(201)
+      const created = (await createRes.json()) as { ok: boolean; run: { id: string } }
+      const runId = created.run.id
+
+      // The skip-manager resume executes the tasks that exist; seed one so the
+      // run produces real task.* transitions too.
+      const task = admitTask(
+        store,
+        {
+          runId,
+          parentTaskId: null,
+          title: 'sse observed task',
+          brief: 'exercise task transitions for the log watcher',
+          acceptanceCriteria: [],
+          assigneeMuseId: 'supervisor',
+        },
+        { maxChildrenPerTask: 5 },
+      )
+
+      // Subscribe BEFORE the transitions so the frames are live deltas.
+      const sseRes = await fetch(`http://127.0.0.1:${server.port}/api/events`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(sseRes.status).toBe(200)
+      expect(sseRes.headers.get('content-type')).toContain('text/event-stream')
+      reader = sseRes.body!.getReader()
+
+      const readLoop = readSseFrames(
+        reader,
+        (frames) =>
+          frames.some((frame) => frame.type === 'run_state' && frame.runId === runId) &&
+          frames.some(
+            (frame) =>
+              frame.type === 'task_state' &&
+              frame.taskId === task.id &&
+              frame.runId === runId &&
+              frame.state !== 'queued',
+          ),
+      )
+
+      const resumeRes = await fetch(`http://127.0.0.1:${server.port}/api/runs/${runId}/resume`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: '{}',
+      })
+      expect(resumeRes.status).toBe(200)
+
+      const { frames, dataLines, timedOut } = await readLoop
+      expect(timedOut, `no orchestration frames before the deadline; got ${JSON.stringify(frames)}`).toBe(false)
+
+      // Frames only ever come from JSON-parsed `data:` lines (a malformed one
+      // would have thrown while reading).
+      expect(dataLines.length).toBeGreaterThan(0)
+      expect(frames.some((frame) => frame.type === 'connected')).toBe(true)
+
+      const runFrame = frames.find((frame) => frame.type === 'run_state' && frame.runId === runId)
+      expect(runFrame, `missing run_state frame; got ${JSON.stringify(frames)}`).toBeDefined()
+      expect(typeof runFrame!.state).toBe('string')
+
+      // The seeding admitTask call itself appends `task.admitted`, so a frame
+      // with state 'queued' proves nothing: only the supervisor leaving that
+      // state (task.started → running, then completed) makes the frame real.
+      const taskFrame = frames.find(
+        (frame) =>
+          frame.type === 'task_state' && frame.taskId === task.id && frame.runId === runId && frame.state !== 'queued',
+      )
+      expect(taskFrame, `missing supervisor-driven task_state frame; got ${JSON.stringify(frames)}`).toBeDefined()
+      expect(taskFrame!.runId).toBe(runId)
+      expect(typeof taskFrame!.state).toBe('string')
+    } finally {
+      // Cancel the reader so the open SSE connection cannot keep server.close() hanging.
+      if (reader !== null) {
+        await reader.cancel().catch(() => undefined)
+      }
+      store.close()
+      await server.close()
+    }
+  })
+
+  it('manages runtime settings, account sign in/out, and custom AI models securely', async () => {
+    const { appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      // 1. GET /api/settings defaults
+      const getSettingsRes = await fetch(`http://127.0.0.1:${server.port}/api/settings`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(getSettingsRes.status).toBe(200)
+      const initialSettings = (await getSettingsRes.json()) as {
+        ok: boolean
+        settings: {
+          account: { username: string; email: string; connected: boolean }
+          permissions: { autonomousToolExecution: boolean; parallelSubAgents: boolean; autoApproveReadTools: boolean; terminalAndBash: boolean }
+          thinkingEffort: string
+          customModels: unknown[]
+        }
+      }
+      expect(initialSettings.ok).toBe(true)
+      expect(initialSettings.settings.account.connected).toBe(true)
+      expect(initialSettings.settings.permissions.autonomousToolExecution).toBe(true)
+      expect(initialSettings.settings.thinkingEffort).toBe('auto')
+
+      // 2. POST /api/settings update policy & thinking effort
+      const updateSettingsRes = await fetch(`http://127.0.0.1:${server.port}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify({
+          permissions: { autonomousToolExecution: false, terminalAndBash: false },
+          thinkingEffort: 'max',
+        }),
+      })
+      expect(updateSettingsRes.status).toBe(200)
+      const updatedSettings = (await updateSettingsRes.json()) as typeof initialSettings
+      expect(updatedSettings.settings.permissions.autonomousToolExecution).toBe(false)
+      expect(updatedSettings.settings.permissions.parallelSubAgents).toBe(true)
+      expect(updatedSettings.settings.permissions.terminalAndBash).toBe(false)
+      expect(updatedSettings.settings.thinkingEffort).toBe('max')
+
+      // 3. POST /api/account/signout & /api/account/signin
+      const signOutRes = await fetch(`http://127.0.0.1:${server.port}/api/account/signout`, {
+        method: 'POST',
+        headers: { 'x-pluton-token': server.token },
+        body: '{}',
+      })
+      expect(signOutRes.status).toBe(200)
+      const signOutData = (await signOutRes.json()) as { ok: boolean; account: { connected: boolean } }
+      expect(signOutData.account.connected).toBe(false)
+
+      const signInRes = await fetch(`http://127.0.0.1:${server.port}/api/account/signin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify({ username: 'lead-dev', email: 'lead@pluton.ai' }),
+      })
+      expect(signInRes.status).toBe(200)
+      const signInData = (await signInRes.json()) as {
+        ok: boolean
+        account: { username: string; email: string; connected: boolean }
+      }
+      expect(signInData.account.connected).toBe(true)
+      expect(signInData.account.username).toBe('lead-dev')
+      expect(signInData.account.email).toBe('lead@pluton.ai')
+
+      // 4. POST /api/models/custom registers model without leaking secret API key
+      const SECRET_KEY = 'sk-pluton-super-secret-key-12345'
+      const addModelRes = await fetch(`http://127.0.0.1:${server.port}/api/models/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify({ modelName: 'custom/claude-enterprise-v1', apiKey: SECRET_KEY }),
+      })
+      expect(addModelRes.status).toBe(200)
+      const addModelRaw = await addModelRes.text()
+      expect(addModelRaw).not.toContain(SECRET_KEY)
+      const addModelData = JSON.parse(addModelRaw) as {
+        ok: boolean
+        model: { id: string; name: string }
+      }
+      expect(addModelData.ok).toBe(true)
+      expect(addModelData.model.id).toBe('custom/claude-enterprise-v1')
+
+      // 5. GET /api/models lists the custom model under engine 'custom'
+      const modelsRes = await fetch(`http://127.0.0.1:${server.port}/api/models`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(modelsRes.status).toBe(200)
+      const modelsRaw = await modelsRes.text()
+      expect(modelsRaw).not.toContain(SECRET_KEY)
+      const modelsData = JSON.parse(modelsRaw) as {
+        ok: boolean
+        models: Record<string, Array<{ id: string; name: string }>>
+      }
+      expect(modelsData.models['custom']).toBeDefined()
+      expect(modelsData.models['custom']!.some((m) => m.id === 'custom/claude-enterprise-v1')).toBe(true)
     } finally {
       await server.close()
     }

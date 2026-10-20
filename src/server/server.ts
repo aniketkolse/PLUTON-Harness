@@ -11,6 +11,7 @@ import type { Store } from '../store/store.ts'
 import { InternalError } from '../domain/errors.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { clearServerInstance, writeServerInstance } from './instance.ts'
+import { ServerLogWatcher } from './log-watcher.ts'
 import { ApiRouter } from './routes.ts'
 import {
   generateServerToken,
@@ -27,6 +28,11 @@ export interface AppServerOptions {
   loaded: LoadedConfig
   port?: number
   token?: string
+  /**
+   * How often the SSE log watcher tails the durable event log, in ms. Ops/tests
+   * tunable; the watcher's own default applies when omitted.
+   */
+  logWatcherIntervalMs?: number
 }
 
 export interface AppServerInstance {
@@ -48,6 +54,12 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     projectId: options.projectId,
     loaded: options.loaded,
     broadcaster,
+  })
+  const logWatcher = new ServerLogWatcher({
+    store: options.store,
+    projectId: options.projectId,
+    broadcaster,
+    ...(options.logWatcherIntervalMs !== undefined ? { pollIntervalMs: options.logWatcherIntervalMs } : {}),
   })
 
   let boundPort = options.port ?? 0
@@ -159,12 +171,17 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
 
   process.once('exit', cleanup)
 
+  // Tail the durable event log from here on (unref'd timer) and turn new
+  // run./task. events into live SSE frames for connected clients.
+  logWatcher.start()
+
   let isClosing = false
   const close = async (): Promise<void> => {
     if (isClosing) return
     isClosing = true
     process.removeListener('exit', cleanup)
     cleanup()
+    logWatcher.stop()
     broadcaster.close()
     await router.close()
     await new Promise<void>((resolveClose) => {

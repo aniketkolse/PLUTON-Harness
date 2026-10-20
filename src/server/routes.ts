@@ -7,20 +7,29 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { isAbsolute, join, relative } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
+import { PlutonError, ValidationError } from '../domain/errors.ts'
+import { isTerminalRunState } from '../domain/state.ts'
+import type { MuseRecord, RunRecord } from '../domain/models.ts'
 import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
+import { engineAdapterForMuse } from '../engines/approval.ts'
+import { createEngineApprovalChannel, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
-import type { EngineSession } from '../engines/contract/types.ts'
+import type { EngineSession, McpServerSpec } from '../engines/contract/types.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { run as execRun } from '../util/exec.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath } from './security.ts'
 import type { ServerEventBroadcaster } from './events.ts'
-import { decideApproval } from '../cli/commands/approvals.ts'
-import { resumeRun } from '../cli/commands/run.ts'
+import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
+import { requestRunCancel, resumeRun, startRunInBackground } from '../cli/commands/run.ts'
 import type { ProjectContext } from '../cli/context.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
+import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../tools/bridge.ts'
+import { ToolHttpServer } from '../tools/http-transport.ts'
 import type {
   HealthResponse,
+  McpServerStatus,
+  McpStatusResponse,
   RunDetailView,
   SessionDetailView,
   WorkspaceSummary,
@@ -33,9 +42,78 @@ export interface RouteContext {
   broadcaster: ServerEventBroadcaster
 }
 
+/**
+ * The largest JSON request body the API accepts.
+ *
+ * The body is the operator's prompt, a goal, or a decision - none of which
+ * need megabytes. Anything larger is rejected with 413 and a reason, not a
+ * reset connection.
+ */
+const MAX_REQUEST_BODY_CHARS = 1024 * 1024
+
+/**
+ * The absolute byte count the server will read before it gives up on an
+ * oversized body and drops the connection. It bounds the memory a single
+ * hostile (or broken) client can make the server buffer.
+ */
+const MAX_REQUEST_BODY_HARD_STOP = 8 * 1024 * 1024
+
+/**
+ * A live MCP server registration: the tool bridge handed to one engine session
+ * together with the transport session that serves it.
+ */
+interface McpRegistration {
+  name: string
+  kind: 'http' | 'stdio'
+  sessionId: string
+  museId: string
+  museName: string
+  engineKind: string
+  /** Bearer token of the registered transport session (never leaves the process). */
+  token: string
+}
+
+
+interface PermissionPolicies {
+  autonomousToolExecution: boolean
+  parallelSubAgents: boolean
+  autoApproveReadTools: boolean
+  terminalAndBash: boolean
+}
+
 export class ApiRouter {
   private readonly ctx: RouteContext
-  private readonly activeEngineSessions = new Map<string, { session: EngineSession; busy: boolean }>()
+  private readonly activeEngineSessions = new Map<
+    string,
+    { session: EngineSession; busy: boolean; approvals: EnginePermissionChannel }
+  >()
+  /**
+   * Shared MCP tool transport. One HTTP endpoint serves every SPA chat
+   * session's bridge; each engine session gets its own bearer token, exactly
+   * like `pluton chat` (`src/cli/commands/chat.ts:275-285`).
+   */
+  private toolHttp: ToolHttpServer | null = null
+  private toolHttpStarting: Promise<ToolHttpServer> | null = null
+  /** Live MCP registrations, keyed by the chat session that owns them. */
+  private readonly mcpRegistrations = new Map<string, McpRegistration>()
+  /** Runs started from the SPA's Build mode, so Stop can cancel the right one. */
+  private readonly activeRunTasks = new Map<string, string>()
+
+  /** Runtime settings and account state for SPA configuration (ADR-0014). */
+  private accountSettings = {
+    username: 'pluton-developer',
+    email: 'developer@pluton.account',
+    connected: true,
+  }
+  private permissionPolicies: PermissionPolicies = {
+    autonomousToolExecution: true,
+    parallelSubAgents: true,
+    autoApproveReadTools: true,
+    terminalAndBash: true,
+  }
+  private thinkingEffort: 'auto' | 'max' | 'high' | 'balanced' | 'low' = 'auto'
+  private readonly customModels: Array<{ id: string; name: string; desc: string }> = []
+  private readonly customApiKeys = new Map<string, string>()
 
   constructor(ctx: RouteContext) {
     this.ctx = ctx
@@ -206,6 +284,7 @@ export class ApiRouter {
             engine: muse.engineKind,
             model: muse.model,
           },
+          busy: this.activeEngineSessions.get(sessionId)?.busy === true,
         }
         this.sendJson(res, 200, { ok: true, session: detail })
         return true
@@ -247,6 +326,9 @@ export class ApiRouter {
         const sessionId = cancelMatch[1]!
         const active = this.activeEngineSessions.get(sessionId)
         if (active?.busy) {
+          // Cancelling the turn settles any pending engine permission request
+          // fail-closed (the engine gets a deny, not a hang).
+          active.approvals.abort('turn cancelled by operator')
           await active.session.interrupt()
           active.busy = false
           this.ctx.broadcaster.broadcast({
@@ -328,7 +410,9 @@ export class ApiRouter {
 
       // 11. Approvals list
       if (pathname === '/api/approvals' && method === 'GET') {
-        this.ctx.store.expirePendingApprovals(new Date().toISOString(), this.ctx.projectId)
+        // Shared sweep: flips overdue records, appends approval.expired events
+        // and wakes any engine session waiting on them (fail-closed).
+        sweepExpiredApprovals(this.ctx.store, this.ctx.projectId, new Date().toISOString())
         const approvals = this.ctx.store.listApprovalsByProject(this.ctx.projectId)
         this.sendJson(res, 200, { ok: true, approvals })
         return true
@@ -545,11 +629,202 @@ export class ApiRouter {
               const adapter = getEngineAdapter(muse.engineKind)
               modelsByEngine[muse.engineKind] = await adapter.listModels()
             } catch {
-              modelsByEngine[muse.engineKind] = [{ id: muse.model, source: 'config' }]
+              modelsByEngine[muse.engineKind] = [{ id: muse.model, source: 'static' }]
             }
           }
         }
+        if (this.customModels.length > 0) {
+          modelsByEngine['custom'] = this.customModels
+        }
         this.sendJson(res, 200, { ok: true, models: modelsByEngine })
+        return true
+      }
+
+      // 19. MCP connection registry
+      if (pathname === '/api/mcp' && method === 'GET') {
+        this.sendJson(res, 200, this.mcpStatusResponse())
+        return true
+      }
+
+      // 20. Switch a Muse's model (persisted; restarts the live engine session)
+      const modelMatch = pathname.match(/^\/api\/muses\/([^/]+)\/model$/)
+      if (modelMatch && method === 'POST') {
+        const museId = modelMatch[1]!
+        const payload = await this.readJsonBody<{ model?: string }>(req)
+        const requested = payload.model?.trim()
+        if (!requested) {
+          this.sendJson(res, 400, { ok: false, error: 'model is required' })
+          return true
+        }
+        const muse = this.ctx.store.getMuse(museId)
+        if (!muse) {
+          this.sendJson(res, 404, { ok: false, error: `muse '${museId}' not found` })
+          return true
+        }
+        const isCustom = this.customModels.some((m) => m.id === requested)
+        const adapter = engineAdapterForMuse(muse)
+        if (!isCustom && adapter.capabilities().modelList) {
+          const available = await adapter.listModels()
+          const known = available.some((m) => m.id === requested || m.label === requested)
+          if (!known && available.length > 0) {
+            this.sendJson(res, 400, {
+              ok: false,
+              error: `model '${requested}' is not offered by engine '${muse.engineKind}'`,
+              available: available.map((m) => m.id),
+            })
+            return true
+          }
+        }
+        // Persisted on the Muse record (the same store write `pluton chat`'s
+        // `/model` command performs) and applied to the live engine session.
+        this.ctx.store.updateMuseModel(muse.id, requested)
+        const restarted = await this.restartEngineSessionForMuse(muse.id, requested)
+        this.sendJson(res, 200, {
+          ok: true,
+          museId: muse.id,
+          model: requested,
+          engineSessionRestarted: restarted,
+        })
+        return true
+      }
+
+      // 21. Start a supervised run in the background (SPA Build mode)
+      const runStartMatch = pathname.match(/^\/api\/runs\/([^/]+)\/start$/)
+      if (runStartMatch && method === 'POST') {
+        const runId = runStartMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        if (this.activeRunTasks.has(runId)) {
+          this.sendJson(res, 409, { ok: false, error: `run '${runId}' is already running` })
+          return true
+        }
+        if (isTerminalRunState(run.state)) {
+          this.sendJson(res, 409, { ok: false, error: `run '${runId}' is '${run.state}' and cannot be started` })
+          return true
+        }
+        // Drive the EXISTING run through the manager-planning supervisor — the
+        // same path `pluton run --resume` uses, with skipManager off so the
+        // manager Muse actually plans the run. Progress reaches the SPA over
+        // the existing run_state/task_state SSE frames.
+        this.activeRunTasks.set(runId, runId)
+        void resumeRun(this.projectContext(), runId, { skipManager: false }).then(
+          () => {
+            this.activeRunTasks.delete(runId)
+          },
+          (err) => {
+            this.activeRunTasks.delete(runId)
+            this.failRun(runId, err)
+          },
+        )
+        this.sendJson(res, 202, { ok: true, status: 'running', runId })
+        return true
+      }
+
+      // 22. Cancel a running supervised run (durable cancel, same path as the CLI)
+      const runCancelMatch = pathname.match(/^\/api\/runs\/([^/]+)\/cancel$/)
+      if (runCancelMatch && method === 'POST') {
+        const runId = runCancelMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const cancelled = requestRunCancel(this.ctx.store, runId, 'operator:spa')
+        this.sendJson(res, 200, { ok: true, cancelled, runId })
+        return true
+      }
+
+      // 23. Settings (Runtime policies & configuration)
+      if (pathname === '/api/settings') {
+        if (method === 'GET') {
+          this.sendJson(res, 200, {
+            ok: true,
+            settings: {
+              account: this.accountSettings,
+              permissions: this.permissionPolicies,
+              thinkingEffort: this.thinkingEffort,
+              customModels: this.customModels,
+            },
+          })
+          return true
+        }
+        if (method === 'POST') {
+          const payload = await this.readJsonBody<{
+            permissions?: Partial<PermissionPolicies>
+            thinkingEffort?: string
+          }>(req)
+          if (payload.permissions) {
+            this.permissionPolicies = {
+              ...this.permissionPolicies,
+              ...payload.permissions,
+            }
+          }
+          if (
+            payload.thinkingEffort &&
+            ['auto', 'max', 'high', 'balanced', 'low'].includes(payload.thinkingEffort.toLowerCase())
+          ) {
+            this.thinkingEffort = payload.thinkingEffort.toLowerCase() as typeof this.thinkingEffort
+          }
+          this.sendJson(res, 200, {
+            ok: true,
+            settings: {
+              account: this.accountSettings,
+              permissions: this.permissionPolicies,
+              thinkingEffort: this.thinkingEffort,
+              customModels: this.customModels,
+            },
+          })
+          return true
+        }
+      }
+
+      // 24. Account sign in / sign out
+      if (pathname === '/api/account/signin' && method === 'POST') {
+        const payload = await this.readJsonBody<{ username?: string; email?: string }>(req)
+        const username = payload.username?.trim() || 'pluton-developer'
+        const email = payload.email?.trim() || 'developer@pluton.account'
+        this.accountSettings = { username, email, connected: true }
+        this.sendJson(res, 200, { ok: true, account: this.accountSettings })
+        return true
+      }
+
+      if (pathname === '/api/account/signout' && method === 'POST') {
+        this.accountSettings = { ...this.accountSettings, connected: false }
+        this.sendJson(res, 200, { ok: true, account: this.accountSettings })
+        return true
+      }
+
+      // 25. Custom AI model registration
+      if (pathname === '/api/models/custom' && method === 'POST') {
+        const payload = await this.readJsonBody<{ modelName?: string; apiKey?: string }>(req)
+        const modelName = payload.modelName?.trim()
+        if (!modelName) {
+          this.sendJson(res, 400, { ok: false, error: 'modelName is required' })
+          return true
+        }
+        if (!/^[a-zA-Z0-9_\-./:]+$/.test(modelName)) {
+          this.sendJson(res, 400, { ok: false, error: 'invalid model name format' })
+          return true
+        }
+        if (payload.apiKey && typeof payload.apiKey === 'string') {
+          // Stored securely in memory only, never leaked or written to plaintext storage
+          this.customApiKeys.set(modelName, payload.apiKey.trim())
+        }
+        const existing = this.customModels.find((m) => m.id === modelName)
+        if (!existing) {
+          this.customModels.push({
+            id: modelName,
+            name: modelName,
+            desc: 'Custom registered AI model',
+          })
+        }
+        this.sendJson(res, 200, {
+          ok: true,
+          model: { id: modelName, name: modelName, desc: 'Custom registered AI model' },
+        })
         return true
       }
 
@@ -558,9 +833,306 @@ export class ApiRouter {
       return true
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      // A refusal that means "someone else is driving" is a conflict, not a
+      // server fault: the run-ownership claim refusal (`ConflictError`,
+      // `request_conflict`) maps to 409 so a second client can tell the two
+      // apart. Everything else stays 500.
+      if (err instanceof PlutonError && err.code === 'request_conflict') {
+        this.sendJson(res, 409, { ok: false, error: message })
+        return true
+      }
+      // A body the server refuses to read is the caller's mistake, not a
+      // server fault: report it as such instead of a 500.
+      if (err instanceof PlutonError && err.code === 'validation_failed') {
+        const details = err.details as { kind?: string } | undefined
+        if (details?.kind === 'payload_too_large') {
+          this.sendJson(res, 413, { ok: false, error: message })
+          return true
+        }
+        this.sendJson(res, 400, { ok: false, error: message })
+        return true
+      }
       this.sendJson(res, 500, { ok: false, error: message })
       return true
     }
+  }
+
+  /**
+   * Settle a supervised run whose start failed.
+   *
+   * `resumeRun` rejects before any task exists when the substrate is not
+   * usable: the Docker daemon is unreachable, the worker image is missing or
+   * drifted, the manager engine refuses to start. The run row is already
+   * durable at that point, so it MUST reach a terminal state: a run stuck in
+   * `created` has no task to time out and no `run.` event to emit, so the
+   * client would wait on a run that can never move.
+   *
+   * The run is failed, a `run.finished` event is appended (the event log is
+   * what the SSE log-watcher derives `run_state` frames from), and the frame
+   * is broadcast immediately so the client does not wait for the next poll.
+   */
+  private failRun(runId: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err)
+    const store = this.ctx.store
+    let run: RunRecord
+    try {
+      run = store.getRun(runId)
+    } catch {
+      return
+    }
+    if (isTerminalRunState(run.state)) return
+    try {
+      store.setRunState(runId, 'failed', {
+        finalSummary: `supervised start failed: ${message}`,
+      })
+    } catch {
+      // A concurrent owner already moved the run to a terminal state; the
+      // durable state is the record and there is nothing left to settle.
+      return
+    }
+    try {
+      store.appendEvent({
+        projectId: this.ctx.projectId,
+        runId,
+        type: 'run.finished',
+        payload: { outcome: 'failure', via: 'start_failure', error: message },
+      })
+    } catch {
+      // The event log is best-effort here; the durable run state is the record.
+    }
+    this.ctx.broadcaster.broadcast({
+      type: 'run_state',
+      runId,
+      state: 'failed',
+      goal: run.goal,
+    })
+  }
+
+  private projectContext(): ProjectContext {
+    return {
+      rootDir: this.ctx.loaded.rootDir,
+      configPath: this.ctx.loaded.configPath,
+      loaded: this.ctx.loaded,
+    }
+  }
+
+  /**
+   * The shared MCP tool transport, started once per server process.
+   *
+   * Pluton is the MCP server: engine sessions connect back to this endpoint
+   * with a per-session bearer token, exactly as `pluton chat` wires it
+   * (`src/cli/commands/chat.ts:275-295`). One transport serves every SPA chat
+   * session, so there is exactly one MCP endpoint to report on.
+   */
+  private async ensureToolHttp(): Promise<ToolHttpServer> {
+    if (this.toolHttp !== null) return this.toolHttp
+    if (this.toolHttpStarting === null) {
+      this.toolHttpStarting = (async () => {
+        const server = new ToolHttpServer({
+          serverName: 'pluton-tools',
+          serverVersion: PLUTON_VERSION,
+        })
+        await server.start()
+        this.toolHttp = server
+        return server
+      })()
+    }
+    return this.toolHttpStarting
+  }
+
+  /**
+   * Build the MCP server specs handed to one engine session and register them
+   * in the live registry.
+   *
+   * Returns an empty list when the engine cannot consume MCP (the capability
+   * is reported, never faked) or when the transport cannot be started — the
+   * chat turn then runs without tools instead of failing.
+   */
+  private async mcpServersForSession(
+    sessionId: string,
+    muse: MuseRecord,
+    adapter: { capabilities(): { mcpServers: boolean } },
+  ): Promise<McpServerSpec[]> {
+    if (!adapter.capabilities().mcpServers) return []
+    let http: ToolHttpServer
+    try {
+      http = await this.ensureToolHttp()
+    } catch {
+      return []
+    }
+    const url = http.url
+    if (url === null) return []
+
+    // Operator scope (no runId): the bridge exposes the operator tool set and
+    // may start a supervised run — the same scope `pluton chat` uses.
+    let bridge: PlutonToolBridge
+    try {
+      bridge = new PlutonToolBridge({
+        store: this.ctx.store,
+        projectId: this.ctx.projectId,
+        rootDir: this.ctx.loaded.rootDir,
+        callerMuseId: muse.id,
+        limits: toolBridgeLimitsFromRuntime(this.ctx.loaded.config.runtime),
+        startRun: async (input) => {
+          const started = startRunInBackground(
+            this.projectContext(),
+            this.ctx.store,
+            this.ctx.projectId,
+            { goal: input.goal, acceptance: input.acceptance },
+            {},
+          )
+          this.activeRunTasks.set(started.runId, started.runId)
+          void started.done.then(
+            () => {
+              this.activeRunTasks.delete(started.runId)
+            },
+            () => {
+              this.activeRunTasks.delete(started.runId)
+            },
+          )
+          return { runId: started.runId }
+        },
+      })
+    } catch {
+      // A bridge the Muse may not use (disabled, wrong project) must not break
+      // the chat turn: the engine simply runs without Pluton tools.
+      return []
+    }
+
+    const { token } = http.register(bridge, {
+      museId: muse.id,
+      taskId: null,
+      runId: null,
+      label: 'spa-operator',
+    })
+    this.mcpRegistrations.set(sessionId, {
+      name: 'pluton',
+      kind: 'http',
+      sessionId,
+      museId: muse.id,
+      museName: muse.displayName,
+      engineKind: muse.engineKind,
+      token,
+    })
+    return [
+      {
+        kind: 'http',
+        name: 'pluton',
+        url: `${url}mcp`,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    ]
+  }
+
+  /**
+   * The live MCP registry, as the SPA sees it.
+   *
+   * Connected-state criteria (the runtime's own definition): the shared tool
+   * transport is listening AND a bridge session for the owning engine session
+   * is still registered AND that engine session is still open. The engine-side
+   * handshake is not part of the criteria because the engine protocol never
+   * reports it — the `detail` field says so instead of implying a handshake
+   * that never happened.
+   */
+  private mcpStatusResponse(): McpStatusResponse {
+    const servers: McpServerStatus[] = []
+    const transportUp = this.toolHttp !== null && this.toolHttp.sessionCount() > 0
+    for (const reg of this.mcpRegistrations.values()) {
+      const engineSessionLive = this.activeEngineSessions.has(reg.sessionId)
+      const connected = transportUp && engineSessionLive
+      servers.push({
+        name: reg.name,
+        kind: reg.kind,
+        state: connected ? 'connected' : 'disconnected',
+        detail: connected
+          ? 'Pluton tool bridge served over loopback HTTP; the engine-side MCP handshake is not reported by the engine protocol.'
+          : 'The engine session that owned this bridge is closed.',
+        sessionId: reg.sessionId,
+        museId: reg.museId,
+        museName: reg.museName,
+        engineKind: reg.engineKind,
+      })
+    }
+    return {
+      ok: true,
+      connected: servers.filter((s) => s.state === 'connected').length,
+      total: servers.length,
+      transportUp,
+      servers,
+    }
+  }
+
+  /**
+   * Apply a new model to a Muse's live engine session.
+   *
+   * Mirrors `ChatSession.switchModel` (`src/chat/session.ts:232-259`): the old
+   * engine session is closed and a fresh one starts on the new model, because
+   * the engine pins its model per session.
+   */
+  private async restartEngineSessionForMuse(museId: string, model: string): Promise<boolean> {
+    for (const [sessionId, entry] of this.activeEngineSessions) {
+      const session = this.ctx.store.getChatSessionOrNull(sessionId)
+      if (session === null || session.museId !== museId) continue
+      try {
+        await entry.session.close()
+      } catch {
+        // Ignore close errors: the session is replaced either way.
+      }
+      this.activeEngineSessions.delete(sessionId)
+      this.dropMcpRegistration(sessionId)
+      const muse = this.ctx.store.getMuse(museId)
+      if (muse === null) continue
+      const adapter = engineAdapterForMuse(muse)
+      const approvals = createEngineApprovalChannel({
+        store: this.ctx.store,
+        projectId: this.ctx.projectId,
+        runId: null,
+        taskId: null,
+        museId: muse.id,
+        ttlMinutes: this.ctx.loaded.config.runtime.approval_timeout_minutes,
+        onRequested: (approval) => {
+          this.ctx.broadcaster.broadcast({ type: 'approval_requested', approval })
+        },
+        onSettled: (approval, settlement) => {
+          if (settlement !== 'decision') {
+            this.ctx.broadcaster.broadcast({ type: 'approval_decided', approval })
+          }
+        },
+      })
+      try {
+        const mcpServers = await this.mcpServersForSession(sessionId, muse, adapter)
+        const next = await adapter.startSession({
+          muse: { id: muse.id, slug: muse.slug, role: muse.role, model },
+          workdir: this.ctx.loaded.rootDir,
+          env: {},
+          configDir: join(this.ctx.loaded.rootDir, '.pluton', 'engine-homes', muse.slug),
+          instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          approvals,
+          ...(mcpServers.length > 0 ? { mcpServers } : {}),
+        })
+        this.activeEngineSessions.set(sessionId, { session: next, busy: false, approvals })
+        return true
+      } catch (err) {
+        // The engine refused to start on the new model: the session stays
+        // closed, the model change itself is already persisted.
+        this.ctx.broadcaster.broadcast({
+          type: 'token',
+          sessionId,
+          text: `\n[Error: model switch failed: ${err instanceof Error ? err.message : String(err)}]`,
+        })
+        this.ctx.broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+        approvals.abort('model switch failed')
+        return false
+      }
+    }
+    return false
+  }
+
+  private dropMcpRegistration(sessionId: string): void {
+    const reg = this.mcpRegistrations.get(sessionId)
+    if (reg === undefined) return
+    this.mcpRegistrations.delete(sessionId)
+    this.toolHttp?.unregister(reg.token)
   }
 
   private async executePromptTurn(sessionId: string, museId: string, userText: string): Promise<void> {
@@ -582,23 +1154,63 @@ export class ApiRouter {
       return
     }
 
-    const adapter = getEngineAdapter(muse.engineKind)
+    const adapter = engineAdapterForMuse(muse)
 
     let entry = this.activeEngineSessions.get(sessionId)
     if (!entry) {
-      const session = await adapter.startSession({
-        muse: {
-          id: muse.id,
-          slug: muse.slug,
-          role: muse.role,
-          model: muse.model,
+      // Interactive engine policies (ask-* Muse modes) forward permission
+      // requests to the operator: the request becomes a durable approval the
+      // operator decides in the TUI or the SPA, and the SPA hears about it
+      // live over SSE. Decisions from the SPA's own route are broadcast there;
+      // this channel only adds the expiry/abort notices.
+      const approvals = createEngineApprovalChannel({
+        store,
+        projectId: this.ctx.projectId,
+        runId: null,
+        taskId: null,
+        museId: muse.id,
+        ttlMinutes: this.ctx.loaded.config.runtime.approval_timeout_minutes,
+        onRequested: (approval) => {
+          broadcaster.broadcast({ type: 'approval_requested', approval })
         },
-        workdir: this.ctx.loaded.rootDir,
-        env: {},
-        configDir: join(this.ctx.loaded.rootDir, '.pluton', 'engine-homes', muse.slug),
-        instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+        onSettled: (approval, settlement) => {
+          if (settlement !== 'decision') {
+            broadcaster.broadcast({ type: 'approval_decided', approval })
+          }
+        },
       })
-      entry = { session, busy: false }
+      let session: EngineSession
+      try {
+        const mcpServers = await this.mcpServersForSession(sessionId, muse, adapter)
+        session = await adapter.startSession({
+          muse: {
+            id: muse.id,
+            slug: muse.slug,
+            role: muse.role,
+            model: muse.model,
+          },
+          workdir: this.ctx.loaded.rootDir,
+          env: {},
+          configDir: join(this.ctx.loaded.rootDir, '.pluton', 'engine-homes', muse.slug),
+          instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          approvals,
+          ...(mcpServers.length > 0 ? { mcpServers } : {}),
+        })
+      } catch (err) {
+        // The engine refused to start (binary missing, auth missing, ...). The
+        // turn must end here: a client that never receives `turn_end` would
+        // wait for a reply that can never arrive.
+        const message = err instanceof Error ? err.message : String(err)
+        // The bridge was registered before the session start, so a failed
+        // start would leave a dead MCP registration behind. Drop it, or the
+        // registry would report a server nobody can reach.
+        this.dropMcpRegistration(sessionId)
+        broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${message}]` })
+        broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+        approvals.abort('engine session failed to start')
+        return
+      }
+      entry = { session, busy: false, approvals }
       this.activeEngineSessions.set(sessionId, entry)
     }
 
@@ -697,21 +1309,53 @@ export class ApiRouter {
   private readJsonBody<T>(req: IncomingMessage): Promise<T> {
     return new Promise((resolveResult, reject) => {
       let data = ''
-      req.on('data', (chunk) => {
+      let oversized = false
+      let totalBytes = 0
+      let settled = false
+      const fail = (err: Error): void => {
+        if (settled) return
+        settled = true
+        reject(err)
+      }
+      req.on('data', (chunk: Buffer | string) => {
+        if (settled) return
+        totalBytes += typeof chunk === 'string' ? chunk.length : chunk.byteLength
+        if (oversized) {
+          // The body is already too big: keep draining so the client can
+          // finish sending and receive the 413, but stop reading into memory.
+          // The hard stop protects the process from an endless stream.
+          if (totalBytes > MAX_REQUEST_BODY_HARD_STOP) {
+            req.destroy()
+            fail(new ValidationError('payload too large'))
+          }
+          return
+        }
         data += chunk
-        if (data.length > 1024 * 1024) {
-          req.destroy()
-          reject(new Error('payload too large (> 1MB)'))
+        if (data.length > MAX_REQUEST_BODY_CHARS) {
+          oversized = true
+          data = ''
         }
       })
       req.on('end', () => {
+        if (settled) return
+        if (oversized) {
+          // The socket is NOT destroyed here: the client must receive the
+          // 413 that says why, not a connection reset.
+          fail(
+            new ValidationError(`payload too large (> ${String(MAX_REQUEST_BODY_CHARS)} chars)`, {
+              details: { kind: 'payload_too_large', limit: MAX_REQUEST_BODY_CHARS },
+            }),
+          )
+          return
+        }
+        settled = true
         try {
           resolveResult(data ? (JSON.parse(data) as T) : ({} as T))
         } catch {
-          reject(new Error('invalid JSON payload'))
+          reject(new ValidationError('invalid JSON payload'))
         }
       })
-      req.on('error', reject)
+      req.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))))
     })
   }
 
@@ -729,6 +1373,9 @@ export class ApiRouter {
 
   async close(): Promise<void> {
     for (const [, entry] of this.activeEngineSessions) {
+      // Server shutdown settles pending engine permissions fail-closed before
+      // the sessions go away (never leave the engine waiting on us).
+      entry.approvals.abort('server shutting down')
       try {
         await entry.session.close()
       } catch {
@@ -736,5 +1383,15 @@ export class ApiRouter {
       }
     }
     this.activeEngineSessions.clear()
+    for (const sessionId of [...this.mcpRegistrations.keys()]) {
+      this.dropMcpRegistration(sessionId)
+    }
+    this.activeRunTasks.clear()
+    if (this.toolHttp !== null) {
+      const http = this.toolHttp
+      this.toolHttp = null
+      this.toolHttpStarting = null
+      await http.stop()
+    }
   }
 }

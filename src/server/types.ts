@@ -54,6 +54,11 @@ export interface SessionDetailView {
     engine: string
     model: string
   }
+  /**
+   * True while this session's engine turn is in flight. A client that reloads
+   * mid-turn reads the real state here instead of showing a false "ready".
+   */
+  busy: boolean
 }
 
 export interface RunDetailView {
@@ -89,4 +94,43 @@ export interface HealthResponse {
   projectId: string
   projectName: string
   rootDir: string
+}
+
+/**
+ * One MCP server the runtime is actually serving to an engine session.
+ *
+ * Pluton is the MCP *server* here: it hands `McpServerSpec`s to engine sessions
+ * over its own tool transport. There is no MCP client in the runtime and the
+ * engine protocol never reports a connect acknowledgement, so `state` describes
+ * what Pluton can prove — the transport is up and the bridge session is
+ * registered — and `detail` says plainly what remains unobservable.
+ */
+export interface McpServerStatus {
+  /** MCP server name as delivered to the engine (`pluton` for the tool bridge). */
+  name: string
+  /** Transport the engine was told to use. */
+  kind: 'http' | 'stdio'
+  /**
+   * `connected` = the tool transport is listening and a bridge session for this
+   * engine session is registered. `disconnected` = the transport or the owning
+   * engine session went away.
+   */
+  state: 'connected' | 'disconnected'
+  detail: string
+  /** Chat session that owns this MCP server, when it is session-scoped. */
+  sessionId: string | null
+  museId: string | null
+  museName: string | null
+  engineKind: string | null
+}
+
+export interface McpStatusResponse {
+  ok: true
+  /** Number of MCP servers meeting the connected-state criteria. */
+  connected: number
+  /** Number of registered MCP servers in total. */
+  total: number
+  /** True when the shared tool transport is accepting authenticated requests. */
+  transportUp: boolean
+  servers: McpServerStatus[]
 }
