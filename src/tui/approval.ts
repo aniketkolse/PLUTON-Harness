@@ -8,6 +8,7 @@
  * invented (no risk levels, no friendly renames of the action string).
  */
 
+import { sanitizeTerminalText } from './sanitize.ts'
 import type { Theme } from './theme.ts'
 import { displayWidth, wrapText } from './width.ts'
 
@@ -43,12 +44,23 @@ function boxChars(theme: Theme): {
     : { tl: '+-', tr: '+', bl: '+-', br: '+', hz: '-', vt: '|' }
 }
 
+/**
+ * Engine- and tool-supplied record text is untrusted: drop terminal escape
+ * sequences (ANSI/OSC) and residual C0/C1 controls (ESC, CR, BEL, …) so a
+ * record can never drive or spoof the operator's terminal — the card must not
+ * be usable to rewrite its own approve/deny affordances. `\n`/`\t` survive
+ * for the existing wrapping behavior.
+ */
+function safeText(text: string): string {
+  return sanitizeTerminalText(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
+}
+
 function compactScope(scope: unknown): string {
   if (scope === undefined || scope === null) return ''
   try {
     const s = JSON.stringify(scope)
     if (!s || s === '{}' || s === 'null') return ''
-    return s
+    return safeText(s)
   } catch {
     return ''
   }
@@ -102,11 +114,11 @@ export function renderApprovalCard(
   if (data.requestedByMuse) {
     addRow('Muse', theme.paint('accent', data.requestedByMuse))
   }
-  addRow('Action', theme.paint('input', data.action))
+  addRow('Action', theme.paint('input', safeText(data.action)))
   if (data.target) {
-    addRow('Target', data.target)
+    addRow('Target', safeText(data.target))
   }
-  addRow('Reason', theme.paint('warn', data.reason))
+  addRow('Reason', theme.paint('warn', safeText(data.reason)))
   const scope = compactScope(data.scope)
   if (scope) {
     addRow('Scope', theme.paint('dim', scope))
@@ -174,15 +186,16 @@ export function renderApprovalDetails(
   addBody('Status', data.status ?? 'pending')
   if (data.requestedByMuse) addBody('Muse', data.requestedByMuse)
   addBody('Action', data.action)
-  if (data.target) addBody('Target', data.target)
-  addBody('Reason', data.reason)
+  if (data.target) addBody('Target', safeText(data.target))
+  addBody('Reason', safeText(data.reason))
   if (data.runId) addBody('Run', data.runId)
   if (data.taskId) addBody('Task', data.taskId)
   if (data.expiresAt) addBody('Expires', data.expiresAt)
 
   let scopeText = ''
   try {
-    scopeText = data.scope !== undefined && data.scope !== null ? JSON.stringify(data.scope, null, 2) : ''
+    scopeText =
+      data.scope !== undefined && data.scope !== null ? safeText(JSON.stringify(data.scope, null, 2)) : ''
   } catch {
     scopeText = ''
   }
@@ -226,8 +239,10 @@ export function renderApprovalDetails(
 
 /**
  * Informational (non-actionable) notice for an engine-level permission request.
- * Pluton's engine adapters auto-deny such requests fail-closed; there is no
- * interactive approval channel for them, so no approve/deny affordances are shown.
+ * Depending on the adapter policy the request was either answered fail-closed
+ * (deny) or forwarded to the operator approval card; either way the decision
+ * (when the adapter reported one) is part of the description, and no
+ * approve/deny affordances are shown here.
  */
 export function renderEngineRequestNotice(
   requestId: string,
@@ -237,9 +252,9 @@ export function renderEngineRequestNotice(
 ): string[] {
   const lines: string[] = []
   lines.push(
-    `${theme.paint('warn', '⚠ engine permission request (auto-denied, fail-closed)')} ${theme.paint('dim', `[${requestId}]`)}`,
+    `${theme.paint('warn', '⚠ engine permission request')} ${theme.paint('dim', `[${requestId}]`)}`,
   )
-  for (const w of wrapText(description, Math.max(10, width - 2))) {
+  for (const w of wrapText(safeText(description), Math.max(10, width - 2))) {
     lines.push(`  ${theme.paint('dim', w)}`)
   }
   return lines

@@ -1,11 +1,23 @@
 /**
  * Pirate ship brand identity and PLUTON wordmark terminal art.
  * Provides isolated, deterministic rendering with Unicode and ASCII fallbacks.
+ *
+ * This is the TEXT rendition of the canonical PLUTON mark: the same layered
+ * silhouette the web SPA draws as SVG (`src/ui/brand-mark.ts`). The layers are
+ * listed there in drawing order — hull, sail, jib, yard, mast, skull — and the
+ * art below must keep showing them in that order so the two surfaces read as
+ * one product. Change one, change the other.
  */
 
 import type { UITheme } from './theme.ts'
 import { displayWidth } from '../tui/width.ts'
 
+/**
+ * The terminal rendition of the canonical mark.
+ *
+ * Row 0 is the skull (the `skull` layer), row 1 the yard and masthead, rows
+ * 2-3 the sail and jib, rows 4-5 the hull.
+ */
 export function getShipArt(unicode: boolean): string[] {
   if (unicode) {
     return [

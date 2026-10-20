@@ -1,6 +1,14 @@
+import { detectColorLevel, getUITheme, type ColorLevel, type UIRole } from '../ui/theme.ts'
+
 /**
  * Terminal color theme and paint tokens (ADR-0012).
  * Zero dependencies, respects NO_COLOR and provides ASCII/limited fallbacks.
+ *
+ * The terminal surface is a sibling of the graphical workspace, not a separate
+ * design system: every colour resolves through the canonical PLUTON palette
+ * in `src/ui/theme.ts`, so a truecolor terminal shows the same violet, cyan
+ * and text ramp as the browser and a 256- or 16-colour terminal degrades
+ * through one shared fallback table.
  */
 
 export type ThemeRole =
@@ -38,24 +46,29 @@ export interface Theme {
   icon(name: ThemeIcon): string
 }
 
-const CODES: Record<ThemeRole, { open: string; close: string }> = {
-  accent: { open: '\x1b[38;5;141m', close: '\x1b[39m' }, // Pluton muted violet
-  violet: { open: '\x1b[38;5;141m', close: '\x1b[39m' }, // Pluton muted violet
-  focus: { open: '\x1b[38;5;75m', close: '\x1b[39m' }, // Cool cyan/blue
-  dim: { open: '\x1b[2m', close: '\x1b[22m' }, // Dim grey
-  error: { open: '\x1b[31m', close: '\x1b[39m' }, // Red
-  warn: { open: '\x1b[33m', close: '\x1b[39m' }, // Amber / Yellow
-  success: { open: '\x1b[32m', close: '\x1b[39m' }, // Green
-  tool: { open: '\x1b[38;5;147m', close: '\x1b[39m' }, // Light violet
-  toolError: { open: '\x1b[1;31m', close: '\x1b[0m' }, // Bold red
-  user: { open: '\x1b[32m', close: '\x1b[39m' }, // Green
-  status: { open: '\x1b[2;37m', close: '\x1b[0m' }, // Dim white
-  input: { open: '\x1b[1m', close: '\x1b[22m' }, // Bold
-  approval: { open: '\x1b[1;33m', close: '\x1b[0m' }, // Bold yellow
-  border: { open: '\x1b[38;5;238m', close: '\x1b[39m' }, // Subtle charcoal
-  code: { open: '\x1b[38;5;222m', close: '\x1b[39m' }, // Warm code accent
-  header: { open: '\x1b[1;38;5;141m', close: '\x1b[0m' }, // Bold violet
-  badge: { open: '\x1b[7m', close: '\x1b[27m' }, // Inverse pill
+/**
+ * Terminal role names resolve onto the shared PLUTON role names. The terminal
+ * keeps its own vocabulary (`warn`, `dim`, `tool`); the palette decides what
+ * those roles look like.
+ */
+const TUI_TO_UI_ROLE: Record<ThemeRole, UIRole> = {
+  accent: 'accent',
+  violet: 'violet',
+  focus: 'focus',
+  dim: 'dim',
+  error: 'error',
+  warn: 'warning',
+  success: 'success',
+  tool: 'tool',
+  toolError: 'toolError',
+  user: 'user',
+  status: 'status',
+  input: 'input',
+  approval: 'approval',
+  border: 'border',
+  code: 'code',
+  header: 'header',
+  badge: 'badge',
 }
 
 const UNICODE_ICONS = {
@@ -84,28 +97,29 @@ export type { UITheme, UIRole, UIIcon, ColorLevel, BoxChars } from '../ui/theme.
 export { PALETTE, getUITheme } from '../ui/theme.ts'
 
 export function createTheme(opts: { color?: boolean } = {}): Theme {
-  let enabled: boolean
-  if (opts.color !== undefined) {
-    enabled = opts.color
+  let level: ColorLevel
+  if (opts.color === true) {
+    level = 'truecolor'
+  } else if (opts.color === false) {
+    level = 'none'
   } else {
-    const noColor = process.env['NO_COLOR']
-    if (noColor !== undefined && noColor !== '') {
-      enabled = false
-    } else {
-      enabled = process.stdout?.isTTY ?? false
-    }
+    // Auto: colour only when the session is attached to a terminal, and never
+    // under NO_COLOR. A piped or captured session stays plain.
+    const tty = process.stdout?.isTTY ?? false
+    const noColor = process.env['NO_COLOR'] !== undefined && process.env['NO_COLOR'] !== ''
+    level = tty && !noColor ? detectColorLevel() : 'none'
   }
-
+  const ui = getUITheme({ colorLevel: level })
   return {
-    enabled,
+    enabled: ui.enabled,
     paint(role: ThemeRole, text: string): string {
-      if (!enabled || !text) return text
-      const code = CODES[role]
-      if (!code) return text
-      return `${code.open}${text}${code.close}`
+      if (!ui.enabled || !text) return text
+      return ui.paint(TUI_TO_UI_ROLE[role], text)
     },
     icon(name: ThemeIcon): string {
-      return enabled ? UNICODE_ICONS[name] : ASCII_ICONS[name]
+      // The plain theme (`color: false`) is the ASCII snapshot used by the
+      // terminal tests and by no-colour terminals: it drops to ASCII marks.
+      return ui.enabled ? UNICODE_ICONS[name] : ASCII_ICONS[name]
     },
   }
 }

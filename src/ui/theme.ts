@@ -7,13 +7,16 @@ export const PALETTE = {
   bg: '#0B0C10',
   primaryAccent: '#8B5CF6',
   accentLight: '#A78BFA',
+  cyan: '#38BDF8',
   info: '#7C8CFF',
   link: '#60A5FA',
   success: '#34D399',
   error: '#F87171',
   warning: '#FBBF24',
-  textPrimary: '#E5E7EB',
-  textMuted: '#6B7280',
+  textPrimary: '#F3F0FA',
+  textSecondary: '#E2E0EC',
+  textMuted: '#A49FB4',
+  textDim: '#8E8A9F',
   border: '#2A2F45',
 } as const
 
@@ -30,7 +33,9 @@ export type UIRole =
   | 'warn'
   | 'warning'
   | 'textPrimary'
+  | 'textSecondary'
   | 'textMuted'
+  | 'textDim'
   | 'dim'
   | 'border'
   | 'focus'
@@ -83,13 +88,16 @@ const HEX_RGB: Record<string, [number, number, number]> = {
   [PALETTE.bg]: [11, 12, 16],
   [PALETTE.primaryAccent]: [139, 92, 246],
   [PALETTE.accentLight]: [167, 139, 250],
+  [PALETTE.cyan]: [56, 189, 248],
   [PALETTE.info]: [124, 140, 255],
   [PALETTE.link]: [96, 165, 250],
   [PALETTE.success]: [52, 211, 153],
   [PALETTE.error]: [248, 113, 113],
   [PALETTE.warning]: [251, 191, 36],
-  [PALETTE.textPrimary]: [229, 231, 235],
-  [PALETTE.textMuted]: [107, 114, 128],
+  [PALETTE.textPrimary]: [243, 240, 250],
+  [PALETTE.textSecondary]: [226, 224, 236],
+  [PALETTE.textMuted]: [164, 159, 180],
+  [PALETTE.textDim]: [142, 138, 159],
   [PALETTE.border]: [42, 47, 69],
 }
 
@@ -104,14 +112,16 @@ const ROLE_HEX: Record<UIRole, string> = {
   warn: PALETTE.warning,
   warning: PALETTE.warning,
   textPrimary: PALETTE.textPrimary,
+  textSecondary: PALETTE.textSecondary,
+  textMuted: PALETTE.textMuted,
+  textDim: PALETTE.textDim,
   user: PALETTE.textPrimary,
   status: PALETTE.textPrimary,
   input: PALETTE.textPrimary,
-  textMuted: PALETTE.textMuted,
-  dim: PALETTE.textMuted,
+  dim: PALETTE.textDim,
   border: PALETTE.border,
-  focus: PALETTE.accentLight,
-  code: PALETTE.textPrimary,
+  focus: PALETTE.cyan,
+  code: PALETTE.textSecondary,
   approval: PALETTE.warning,
   tool: PALETTE.info,
   toolError: PALETTE.error,
@@ -131,13 +141,15 @@ const ROLE_256: Record<UIRole, number> = {
   warn: 215,
   warning: 215,
   textPrimary: 254,
+  textSecondary: 254,
+  textMuted: 246,
+  textDim: 243,
   user: 254,
   status: 254,
   input: 254,
-  textMuted: 243,
   dim: 243,
   border: 237,
-  focus: 147,
+  focus: 75,
   code: 252,
   approval: 215,
   tool: 111,
@@ -158,13 +170,15 @@ const ROLE_16: Record<UIRole, { open: string; close: string }> = {
   warn: { open: '\x1b[33m', close: '\x1b[39m' }, // yellow
   warning: { open: '\x1b[33m', close: '\x1b[39m' },
   textPrimary: { open: '\x1b[37m', close: '\x1b[39m' }, // white
+  textSecondary: { open: '\x1b[37m', close: '\x1b[39m' },
+  textMuted: { open: '\x1b[90m', close: '\x1b[39m' }, // bright black (gray)
+  textDim: { open: '\x1b[90m', close: '\x1b[39m' },
   user: { open: '\x1b[37m', close: '\x1b[39m' },
   status: { open: '\x1b[37m', close: '\x1b[39m' },
-  input: { open: '\x1b[37m', close: '\x1b[39m' },
-  textMuted: { open: '\x1b[90m', close: '\x1b[39m' }, // bright black (gray)
+  input: { open: '\x1b[1;37m', close: '\x1b[0m' }, // bold white
   dim: { open: '\x1b[2m', close: '\x1b[22m' },
   border: { open: '\x1b[90m', close: '\x1b[39m' },
-  focus: { open: '\x1b[95m', close: '\x1b[39m' },
+  focus: { open: '\x1b[96m', close: '\x1b[39m' }, // bright cyan
   code: { open: '\x1b[37m', close: '\x1b[39m' },
   approval: { open: '\x1b[33m', close: '\x1b[39m' },
   tool: { open: '\x1b[36m', close: '\x1b[39m' },
