@@ -154,12 +154,17 @@ Stated plainly so nobody over-reads the guarantees above:
    for the run's duration (loopback in host mode). Per-session 256-bit bearer
    tokens gate every call, but the port is LAN-reachable while a container-mode
    run is live — firewall the host if the network is untrusted.
-9. **Bind-mount ownership is untested on Linux hosts.** The container user is
-   `10001:10001`; on Linux, host-owned engine homes and task checkouts may be
-   unwritable from inside the container unless ownership is aligned (uid remap
-   or chown). The 2026-10-17 container-mode live E2E proved writes work on
-   Windows Docker Desktop, whose mounts are broadly writable — which is exactly
-   why the Linux case stays open, not proven.
+9. **Bind-mount ownership is untested on Linux hosts (NOT RUN).** The sandbox
+   passes `--user <uid>:<gid>`; on POSIX non-root hosts `resolveContainerUser()`
+   selects the host uid:gid, while Windows uses `10001:10001`. If that identity
+   does not line up with host-owned engine homes and task checkouts (an explicit
+   override, a root host, or a userns-remapped daemon), writes fail. The
+   2026-10-17 container-mode live E2E proved writes on Windows Docker Desktop,
+   whose mounts are broadly writable — which is exactly why the Linux case stays
+   open, not proven. A reproducible native-Linux check and procedure now exist:
+   `tests/e2e/linux-bind-mount.e2e.test.ts` and
+   `docs/LINUX_BIND_MOUNT_VALIDATION.md`. Status remains **NOT RUN** until it
+   executes on a native Linux host; a skipped or Windows run is not evidence.
 10. **Engine-side output is redacted by key, not by value.** An engine that
     echoes a secret into its own output (e.g. a request header it was handed)
     could persist it in event payloads; redaction removes known secret-keyed

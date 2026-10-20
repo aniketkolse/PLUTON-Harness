@@ -50,7 +50,7 @@ worker terminals live inside Linux containers. See
 ### Installation
 
 ```bash
-# From package registry or local tarball
+# After publication — not on the registry yet (see docs/RELEASE.md)
 npm install -g pluton-harness
 # Or from local repository checkout
 npm install && npm run build && npm link
@@ -96,7 +96,7 @@ pluton status                      # shows recent runs and task counts from dura
 Pluton uses a two-tier desktop delivery model with **one shared graphical frontend** and **one authoritative SQLite runtime**:
 
 1. **Tier 1 (Verified Production Default): App-Mode Window Launcher**
-   - Distributed via npm (`npm install -g pluton-harness`).
+   - Intended distribution: npm (`npm install -g pluton-harness`, available after the first public release).
    - Automatically detects and launches Microsoft Edge (`msedge.exe --app=URL`) on Windows or Google Chrome/Chromium on Linux and macOS.
    - Provides a distraction-free window without URL bars or browser chrome, with native window frame and taskbar grouping.
    - Falls back gracefully to the default system browser if no Chromium engine is detected.
@@ -176,7 +176,7 @@ docs/               product, architecture, security, ADRs, reverse-engineering
 
 ## Independence & licensing
 
-Pluton-Harness is an independent project. It is **not affiliated with** Cloudroom, OpenMausBot,
+Pluton-Harness is licensed under the Apache License, Version 2.0 (see [`LICENSE`](LICENSE)). It is an independent project, **not affiliated with** Cloudroom, OpenMausBot,
 OpenCode or their maintainers; those repositories are studied for architectural patterns only.
 See [`docs/reverse-engineering/reuse-and-license-audit.md`](docs/reverse-engineering/reuse-and-license-audit.md)
 and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

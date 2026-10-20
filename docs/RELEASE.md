@@ -31,8 +31,10 @@ stays `PUBLICATION: BLOCKED` while they exist.
   the code, tests, build and package metadata satisfy the documented
   technical criteria — nothing more.
 - It **never** publishes, tags, pushes, deletes repository files, mutates
-  package metadata, or prints tokens. It creates exactly one throwaway
-  directory under the OS temp dir (permission probe) and removes it again.
+  package metadata, or prints tokens. Its filesystem writes are build output
+  under the gitignored `dist/` directory (check 8 and the `prepack` hook) and,
+  on POSIX, one throwaway permission-probe directory under the OS temp dir,
+  removed in a finally block.
 - Publication requires, in order: all owner decisions resolved, a clean
   committed tree, a green gate, the staged process below, and **explicit
   human approval** after the tarball smoke. No tooling substitutes for that
@@ -50,10 +52,10 @@ runs without credentials. Checks and their failure classes:
 
 | # | Check | Validates | Depends on | Reports as |
 |---|---|---|---|---|
-| 1 | `working tree clean` | `git status --porcelain` is empty (`--allow-dirty` downgrades to a warning for local runs) | git, a checkout | FAIL (dirty) / BLOCKED (no git) |
+| 1 | `working tree clean` | `git status --porcelain` is empty (`--allow-dirty` lets local runs continue on a dirty tree but keeps publication blocked) | git, a checkout | FAIL (dirty) / BLOCKED (no git) |
 | 2 | `version consistency` | `package.json` version === `src/version.ts` | — | FAIL |
 | 3 | `package name and executable mapping` | `pluton-harness` → `bin/pluton.js` contract used by README | — | FAIL |
-| 4 | `engine requirement declared` | `engines.node` present and satisfied by the running Node | — | FAIL |
+| 4 | `engine requirement declared` | `engines.node` present with a `>=<major>` floor that the running Node's major version satisfies (only the major is compared, not the full declared range) | — | FAIL |
 | 5 | `lockfile consistency` | `package-lock.json` v3+, name/version/dependency maps match `package.json` | — | FAIL |
 | 6 | `documentation links resolve` | every relative link in `README.md` / `THIRD_PARTY_NOTICES.md` exists in the repo | — | FAIL |
 | 7 | `npm run check` | typecheck + full vitest suite | ~2 min | FAIL |
@@ -62,7 +64,7 @@ runs without credentials. Checks and their failure classes:
 | 10 | `package contents: no dev/local artifacts` | no tests, `node_modules`, `.pluton/`, databases, logs, tarballs or `.env` files | — | FAIL |
 | 11 | `package contents: no local paths or credentials` | shipped files contain no host home/checkout paths, OS user-profile paths or credential-shaped strings | — | FAIL |
 | 12 | `dependency audit (production)` | `npm audit --omit=dev` reports 0 vulnerabilities | npm registry (network) | PASS / FAIL / **NOT TESTED** (registry unreachable) |
-| 13 | `file permission enforcement (POSIX 0600)` | the platform really honors `0600` (token/instance files depend on it) | POSIX filesystem | PASS / FAIL / **NOT TESTED** on Windows |
+| 13 | `file permission enforcement (POSIX 0600)` | the platform really honors `0600` on a probe file in the OS temp directory (token/instance files rely on this; the probe does not cover the workspace/state filesystem) | POSIX filesystem | PASS / FAIL / **NOT TESTED** on Windows |
 | 14 | `owner decision: private flag` | `private: true` removed | owner | **BLOCKED** until resolved |
 | 15 | `owner decision: license` | an outbound license chosen and applied | owner | **BLOCKED** until resolved |
 
@@ -80,8 +82,11 @@ possible before the owner removes the flag.
 | `BLOCKED` | external prerequisite or owner decision prevents the check or the release | owner decision or missing infrastructure; do not publish |
 
 Exit code: `0` only when no check FAILED. `NOT TESTED` and `BLOCKED` never
-fail the technical exit code, but they stay printed with remediation and the
-`PUBLICATION:` line remains `BLOCKED` until owner decisions are resolved.
+fail the technical exit code, but they stay printed with remediation. The
+`PUBLICATION:` line is a separate decision: it reads `ELIGIBLE` only when no
+check failed, no owner/infrastructure blocker remains and no dirty-tree
+override was used; otherwise it names every condition that currently blocks
+publication.
 
 ## Supported platforms
 
@@ -118,17 +123,22 @@ npm run build                # production build into dist/
 npm run release:check        # the full gate (clean tree required)
 npm run release:check -- --allow-dirty
 npm run smoke:package        # pack → clean install (temp path with a space) → --version/--help
+                             # (installs the tarball's dependencies — registry access required)
 npm pack --dry-run --json    # inspect exactly what would be published
 npm audit --omit=dev         # production dependency audit (needs registry)
 
 # opt-in suites (excluded from `npm run check`; read their headers first):
 npx vitest run --config vitest.e2e.config.ts   # Docker + tmux E2E — set PLUTON_E2E_DOCKER=1,
                                                # requires a worker image: docker build -t pluton-worker:local docker/worker
+PLUTON_E2E_DOCKER=1 npx vitest run --config vitest.e2e.config.ts \
+  tests/e2e/linux-bind-mount.e2e.test.ts       # native Linux only — bind-mount ownership/uid assertions;
+                                               # procedure: docs/LINUX_BIND_MOUNT_VALIDATION.md
 npx vitest run --config vitest.live.config.ts  # live engine tests — requires an installed engine
 ```
 
 Docker-dependent tests check Docker explicitly (`probe()`); without the flag
-they are skipped as a suite and reported as NOT TESTED, never as passing.
+Vitest reports the suite as **skipped**. Treat skipped as NOT TESTED here —
+never as passing.
 Live-engine tests require a real engine CLI or free models; they are opt-in
 and NOT TESTED in CI.
 
@@ -140,8 +150,9 @@ dispatch, with `permissions: contents: read`, no secrets, and
 
 - **validate** (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`,
   Node 24): `npm ci` → `npm run release:check` → `npm run smoke:package`.
-  This is where checks 12–13 get their POSIX results and where the
-  cross-platform runs above become real.
+  This is where check 12 (registry-backed audit) and check 13 (POSIX
+  permissions) get their real results, and where the cross-platform runs
+  above become real.
 - **e2e-docker** (`ubuntu-latest`): builds `pluton-worker:local` from
   `docker/worker/Dockerfile`, then runs the opt-in Docker/tmux E2E with
   `PLUTON_E2E_DOCKER=1`.
@@ -217,7 +228,10 @@ window, unpublishing.
   a remote exists and the jobs execute.
 - Docker-based validation on this project so far used Docker Desktop (Linux
   containers on a Windows host): useful for the container/tmux layer, **not**
-  evidence of native Linux host behavior.
+  evidence of native Linux host behavior. The native-Linux ownership check is
+  `tests/e2e/linux-bind-mount.e2e.test.ts` (procedure:
+  `docs/LINUX_BIND_MOUNT_VALIDATION.md`); it is **NOT RUN** until executed on a
+  genuine Linux host — a skipped or Docker Desktop run is not evidence.
 - `--browser` mode exposes the session token in the address bar; mitigated by
   `Referrer-Policy: no-referrer` and loopback binding — see `docs/SECURITY.md`.
 - Cancellation of an actively streaming turn via the HTTP API is not fully
