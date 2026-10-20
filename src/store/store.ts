@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { ConflictError, InternalError, NotFoundError, ValidationError } from '../domain/errors.ts'
+import { randomBytes } from 'node:crypto'
+import { ConflictError, InternalError, NotFoundError, OwnershipLostError, StateTransitionError, ValidationError } from '../domain/errors.ts'
 import { newId } from '../domain/ids.ts'
 import { type PlanRecord, type PlanState, type PlanTask, transitionPlanState } from '../domain/plan.ts'
 import {
@@ -41,6 +42,7 @@ import {
 } from '../domain/models.ts'
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
 import { redactDeep } from '../util/redact.ts'
+import { stripControlChars, stripControlDeep } from '../util/sanitize.ts'
 import { withTx } from './db.ts'
 
 /**
@@ -103,6 +105,20 @@ function stringifyJson(v: unknown): string {
 }
 
 const nowIso = (): string => new Date().toISOString()
+
+/**
+ * `EXISTS` fragment appended to a fenced statement's WHERE (or used as an
+ * INSERT ... SELECT's WHERE): it proves, inside the same statement, that the
+ * `runs` row still carries the fence's supervisor token. A statement that
+ * matches no row is therefore the durable proof that this process lost
+ * ownership — no separate check, no read-modify-write window.
+ */
+function fenceClause(fence: SupervisorFence): { sql: string; params: [string, string] } {
+  return {
+    sql: 'EXISTS (SELECT 1 FROM runs WHERE id = ? AND supervisor_token = ?)',
+    params: [fence.runId, fence.token],
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Input specs
@@ -233,6 +249,36 @@ const DEFAULT_MAX_EVENT_CHARS = 8_000
 
 /** Hard cap for one persisted chat message; the tail is replaced by a marker. */
 export const MAX_CHAT_MESSAGE_CHARS = 32_000
+
+/**
+ * A supervisor's run-ownership proof: `supervisor_token` on the run row must
+ * still equal `token` or the fenced mutation is a no-op (throw or skip).
+ */
+export interface SupervisorFence {
+  runId: string
+  token: string
+}
+
+export interface SupervisorClaim {
+  token: string
+  /** True when this claim replaced an expired or NULL-heartbeat owner. */
+  tookOver: boolean
+  /** PID recorded before this claim (observability); null when previously unowned. */
+  previousPid: number | null
+}
+
+/**
+ * Patch shared by `setTaskState`/`setTaskStateIf`: `undefined` keeps the current
+ * value, an explicit `null` clears it, anything else replaces it.
+ */
+export type TaskStatePatch = {
+  attempt?: number
+  result?: JsonValue | null
+  failure?: JsonValue | null
+  assignment?: JsonValue | null
+  workspaceId?: string | null
+  engineSessionId?: string | null
+}
 
 // ---------------------------------------------------------------------------
 // Store
@@ -393,20 +439,92 @@ export class Store {
     return rows.map(rowToRun)
   }
 
+  // -- run supervisor ownership (fencing) ------------------------------------
+
+  /**
+   * Durable ownership of one run, enforced at the mutation boundary:
+   * - Each claim/renew/release is ONE statement, so SQLite's writer
+   *   serialization makes it atomic: two supervisors racing on the same run row
+   *   can never both win, and a suspended owner cannot write after takeover.
+   * - The `runs` row is the only authority. `supervisor_token` is the fencing
+   *   token; the only way in is heartbeat expiry (or a NULL heartbeat).
+   * - The boundary is intentional: unfenced writes are the control plane
+   *   (operator/tool actions, routes, chat) — state-driven by design. Only
+   *   supervisor duty paths pass a fence. On any doubt the claim fails closed.
+   */
+
+  /**
+   * Claim the run for `pid`. Returns null — no waiting, no queueing — when a
+   * live owner holds it: takeover is possible only once the previous heartbeat
+   * is at or before `nowMs - ttlMs` (a NULL heartbeat counts as expired).
+   */
+  claimRunSupervisor(runId: string, opts: { pid: number; ttlMs: number; nowMs?: number }): SupervisorClaim | null {
+    const previous = this.getRun(runId) // NotFoundError before any write
+    const now = opts.nowMs ?? Date.now()
+    const cutoff = now - opts.ttlMs
+    const token = randomBytes(16).toString('hex')
+    const res = this.db
+      .prepare(
+        `UPDATE runs SET supervisor_pid = ?, supervisor_token = ?, supervisor_heartbeat_at = ?
+         WHERE id = ? AND (supervisor_token IS NULL OR supervisor_heartbeat_at IS NULL OR supervisor_heartbeat_at <= ?)`,
+      )
+      .run(opts.pid, token, now, runId, cutoff)
+    if (Number(res.changes) !== 1) return null
+    return { token, tookOver: previous.supervisorToken !== null, previousPid: previous.supervisorPid }
+  }
+
+  /** Heartbeat CAS: only the current token may advance its own heartbeat. */
+  renewRunSupervisor(runId: string, token: string, nowMs?: number): boolean {
+    const res = this.db
+      .prepare('UPDATE runs SET supervisor_heartbeat_at = ? WHERE id = ? AND supervisor_token = ?')
+      .run(nowMs ?? Date.now(), runId, token)
+    return Number(res.changes) === 1
+  }
+
+  /** Clear the claim; an old owner's release can never clear the new owner's. */
+  releaseRunSupervisor(runId: string, token: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE runs SET supervisor_pid = NULL, supervisor_token = NULL, supervisor_heartbeat_at = NULL
+         WHERE id = ? AND supervisor_token = ?`,
+      )
+      .run(runId, token)
+    return Number(res.changes) === 1
+  }
+
+  /**
+   * Classification for the error path of a 0-row fenced CAS: the mutation was
+   * atomically gated already, this re-read only decides throw-vs-null.
+   */
+  private assertFenceAtEnd(fence: SupervisorFence | undefined): void {
+    if (!fence) return
+    const row = this.db.prepare('SELECT supervisor_token FROM runs WHERE id = ?').get(fence.runId) as Row | undefined
+    if (!row || nstr(row, 'supervisor_token') !== fence.token) throw new OwnershipLostError(fence.runId)
+  }
+
   setRunState(
     id: string,
     to: RunState,
     patch: { supervisorPid?: number | null; finalSummary?: string | null } = {},
+    fence?: SupervisorFence,
   ): RunRecord {
     const run = this.getRun(id)
-    assertRunTransition(run.state, to)
+    try {
+      assertRunTransition(run.state, to)
+    } catch (e) {
+      // Fence-first classification (A-F4): a stale owner still reads its loss
+      // when the pre-read also makes the requested transition illegal.
+      this.assertFenceAtEnd(fence)
+      throw e
+    }
     const now = nowIso()
     const startedAt = run.startedAt ?? (to === 'active' ? now : null)
     const completedAt = isTerminalRunState(to) ? (run.completedAt ?? now) : run.completedAt
-    this.db
+    const guard = fence ? fenceClause(fence) : null
+    const res = this.db
       .prepare(
         `UPDATE runs SET state = ?, supervisor_pid = ?, started_at = ?, completed_at = ?, final_summary = ?
-         WHERE id = ?`,
+         WHERE id = ? AND state = ?${guard ? ` AND ${guard.sql}` : ''}`,
       )
       .run(
         to,
@@ -415,7 +533,16 @@ export class Store {
         completedAt,
         patch.finalSummary !== undefined ? patch.finalSummary : run.finalSummary,
         id,
+        run.state,
+        ...(guard ? guard.params : []),
       )
+    if (Number(res.changes) !== 1) {
+      // The pre-read state is repeated in the WHERE clause, so a control-plane
+      // write that committed in between can never be resurrected. Fence first:
+      // a stale owner's miss is ownership loss, not a state conflict.
+      this.assertFenceAtEnd(fence)
+      throw new StateTransitionError(run.state, to, 'run', `run '${id}': durable state changed concurrently`)
+    }
     return this.getRun(id)
   }
 
@@ -479,27 +606,25 @@ export class Store {
     return num(row, 'n')
   }
 
-  setTaskState(
-    id: string,
-    to: TaskState,
-    patch: {
-      attempt?: number
-      result?: JsonValue | null
-      failure?: JsonValue | null
-      workspaceId?: string | null
-      engineSessionId?: string | null
-    } = {},
-  ): TaskRecord {
+  setTaskState(id: string, to: TaskState, patch: TaskStatePatch = {}, fence?: SupervisorFence): TaskRecord {
     const task = this.getTask(id)
-    assertTransition(task.state, to)
+    try {
+      assertTransition(task.state, to)
+    } catch (e) {
+      // Fence-first classification (A-F4): a stale owner still reads its loss
+      // when the pre-read also makes the requested transition illegal.
+      this.assertFenceAtEnd(fence)
+      throw e
+    }
     const now = nowIso()
     const startedAt = task.startedAt ?? (to === 'running' ? now : null)
     const completedAt = TERMINAL_TASK_STATES.has(to) ? (task.completedAt ?? now) : task.completedAt
-    this.db
+    const guard = fence ? fenceClause(fence) : null
+    const res = this.db
       .prepare(
         `UPDATE tasks SET state = ?, attempt = ?, workspace_id = ?, engine_session_id = ?,
-                          result_json = ?, failure_json = ?, started_at = ?, completed_at = ?
-         WHERE id = ?`,
+                          result_json = ?, failure_json = ?, assignment_json = ?, started_at = ?, completed_at = ?
+         WHERE id = ? AND state = ?${guard ? ` AND ${guard.sql}` : ''}`,
       )
       .run(
         to,
@@ -508,10 +633,79 @@ export class Store {
         patch.engineSessionId !== undefined ? patch.engineSessionId : task.engineSessionId,
         patch.result !== undefined ? (patch.result === null ? null : stringifyJson(patch.result)) : task.result === null ? null : stringifyJson(task.result),
         patch.failure !== undefined ? (patch.failure === null ? null : stringifyJson(patch.failure)) : task.failure === null ? null : stringifyJson(task.failure),
+        patch.assignment !== undefined ? (patch.assignment === null ? null : stringifyJson(patch.assignment)) : task.assignment === null ? null : stringifyJson(task.assignment),
         startedAt,
         completedAt,
         id,
+        task.state,
+        ...(guard ? guard.params : []),
       )
+    if (Number(res.changes) !== 1) {
+      // The pre-read state is repeated in the WHERE clause, so a control-plane
+      // write that committed in between can never be resurrected. Fence first:
+      // a stale owner's miss is ownership loss, not a state conflict.
+      this.assertFenceAtEnd(fence)
+      throw new StateTransitionError(task.state, to, 'task', `task '${id}': durable state changed concurrently`)
+    }
+    return this.getTask(id)
+  }
+
+  /**
+   * Compare-and-swap task transition: only moves when the task is currently in
+   * `from`. A mismatch (a lost race — e.g. a repeated dispatch, or another
+   * supervisor) returns null without throwing or mutating; an illegal `to`
+   * transition from the matching state still throws. The UPDATE repeats the
+   * expected state in its WHERE clause, so two claimants can never both win.
+   * The CAS covers the state column only: timestamps and patch defaults are
+   * still derived from the pre-update snapshot read above. With a fence, every
+   * miss — pre-read mismatch or 0-row CAS — is classified against the run's
+   * current token, so a stale owner throws instead of reading a silent null.
+   */
+  setTaskStateIf(
+    id: string,
+    from: TaskState,
+    to: TaskState,
+    patch: TaskStatePatch = {},
+    fence?: SupervisorFence,
+  ): TaskRecord | null {
+    const task = this.getTask(id)
+    if (task.state !== from) {
+      // A pre-read mismatch is an ordinary CAS miss only while this process is
+      // still the owner; a stale owner gets the durable loss signal.
+      this.assertFenceAtEnd(fence)
+      return null
+    }
+    assertTransition(from, to)
+    const now = nowIso()
+    const startedAt = task.startedAt ?? (to === 'running' ? now : null)
+    const completedAt = TERMINAL_TASK_STATES.has(to) ? (task.completedAt ?? now) : task.completedAt
+    const guard = fence ? fenceClause(fence) : null
+    const res = this.db
+      .prepare(
+        `UPDATE tasks SET state = ?, attempt = ?, workspace_id = ?, engine_session_id = ?,
+                          result_json = ?, failure_json = ?, assignment_json = ?, started_at = ?, completed_at = ?
+         WHERE id = ? AND state = ?${guard ? ` AND ${guard.sql}` : ''}`,
+      )
+      .run(
+        to,
+        patch.attempt !== undefined ? patch.attempt : task.attempt,
+        patch.workspaceId !== undefined ? patch.workspaceId : task.workspaceId,
+        patch.engineSessionId !== undefined ? patch.engineSessionId : task.engineSessionId,
+        patch.result !== undefined ? (patch.result === null ? null : stringifyJson(patch.result)) : task.result === null ? null : stringifyJson(task.result),
+        patch.failure !== undefined ? (patch.failure === null ? null : stringifyJson(patch.failure)) : task.failure === null ? null : stringifyJson(task.failure),
+        patch.assignment !== undefined ? (patch.assignment === null ? null : stringifyJson(patch.assignment)) : task.assignment === null ? null : stringifyJson(task.assignment),
+        startedAt,
+        completedAt,
+        id,
+        from,
+        ...(guard ? guard.params : []),
+      )
+    if (Number(res.changes) !== 1) {
+      // A state-CAS miss stays a plain null; only a missed fence throws — the
+      // two losses must remain distinguishable to the caller.
+      this.assertFenceAtEnd(fence)
+      return null
+    }
     return this.getTask(id)
   }
 
@@ -555,14 +749,17 @@ export class Store {
 
   // -- workspaces (per-task / integration checkouts, ADR-0005) ---------------
 
-  createWorkspace(spec: NewWorkspaceSpec): WorkspaceRecord {
+  createWorkspace(spec: NewWorkspaceSpec, fence?: SupervisorFence): WorkspaceRecord {
     const id = newId('workspace')
     const now = nowIso()
-    this.db
+    const guard = fence ? fenceClause(fence) : null
+    // INSERT ... SELECT + fence: zero rows inserted is a missed fence (the
+    // columns always carry a value), never a legitimate no-op.
+    const res = this.db
       .prepare(
         `INSERT INTO workspaces (id, project_id, run_id, task_id, muse_id, kind, path, branch, base_commit,
                                  head_commit, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`,
+         ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`}`,
       )
       .run(
         id,
@@ -576,7 +773,9 @@ export class Store {
         spec.baseCommit,
         now,
         now,
+        ...(guard ? guard.params : []),
       )
+    if (fence && Number(res.changes) !== 1) throw new OwnershipLostError(fence.runId)
     return this.getWorkspace(id)
   }
 
@@ -614,17 +813,21 @@ export class Store {
   updateWorkspace(
     id: string,
     patch: { headCommit?: string | null; state?: WorkspaceRecord['state'] } = {},
+    fence?: SupervisorFence,
   ): WorkspaceRecord {
     const ws = this.getWorkspace(id)
     const now = nowIso()
-    this.db
-      .prepare('UPDATE workspaces SET head_commit = ?, state = ?, updated_at = ? WHERE id = ?')
+    const guard = fence ? fenceClause(fence) : null
+    const res = this.db
+      .prepare(`UPDATE workspaces SET head_commit = ?, state = ?, updated_at = ? WHERE id = ?${guard ? ` AND ${guard.sql}` : ''}`)
       .run(
         patch.headCommit !== undefined ? patch.headCommit : ws.headCommit,
         patch.state ?? ws.state,
         now,
         id,
+        ...(guard ? guard.params : []),
       )
+    if (fence && Number(res.changes) !== 1) throw new OwnershipLostError(fence.runId)
     return this.getWorkspace(id)
   }
 
@@ -782,14 +985,19 @@ export class Store {
 
   // -- approvals (human gate, prompt §4/§7) ----------------------------------
 
-  createApproval(spec: NewApprovalSpec): ApprovalRecord {
+  createApproval(spec: NewApprovalSpec, fence?: SupervisorFence): ApprovalRecord {
     const id = newId('approval')
     const now = nowIso()
-    this.db
+    const guard = fence ? fenceClause(fence) : null
+    // Persistence boundary: approval text is model/engine-authored. Strip
+    // terminal control bytes and bidi controls here — the single choke point
+    // every writer (tool bridge, engine channel, gate) goes through — so no
+    // stored string can drive a terminal when a CLI/TUI/SPA later renders it.
+    const res = this.db
       .prepare(
         `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
                                  status, decided_by, decided_at, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
+         ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`}`,
       )
       .run(
         id,
@@ -797,12 +1005,14 @@ export class Store {
         spec.runId,
         spec.taskId,
         spec.requestedByMuseId,
-        spec.action,
-        spec.reason,
-        stringifyJson(spec.scope),
+        stripControlChars(spec.action),
+        stripControlChars(spec.reason),
+        stringifyJson(stripControlDeep(spec.scope)),
         spec.expiresAt ?? null,
         now,
+        ...(guard ? guard.params : []),
       )
+    if (fence && Number(res.changes) !== 1) throw new OwnershipLostError(fence.runId)
     return this.getApproval(id)
   }
 
@@ -984,7 +1194,7 @@ export class Store {
 
   // -- events ----------------------------------------------------------------
 
-  appendEvent(input: AppendEventInput): EventRecord {
+  appendEvent(input: AppendEventInput, fence?: SupervisorFence): EventRecord {
     const payload = redactDeep(input.payload ?? {})
     const payloadJson = canonicalJson(payload)
     const maxChars = input.maxChars ?? DEFAULT_MAX_EVENT_CHARS
@@ -996,10 +1206,11 @@ export class Store {
     }
     const id = newId('event')
     const now = nowIso()
+    const guard = fence ? fenceClause(fence) : null
     const res = this.db
       .prepare(
         `INSERT INTO events (id, project_id, run_id, task_id, muse_id, type, payload_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
         id,
@@ -1010,7 +1221,9 @@ export class Store {
         input.type,
         payloadJson,
         now,
+        ...(guard ? guard.params : []),
       )
+    if (fence && Number(res.changes) !== 1) throw new OwnershipLostError(fence.runId)
     const seq = Number(res.lastInsertRowid)
     return {
       seq,
@@ -1352,21 +1565,27 @@ export class Store {
   }
 
   // --- File Leases ---
-  recordLease(lease: {
-    id: string
-    runId: string
-    taskId: string
-    museId: string
-    path: string
-    symbols?: string[]
-    acquiredAt?: string
-    state?: 'active' | 'released'
-  }): void {
+  recordLease(
+    lease: {
+      id: string
+      runId: string
+      taskId: string
+      museId: string
+      path: string
+      symbols?: string[]
+      acquiredAt?: string
+      state?: 'active' | 'released'
+    },
+    fence?: SupervisorFence,
+  ): void {
     const now = nowIso()
+    const guard = fence ? fenceClause(fence) : null
+    // Advisory/accounting write: a missed fence skips silently (callers live in
+    // finally blocks and engine event pumps — they must never throw from here).
     this.db
       .prepare(
         `INSERT OR REPLACE INTO file_leases (id, run_id, task_id, muse_id, path, symbols_json, acquired_at, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
         lease.id,
@@ -1377,12 +1596,17 @@ export class Store {
         stringifyJson(lease.symbols ?? []),
         lease.acquiredAt ?? now,
         lease.state ?? 'active',
+        ...(guard ? guard.params : []),
       )
   }
 
-  releaseLeasesForTask(taskId: string): string[] {
+  releaseLeasesForTask(taskId: string, fence?: SupervisorFence): string[] {
     const rows = this.db.prepare(`SELECT path FROM file_leases WHERE task_id = ? AND state = 'active'`).all(taskId) as Row[]
-    this.db.prepare(`UPDATE file_leases SET state = 'released' WHERE task_id = ? AND state = 'active'`).run(taskId)
+    const guard = fence ? fenceClause(fence) : null
+    const res = this.db
+      .prepare(`UPDATE file_leases SET state = 'released' WHERE task_id = ? AND state = 'active'${guard ? ` AND ${guard.sql}` : ''}`)
+      .run(taskId, ...(guard ? guard.params : []))
+    if (fence && Number(res.changes) === 0) return []
     return rows.map((r) => str(r, 'path'))
   }
 
@@ -1411,33 +1635,47 @@ export class Store {
     }))
   }
 
-  reapOrphanedLeases(activeTaskIds: Set<string>): void {
-    const rows = this.db.prepare(`SELECT id, task_id FROM file_leases WHERE state = 'active'`).all() as Row[]
-    const stmt = this.db.prepare(`UPDATE file_leases SET state = 'released' WHERE id = ?`)
+  reapOrphanedLeases(activeTaskIds: Set<string>, fence?: SupervisorFence): void {
+    // With a fence, both the read and the writes are ownership-gated AND
+    // run-scoped: a supervisor's reap must never touch another run's live
+    // leases. Without one the legacy global behavior is preserved (no other
+    // caller exists).
+    const guard = fence ? fenceClause(fence) : null
+    const selectGuard = fence && guard ? ` AND run_id = ? AND ${guard.sql}` : ''
+    const selectParams = fence && guard ? [fence.runId, ...guard.params] : []
+    const rows = this.db
+      .prepare(`SELECT id, task_id FROM file_leases WHERE state = 'active'${selectGuard}`)
+      .all(...selectParams) as Row[]
+    const stmt = this.db.prepare(`UPDATE file_leases SET state = 'released' WHERE id = ?${guard ? ` AND ${guard.sql}` : ''}`)
     for (const r of rows) {
       const taskId = str(r, 'task_id')
       if (!activeTaskIds.has(taskId)) {
-        stmt.run(str(r, 'id'))
+        stmt.run(str(r, 'id'), ...(guard ? guard.params : []))
       }
     }
   }
 
   // --- Run Usage ---
-  recordUsage(input: {
-    id?: string
-    runId: string
-    museId: string
-    taskId?: string | null
-    inputTokens?: number
-    outputTokens?: number
-    cachedTokens?: number
-    costUsd?: number
-  }): void {
+  recordUsage(
+    input: {
+      id?: string
+      runId: string
+      museId: string
+      taskId?: string | null
+      inputTokens?: number
+      outputTokens?: number
+      cachedTokens?: number
+      costUsd?: number
+    },
+    fence?: SupervisorFence,
+  ): void {
     const id = input.id ?? newId('attempt')
+    const guard = fence ? fenceClause(fence) : null
+    // Advisory/accounting write: a missed fence skips silently.
     this.db
       .prepare(
         `INSERT INTO run_usage (id, run_id, muse_id, task_id, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
         id,
@@ -1449,6 +1687,7 @@ export class Store {
         input.cachedTokens ?? 0,
         input.costUsd ?? 0.0,
         nowIso(),
+        ...(guard ? guard.params : []),
       )
   }
 
@@ -1611,6 +1850,8 @@ function rowToRun(r: Row): RunRecord {
       defaultTaskMinutes: 1,
     }),
     supervisorPid: nnum(r, 'supervisor_pid'),
+    supervisorToken: nstr(r, 'supervisor_token'),
+    supervisorHeartbeatAt: nnum(r, 'supervisor_heartbeat_at'),
     createdAt: str(r, 'created_at'),
     startedAt: nstr(r, 'started_at'),
     completedAt: nstr(r, 'completed_at'),
@@ -1638,6 +1879,7 @@ function rowToTask(r: Row): TaskRecord {
     engineSessionId: nstr(r, 'engine_session_id'),
     result: parseJsonText<JsonValue | null>(nstr(r, 'result_json'), null),
     failure: parseJsonText<JsonValue | null>(nstr(r, 'failure_json'), null),
+    assignment: parseJsonText<JsonValue | null>(nstr(r, 'assignment_json'), null),
     createdAt: str(r, 'created_at'),
     startedAt: nstr(r, 'started_at'),
     completedAt: nstr(r, 'completed_at'),

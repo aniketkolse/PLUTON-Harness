@@ -317,6 +317,23 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_verifications_task ON verifications(task_id)`,
     ],
   },
+  {
+    version: 6,
+    name: 'task-assignment-snapshot',
+    // Nullable by design, like result_json/failure_json: legacy rows and tasks
+    // that were never claimed have no assignment snapshot to report.
+    statements: [`ALTER TABLE tasks ADD COLUMN assignment_json TEXT`],
+  },
+  {
+    version: 7,
+    name: 'run-supervisor-ownership',
+    // NULL = unowned: legacy rows read as claimable, and a row with a token but
+    // a NULL heartbeat counts as stale (the claim UPDATE treats both as expired).
+    statements: [
+      `ALTER TABLE runs ADD COLUMN supervisor_token TEXT`,
+      `ALTER TABLE runs ADD COLUMN supervisor_heartbeat_at INTEGER`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

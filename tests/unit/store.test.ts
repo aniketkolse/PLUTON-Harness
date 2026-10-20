@@ -88,6 +88,8 @@ describe('migrations', () => {
       'v3:chat-sessions',
       'v4:plans',
       'v5:multi-agent-reliability',
+      'v6:task-assignment-snapshot',
+      'v7:run-supervisor-ownership',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -133,6 +135,8 @@ describe('migrations', () => {
       'v3:chat-sessions',
       'v4:plans',
       'v5:multi-agent-reliability',
+      'v6:task-assignment-snapshot',
+      'v7:run-supervisor-ownership',
     ])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
@@ -142,6 +146,59 @@ describe('migrations', () => {
     expect(() =>
       insertSandbox.run('sb_dup', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z'),
     ).toThrow(/UNIQUE constraint failed/)
+  })
+
+  it('v6 adds assignment_json to a v5 database and leaves legacy task rows reading null', () => {
+    const path = tmpDbPath('mig-v6')
+    const db = openDatabase(path)
+    openDbs.push(db)
+    // Build a v5 database (the schema shipped before the assignment snapshot)
+    // and seed a task row through the v5 columns, so the upgrade path and
+    // pre-existing rows are both exercised.
+    for (const migration of MIGRATIONS) {
+      if (migration.version > 5) continue
+      for (const sql of migration.statements) db.exec(sql)
+    }
+    setUserVersion(db, 5)
+    const ts = '2024-01-01T00:00:00.000Z'
+    db.prepare(
+      `INSERT INTO projects (id, name, root_path, config_path, default_branch, created_at, updated_at)
+       VALUES ('project_v5', 'v5', '/v5', '/v5/pluton.yaml', 'main', ?, ?)`,
+    ).run(ts, ts)
+    db.prepare(
+      `INSERT INTO muses (id, project_id, slug, display_name, role, engine_kind, model, instructions_file,
+                          workspace_policy, permissions_json, approval_mode, engine_home, enabled, created_at, updated_at)
+       VALUES ('worker-a', 'project_v5', 'worker-a', 'Worker A', 'coder', 'mock', 'mock/model-a', NULL,
+               'isolated-task-checkout', '[]', 'ask-for-sensitive-actions', '.pluton/engine-homes/worker-a', 1, ?, ?)`,
+    ).run(ts, ts)
+    db.prepare(
+      `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json, manager_muse_id,
+                         budget_json, supervisor_pid, created_at, started_at, completed_at, final_summary)
+       VALUES ('run_v5', 'project_v5', 'g', 'cli', 'tester', 'created', '[]', 'worker-a', ?, NULL, ?, NULL, NULL, NULL)`,
+    ).run(JSON.stringify(BUDGET), ts)
+    db.prepare(
+      `INSERT INTO tasks (id, run_id, parent_task_id, root_task_id, depth, title, brief, acceptance_json,
+                          assignee_muse_id, state, attempt, workspace_id, engine_session_id, result_json, failure_json,
+                          created_at, started_at, completed_at)
+       VALUES ('task_v5', 'run_v5', NULL, 'task_v5', 0, 'legacy', 'b', '[]', 'worker-a', 'queued', 0, NULL, NULL,
+               NULL, NULL, ?, NULL, NULL)`,
+    ).run(ts)
+
+    const result = migrate(db)
+    expect(result.from).toBe(5)
+    expect(result.to).toBe(SCHEMA_VERSION)
+    expect(SCHEMA_VERSION).toBe(7)
+    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership'])
+
+    const store = new Store(db)
+    const task = store.getTask('task_v5')
+    expect(task.state).toBe('queued')
+    expect(task.assignment).toBeNull()
+    // The upgraded column accepts a snapshot write and reads back.
+    const claimed = store.setTaskStateIf('task_v5', 'queued', 'admitted', {
+      assignment: { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' },
+    })
+    expect(claimed?.assignment).toEqual({ museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' })
   })
 })
 
@@ -307,6 +364,115 @@ describe('runs + tasks lifecycle', () => {
     expect(child.rootTaskId).toBe(root.id)
     expect(child.depth).toBe(1)
     expect(store.childCount(root.id)).toBe(1)
+  })
+})
+
+describe('task claim compare-and-swap (setTaskStateIf)', () => {
+  function seedRun(store: Store, projectId: string): string {
+    const run = store.createRun({
+      projectId,
+      goal: 'g',
+      origin: 'cli',
+      requestedBy: 'tester',
+      acceptanceCriteria: [],
+      managerMuseId: 'worker-a',
+      budget: BUDGET,
+    })
+    return run.id
+  }
+
+  function seedTask(store: Store, runId: string, title: string): string {
+    return store.createTask({
+      runId,
+      parentTaskId: null,
+      title,
+      brief: 'b',
+      acceptanceCriteria: [],
+      assigneeMuseId: 'worker-a',
+    }).id
+  }
+
+  it('transitions from the matching state and returns the updated, persisted record', () => {
+    const { store } = freshStore('cas')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't')
+    store.setTaskState(taskId, 'queued')
+
+    const claimed = store.setTaskStateIf(taskId, 'queued', 'admitted')
+    expect(claimed?.state).toBe('admitted')
+    expect(store.getTask(taskId).state).toBe('admitted')
+
+    // Same patch shape as setTaskState, including the startedAt stamp.
+    const running = store.setTaskStateIf(taskId, 'admitted', 'running', { engineSessionId: 'sess_1' })
+    expect(running?.engineSessionId).toBe('sess_1')
+    expect(running?.startedAt).not.toBeNull()
+    expect(store.getTask(taskId)).toEqual(running)
+  })
+
+  it('returns null without mutating when the current state does not match (NotFoundError when missing)', () => {
+    const { store } = freshStore('cas-mismatch')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't') // still 'created'
+
+    expect(store.setTaskStateIf(taskId, 'queued', 'admitted')).toBeNull()
+    expect(store.getTask(taskId).state).toBe('created')
+    expect(() => store.setTaskStateIf('task_missing', 'queued', 'admitted')).toThrow(NotFoundError)
+  })
+
+  it('still throws StateTransitionError for an illegal target from the matching state', () => {
+    const { store } = freshStore('cas-illegal')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't') // 'created'
+
+    expect(() => store.setTaskStateIf(taskId, 'created', 'running')).toThrow(StateTransitionError)
+    expect(store.getTask(taskId).state).toBe('created')
+  })
+
+  it('lets exactly one of two queued -> admitted claims win', () => {
+    const { store } = freshStore('cas-double-claim')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't')
+    store.setTaskState(taskId, 'queued')
+
+    const first = store.setTaskStateIf(taskId, 'queued', 'admitted')
+    const second = store.setTaskStateIf(taskId, 'queued', 'admitted')
+    expect(first?.state).toBe('admitted')
+    expect(second).toBeNull()
+    expect([first, second].filter((r) => r !== null)).toHaveLength(1)
+    expect(store.getTask(taskId).state).toBe('admitted')
+  })
+
+  it('stores an assignment snapshot in the claim patch and keeps it on later patches (undefined = keep)', () => {
+    const { store } = freshStore('cas-assignment')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't')
+    store.setTaskState(taskId, 'queued')
+    const assignment = { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' }
+
+    const claimed = store.setTaskStateIf(taskId, 'queued', 'admitted', { assignment })
+    expect(claimed?.assignment).toEqual(assignment)
+    expect(store.getTask(taskId).assignment).toEqual(assignment)
+
+    // A later patch that does not name the field keeps the snapshot; the
+    // result/failure fields keep their existing semantics too.
+    const running = store.setTaskState(taskId, 'running', { engineSessionId: 'sess_1', result: { ok: true } })
+    expect(running.assignment).toEqual(assignment)
+    expect(running.result).toEqual({ ok: true })
+    expect(store.getTask(taskId).assignment).toEqual(assignment)
+  })
+
+  it('clears the assignment only with an explicit null patch', () => {
+    const { store } = freshStore('cas-assignment-clear')
+    const projectId = seedProject(store)
+    const taskId = seedTask(store, seedRun(store, projectId), 't')
+    store.setTaskState(taskId, 'queued')
+    store.setTaskStateIf(taskId, 'queued', 'admitted', {
+      assignment: { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' },
+    })
+
+    const cleared = store.setTaskState(taskId, 'running', { assignment: null })
+    expect(cleared.assignment).toBeNull()
+    expect(store.getTask(taskId).assignment).toBeNull()
   })
 })
 
