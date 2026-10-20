@@ -50,5 +50,5 @@ protocols and are not bundled or modified.
 
 ## License of Pluton-Harness itself
 
-Undecided — the repository is currently `private` with `license: UNLICENSED` in `package.json`.
-This is an explicit owner decision, recorded in ADR-0011.
+Pluton-Harness is licensed under the Apache License, Version 2.0.
+See [`LICENSE`](LICENSE) in the root directory.

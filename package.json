@@ -1,10 +1,9 @@
 {
   "name": "pluton-harness",
   "version": "0.1.0",
-  "private": true,
   "description": "CLI-first, local-first orchestration control plane coordinating a team of persistent AI coding Muses across different engines, models, workspaces and terminals.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -17,7 +16,8 @@
     "docker",
     "templates",
     "README.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
   ],
   "scripts": {
     "dev": "node src/cli/main.ts",
@@ -29,6 +29,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:live": "vitest run --config vitest.live.config.ts",
     "check": "npm run typecheck && npm run test",
+    "verify:assets": "node scripts/verify-assets.mjs",
     "release:check": "node scripts/release-check.mjs",
     "smoke:package": "node scripts/smoke-package.mjs"
   },

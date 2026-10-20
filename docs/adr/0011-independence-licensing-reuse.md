@@ -21,9 +21,9 @@ vendor merging, renamed clones, and any implication of affiliation.
   never used.
 - `THIRD_PARTY_NOTICES.md` lists runtime/dev dependencies and their licenses; updated when
   dependencies change.
-- Pluton's own outbound license is **left undecided** (`package.json` `license: "UNLICENSED"`,
-  repo private). Choosing a license is the owner's call; Apache-2.0 is the natural candidate
-  given the ecosystem, but this session does not make that decision on the owner's behalf.
+- Pluton's outbound license is **Apache-2.0**, decided and authorized by the owner
+  for public distribution (`package.json` `"license": "Apache-2.0"`, `LICENSE` in root,
+  and `"private": true` removed for npm package publication).
 
 ## Consequences
 
