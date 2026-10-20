@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { DockerSandboxManager } from '../../src/sandbox/docker.ts'
 import { sandboxContainerName, type SandboxSpec } from '../../src/sandbox/types.ts'
+import { resolveContainerUser } from '../../src/sandbox/user-mapping.ts'
 import { TmuxTerminalManager } from '../../src/terminal/manager.ts'
 import { taskWindowName, tmuxSessionName } from '../../src/terminal/names.ts'
 import { run } from '../../src/util/exec.ts'
@@ -60,7 +61,10 @@ describeE2e('docker sandbox + tmux E2E (opt-in)', () => {
       museId: 'e2e-muse',
       image: IMAGE,
       containerName: CONTAINER,
-      containerUser: '10001:10001',
+      // Match production: host-detected uid:gid on native POSIX hosts,
+      // 10001:10001 on Windows. The hardcoded 10001 value only worked because
+      // Docker Desktop's mounts are permissive.
+      containerUser: resolveContainerUser().containerUser,
       limits: { cpus: 1, memoryMb: 256, pids: 128 },
       mounts: [{ hostPath: tmpDir, containerPath: '/work' }],
       env: {},
