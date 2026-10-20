@@ -18,6 +18,7 @@ export const PERMISSIONS = [
   'task.delegate',
   'task.inspect',
   'task.cancel',
+  'task.request_revision',
   'result.collect',
   'muse.propose_create',
   'verification.run',
@@ -46,6 +47,8 @@ export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<MuseRole, readonly Permis
     'task.delegate',
     'task.inspect',
     'task.cancel',
+    // CS-5: manager-only — send a `failed` task back for one bounded revision.
+    'task.request_revision',
     'result.collect',
     'muse.propose_create',
     'verification.run',

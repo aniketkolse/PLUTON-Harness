@@ -68,6 +68,9 @@ describe('task state machine', () => {
 
   it('terminal states have no outgoing transitions and cannot be re-entered', () => {
     for (const s of TERMINAL_TASK_STATES) {
+      // CS-5: `failed` carries the ONE deliberate reverse edge (failed → queued,
+      // the manager's bounded revision requeue) — asserted exhaustively below.
+      if (s === 'failed') continue
       expect(allowedTransitions(s)).toHaveLength(0)
       expect(isTerminal(s)).toBe(true)
     }
@@ -76,11 +79,44 @@ describe('task state machine', () => {
     }
   })
 
+  it('offers failed → queued for the manager’s bounded revision, and exactly that one door', () => {
+    expect(canTransition('failed', 'queued')).toBe(true)
+    // The revision door is exactly one edge wide: nothing else leaves `failed`…
+    expect(allowedTransitions('failed')).toEqual(['queued'])
+    expect(canTransition('failed', 'running')).toBe(false)
+    expect(canTransition('failed', 'admitted')).toBe(false)
+    expect(canTransition('failed', 'completed')).toBe(false)
+    expect(() => assertTransition('failed', 'running')).toThrowError(StateTransitionError)
+    // …and no other terminal state gains an exit.
+    expect(canTransition('completed', 'queued')).toBe(false)
+    expect(canTransition('cancelled', 'queued')).toBe(false)
+    expect(canTransition('interrupted', 'queued')).toBe(false)
+    expect(canTransition('unknown_outcome', 'queued')).toBe(false)
+  })
+
   it('an interrupted run can become unknown_outcome, never completed', () => {
     expect(canTransition('running', 'unknown_outcome')).toBe(true)
     expect(canTransition('running', 'interrupted')).toBe(true)
     expect(canTransition('interrupted', 'completed')).toBe(false)
     expect(canTransition('unknown_outcome', 'completed')).toBe(false)
+  })
+
+  it('recovery edges: session-backed states requeue after a restart or terminalize honestly', () => {
+    // A process that died cannot resume any engine session, so `queued` is the
+    // only non-stranding recovery for the session-backed states.
+    for (const from of ['admitted', 'waiting_for_children', 'needs_input', 'needs_approval'] as const) {
+      expect(canTransition(from, 'queued')).toBe(true)
+    }
+    // An exhausted recovery must be able to record `unknown_outcome` — never
+    // route into `completed`.
+    for (const from of ['admitted', 'needs_input', 'needs_approval'] as const) {
+      expect(canTransition(from, 'unknown_outcome')).toBe(true)
+      expect(canTransition(from, 'completed')).toBe(false)
+    }
+    // Controls: the new edges open no path to a fabricated success.
+    expect(canTransition('completed', 'queued')).toBe(false)
+    expect(canTransition('queued', 'unknown_outcome')).toBe(false)
+    expect(canTransition('interrupted', 'queued')).toBe(false)
   })
 
   it('isTaskState narrows strings', () => {

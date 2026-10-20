@@ -78,6 +78,10 @@ export interface RunRecord {
   budget: RunBudget
   /** Supervisor process that owns the live run loop (PID), for stop/status. */
   supervisorPid: number | null
+  /** Opaque run-ownership fencing token; NULL = no supervisor owns this run. */
+  supervisorToken: string | null
+  /** Epoch ms of the owner's last heartbeat; NULL = unowned. */
+  supervisorHeartbeatAt: number | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null
@@ -113,6 +117,11 @@ export interface TaskRecord {
   result: JsonValue | null
   /** Last failure/uncertainty classification, bounded JSON. */
   failure: JsonValue | null
+  /**
+   * Bounded JSON snapshot `{museId, role, engine, model}` captured when the task
+   * is claimed, so history survives later muse config edits.
+   */
+  assignment: JsonValue | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null

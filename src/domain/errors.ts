@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'not_found'
   | 'request_conflict'
   | 'state_transition_invalid'
+  | 'ownership_lost'
   | 'policy_denied'
   | 'capability_unsupported'
   | 'engine_missing'
@@ -70,11 +71,32 @@ export class ConflictError extends PlutonError {
 }
 
 export class StateTransitionError extends PlutonError {
-  constructor(from: string, to: string, entity: string) {
-    super('state_transition_invalid', `invalid ${entity} transition: ${from} -> ${to}`, {
-      details: { from, to, entity },
-    })
+  /**
+   * `note` explains a durable loser that the pre-read alone cannot see (e.g. a
+   * CAS miss because another process moved the entity between the read and the
+   * UPDATE). Only the `note`-bearing message differs from the original.
+   */
+  constructor(from: string, to: string, entity: string, note?: string) {
+    super(
+      'state_transition_invalid',
+      `invalid ${entity} transition: ${from} -> ${to}${note !== undefined ? ` (${note})` : ''}`,
+      { details: { from, to, entity, ...(note !== undefined ? { note } : {}) } },
+    )
     this.name = 'StateTransitionError'
+  }
+}
+
+/**
+ * The durable `runs` row proves this process no longer owns the run: a fenced
+ * mutation matched no row because the supervisor token has been taken over.
+ * The write did not happen — the current owner's state is intact.
+ */
+export class OwnershipLostError extends PlutonError {
+  constructor(runId: string, details?: unknown) {
+    super('ownership_lost', `run '${runId}' is no longer owned by this supervisor`, {
+      details: details ?? { runId },
+    })
+    this.name = 'OwnershipLostError'
   }
 }
 

@@ -29,6 +29,7 @@ describe('validateConfig', () => {
     expect(loaded.config.project.name).toBe('demo')
     expect(loaded.config.runtime.max_concurrent_workers).toBe(3)
     expect(loaded.config.runtime.approval_timeout_minutes).toBe(60)
+    expect(loaded.config.runtime.max_revisions_per_task).toBe(1)
     expect(loaded.config.sandbox.kind).toBe('docker')
     expect(loaded.config.git.require_approval_for_main_branch_integration).toBe(true)
     expect(loaded.config.muses).toEqual({})
@@ -44,6 +45,21 @@ describe('validateConfig', () => {
   it('rejects an out-of-range approval timeout', () => {
     for (const bad of [-1, 10_081, 1.5]) {
       expect(() => validateConfig(minimal({}, { runtime: { approval_timeout_minutes: bad } }), ROOT, PATH)).toThrow(
+        ConfigError,
+      )
+    }
+  })
+
+  it('accepts an explicit manager revision cap: 0 (revisions disabled) and the maximum', () => {
+    const disabled = validateConfig(minimal({}, { runtime: { max_revisions_per_task: 0 } }), ROOT, PATH)
+    expect(disabled.config.runtime.max_revisions_per_task).toBe(0)
+    const max = validateConfig(minimal({}, { runtime: { max_revisions_per_task: 10 } }), ROOT, PATH)
+    expect(max.config.runtime.max_revisions_per_task).toBe(10)
+  })
+
+  it('rejects an out-of-range manager revision cap', () => {
+    for (const bad of [-1, 11, 1.5]) {
+      expect(() => validateConfig(minimal({}, { runtime: { max_revisions_per_task: bad } }), ROOT, PATH)).toThrow(
         ConfigError,
       )
     }

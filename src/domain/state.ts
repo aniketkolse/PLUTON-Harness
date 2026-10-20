@@ -31,10 +31,34 @@ export const TERMINAL_TASK_STATES: ReadonlySet<TaskState> = new Set([
   'unknown_outcome',
 ])
 
+/**
+ * Canonical session-backed task states (CS-2): a live engine session may be
+ * attached to a task exactly while it is one of these five. A process that
+ * dies in one of them cannot resume the task — the engine session is gone —
+ * so run quiescence and window/cleanup logic must treat every member as still
+ * in flight, and recovery must requeue rather than strand them. Consumers
+ * derive their own supersets from this set instead of copying the list.
+ */
+export const SESSION_BACKED_TASK_STATES: ReadonlySet<TaskState> = new Set([
+  'admitted',
+  'running',
+  'waiting_for_children',
+  'needs_input',
+  'needs_approval',
+])
+
+/**
+ * Task transitions. Recovery rationale (CS-2): a task left in a session-backed
+ * state ({@link SESSION_BACKED_TASK_STATES}) by a process that has since died
+ * cannot be resumed — the engine session is gone — so requeue is the only
+ * non-stranding recovery, and an exhausted recovery must terminalize honestly
+ * as `unknown_outcome` rather than fabricate a success. `completed` stays
+ * unreachable from those states.
+ */
 const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>> = {
   created: ['queued', 'cancelled'],
   queued: ['admitted', 'cancelled'],
-  admitted: ['running', 'cancelled', 'failed'],
+  admitted: ['running', 'cancelled', 'failed', 'queued', 'unknown_outcome'],
   running: [
     'waiting_for_children',
     'needs_input',
@@ -47,12 +71,20 @@ const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>> = {
     'unknown_outcome',
     'queued',
   ],
-  waiting_for_children: ['running', 'cancelled', 'interrupted', 'unknown_outcome'],
-  needs_input: ['running', 'cancelled', 'interrupted', 'failed'],
-  needs_approval: ['running', 'cancelled', 'failed'],
+  waiting_for_children: ['running', 'cancelled', 'interrupted', 'unknown_outcome', 'queued'],
+  needs_input: ['running', 'cancelled', 'interrupted', 'failed', 'queued', 'unknown_outcome'],
+  needs_approval: ['running', 'cancelled', 'failed', 'queued', 'unknown_outcome'],
   verifying: ['completed', 'failed', 'cancelled', 'interrupted', 'unknown_outcome', 'queued'],
   completed: [],
-  failed: [],
+  /**
+   * CS-5: the manager's bounded revision requeue (`failed → queued`) is the ONE
+   * deliberate reverse edge out of a terminal state: a failed task may be sent
+   * back for one more attempt (capped by `runtime.max_revisions_per_task`) with
+   * sanitized feedback recorded on the task. Every other terminal state stays
+   * frozen, and `TERMINAL_TASK_STATES` is unchanged — the revision tool, not
+   * settle/notify/recovery, is the only caller that may take this edge.
+   */
+  failed: ['queued'],
   cancelled: [],
   interrupted: [],
   unknown_outcome: [],

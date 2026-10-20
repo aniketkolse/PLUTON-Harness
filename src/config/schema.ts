@@ -54,6 +54,8 @@ export const runtimeConfigSchema = z
     default_cpu_limit: z.number().positive().max(64).default(2),
     default_memory_mb: z.number().int().min(256).max(262_144).default(4096),
     max_retries_per_task: z.number().int().min(0).max(10).default(1),
+    /** Per-task cap on manager-requested revisions of failed tasks; 0 = revisions disabled. */
+    max_revisions_per_task: z.number().int().min(0).max(10).default(1),
     /** Worker network policy: 'restricted' = bridge with DNS (not an egress filter — see docs/SECURITY.md). */
     network_policy: z.enum(['restricted', 'none', 'open']).default('restricted'),
     /** Custom Docker network for restricted policy isolation (e.g. internal network with egress disabled). */
