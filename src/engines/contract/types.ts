@@ -10,6 +10,8 @@
  *   engine-specific fields (never overwritten with Pluton ids).
  */
 
+import type { EnginePermissionChannel } from '../interactive-approval.ts'
+
 export interface EngineCapabilities {
   resumeSession: boolean
   interrupt: boolean
@@ -83,6 +85,13 @@ export interface StartSessionRequest {
   resumeToken?: string
   /** Pluton tool-bridge MCP server, when the engine supports MCP. */
   mcpServers?: McpServerSpec[]
+  /**
+   * Operator approval channel for interactive permission policies. Absent
+   * (or null) means no operator surface can answer: interactive requests fail
+   * closed immediately. The channel never changes engine capabilities — it is
+   * only consulted by a policy that explicitly forwards.
+   */
+  approvals?: EnginePermissionChannel | null
 }
 
 export interface EngineSessionInfo {

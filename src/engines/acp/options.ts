@@ -1,4 +1,5 @@
 import { ValidationError } from '../../domain/errors.ts'
+import type { JsonValue } from '../../domain/models.ts'
 import type { McpServerSpec } from '../contract/types.ts'
 
 /**
@@ -117,4 +118,41 @@ export function assertNonEmptyModel(model: string): void {
       "muse.model must be a non-empty engine model id (e.g. 'opencode/deepseek-v4.1-flash-free' or 'cbai/glm-5.2')",
     )
   }
+}
+
+const MAX_SCOPE_TEXT = 300
+const MAX_SCOPE_PATHS = 10
+
+function boundedText(text: string, max = MAX_SCOPE_TEXT): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
+}
+
+/**
+ * Bounded, sanitized scope snapshot for an interactive permission request —
+ * what the operator sees on the approval card. Only recognized fields are
+ * copied (never the raw params); strings are bounded and path lists capped.
+ * The broker applies redaction and a hard payload bound on top.
+ */
+export function permissionScope(parts: {
+  toolCall: Record<string, unknown> | null
+  optionKinds: string[]
+}): JsonValue {
+  const scope: Record<string, JsonValue> = {}
+  const toolCall = parts.toolCall
+  if (toolCall) {
+    if (typeof toolCall['kind'] === 'string') scope['toolKind'] = boundedText(toolCall['kind'])
+    if (typeof toolCall['title'] === 'string') scope['toolTitle'] = boundedText(toolCall['title'])
+    const locations = toolCall['locations']
+    if (Array.isArray(locations)) {
+      const paths: JsonValue[] = []
+      for (const raw of locations.slice(0, MAX_SCOPE_PATHS)) {
+        const location = asRecord(raw)
+        const path = location && typeof location['path'] === 'string' ? location['path'] : null
+        if (path !== null && path !== '') paths.push(boundedText(path))
+      }
+      if (paths.length > 0) scope['paths'] = paths
+    }
+  }
+  scope['optionKinds'] = parts.optionKinds.slice(0, MAX_SCOPE_PATHS)
+  return scope
 }

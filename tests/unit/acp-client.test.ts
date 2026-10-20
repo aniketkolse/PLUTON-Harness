@@ -18,6 +18,16 @@ function makeClient(agent: FakeAcpAgent, overrides: Partial<ConstructorParameter
 
 const tick = () => new Promise((r) => setTimeout(r, 5))
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (err: unknown) => void } {
+  let resolve!: (value: T) => void
+  let reject!: (err: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 describe('AcpClient transport', () => {
   it('round-trips requests and notifications over NDJSON', async () => {
     const agent = new FakeAcpAgent()
@@ -74,6 +84,85 @@ describe('AcpClient transport', () => {
       outcome: { outcome: 'selected', optionId: 'reject_once' },
     })
     await client.close()
+  })
+
+  it('awaits an async server->client request handler and answers with the correlated id', async () => {
+    const agent = new FakeAcpAgent()
+    const gate = deferred<{ result: unknown } | null>()
+    const client = makeClient(agent, { onServerRequest: () => gate.promise })
+    await client.start()
+
+    agent.send({ id: 41, method: 'session/request_permission', params: { sessionId: 'ses' } })
+    await tick()
+    // The engine's request stays pending while the operator decides: no
+    // response may be written before the handler settles.
+    expect(agent.receivedResponses.find((m) => m.id === 41)).toBeUndefined()
+
+    gate.resolve({ result: { outcome: { outcome: 'selected', optionId: 'proceed_once' } } })
+    await tick()
+    expect(agent.receivedResponses.find((m) => m.id === 41)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    })
+    await client.close()
+  })
+
+  it('answers -32601 when an async handler resolves null (unsupported request)', async () => {
+    const agent = new FakeAcpAgent()
+    const client = makeClient(agent, { onServerRequest: async () => null })
+    await client.start()
+    agent.send({ id: 42, method: 'unknown/method', params: {} })
+    await tick()
+    expect(agent.receivedResponses.find((m) => m.id === 42)?.error?.code).toBe(-32601)
+    await client.close()
+  })
+
+  it('drops a server->client answer that settles while close() is still in flight', async () => {
+    const agent = new FakeAcpAgent()
+    agent.ignoreStdinEnd = true
+    const gate = deferred<{ result: unknown } | null>()
+    const client = makeClient(agent, { onServerRequest: () => gate.promise })
+    await client.start()
+    agent.send({ id: 45, method: 'session/request_permission', params: {} })
+    await tick()
+
+    // close() has begun (stdin ended, grace running) but the transport is not
+    // dead yet; a handler that resolves now must not write after close.
+    const closing = client.close(60)
+    gate.resolve({ result: { outcome: { outcome: 'selected', optionId: 'proceed_once' } } })
+    await tick()
+    expect(agent.receivedResponses.find((m) => m.id === 45)).toBeUndefined()
+    await closing
+  })
+
+  it('maps an async handler rejection to -32603 and keeps the transport alive', async () => {
+    const agent = new FakeAcpAgent()
+    const gate = deferred<{ result: unknown } | null>()
+    const client = makeClient(agent, { onServerRequest: () => gate.promise })
+    await client.start()
+    agent.send({ id: 43, method: 'session/request_permission', params: {} })
+    await tick()
+
+    gate.reject(new Error('operator channel exploded'))
+    await tick()
+    expect(agent.receivedResponses.find((m) => m.id === 43)?.error?.code).toBe(-32603)
+    expect(client.handlerErrors).toBe(1)
+    expect(client.isRunning).toBe(true)
+    await client.close()
+  })
+
+  it('drops a server->client answer that settles only after the transport closed', async () => {
+    const agent = new FakeAcpAgent()
+    const gate = deferred<{ result: unknown } | null>()
+    const client = makeClient(agent, { onServerRequest: () => gate.promise })
+    await client.start()
+    agent.send({ id: 44, method: 'session/request_permission', params: {} })
+    await tick()
+
+    await client.close()
+    gate.resolve({ result: { outcome: { outcome: 'selected', optionId: 'proceed_once' } } })
+    await tick()
+    expect(agent.receivedResponses.find((m) => m.id === 44)).toBeUndefined()
+    expect(client.isDead).toBe(true)
   })
 
   it('rejects a timed-out request but keeps the connection alive; late responses are counted as orphans', async () => {

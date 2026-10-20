@@ -67,8 +67,16 @@ export interface AcpClientOptions {
   /** Bounded stderr tail kept for diagnostics (lines × chars per line). */
   maxStderrLines?: number
   onNotification?: (method: string, params: unknown) => void
-  /** Return `null` for "unsupported" (client answers -32601). Throwing sends -32603. */
-  onServerRequest?: (method: string, params: unknown) => AcpServerRequestResponse | null
+  /**
+   * Handle a server -> client request: return a response, `null` for
+   * "unsupported" (the client answers -32601), or a promise that settles when
+   * the decision is known (e.g. an operator approval wait — the engine's
+   * request stays unanswered while it is pending). A rejection answers -32603.
+   */
+  onServerRequest?: (
+    method: string,
+    params: unknown,
+  ) => AcpServerRequestResponse | null | Promise<AcpServerRequestResponse | null>
   onStderrLine?: (line: string) => void
 }
 
@@ -107,6 +115,8 @@ export class AcpClient {
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null
   private exitResolve: (() => void) | null = null
   private readonly exitPromise: Promise<void>
+  /** True from the start of graceful close(): no more frames may be written. */
+  private closing = false
 
   /** Diagnostics (exposed for tests and error details). */
   orphanResponses = 0
@@ -271,6 +281,7 @@ export class AcpClient {
   async close(graceMs = 1_000): Promise<void> {
     const child = this.child
     if (!child) return
+    this.closing = true
     const wasRunning = this.state !== 'dead'
     if (wasRunning) {
       try {
@@ -410,21 +421,44 @@ export class AcpClient {
     const id = msg['id']
     const method = String(msg['method'])
     const params = msg['params']
-    const handler = this.opts.onServerRequest
-    let response: AcpServerRequestResponse
-    if (!handler) {
-      response = { error: { code: -32601, message: `client does not support ${method}` } }
-    } else {
-      try {
-        const handled = handler(method, params)
-        response = handled ?? { error: { code: -32601, message: `client does not support ${method}` } }
-      } catch (err) {
-        this.handlerErrors += 1
-        response = {
-          error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
-        }
-      }
+    const unsupported: AcpServerRequestResponse = {
+      error: { code: -32601, message: `client does not support ${method}` },
     }
+    const handler = this.opts.onServerRequest
+    if (!handler) {
+      this.respondToServerRequest(id, unsupported)
+      return
+    }
+    let handled: AcpServerRequestResponse | null | Promise<AcpServerRequestResponse | null>
+    try {
+      handled = handler(method, params)
+    } catch (err) {
+      this.handlerErrors += 1
+      this.respondToServerRequest(id, {
+        error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
+      })
+      return
+    }
+    if (handled !== null && typeof (handled as Promise<unknown>).then === 'function') {
+      // Async handler (e.g. waiting for an operator decision): the response is
+      // written only once it settles; the engine keeps waiting meanwhile.
+      void (handled as Promise<AcpServerRequestResponse | null>).then(
+        (response) => this.respondToServerRequest(id, response ?? unsupported),
+        (err: unknown) => {
+          this.handlerErrors += 1
+          this.respondToServerRequest(id, {
+            error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
+          })
+        },
+      )
+      return
+    }
+    this.respondToServerRequest(id, (handled as AcpServerRequestResponse | null) ?? unsupported)
+  }
+
+  /** Answer a server request; dropped once the transport is closing or dead. */
+  private respondToServerRequest(id: unknown, response: AcpServerRequestResponse): void {
+    if (this.isDead || this.closing) return
     this.write({ jsonrpc: '2.0', id, ...response })
   }
 

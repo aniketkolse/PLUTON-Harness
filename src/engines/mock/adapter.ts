@@ -1,4 +1,5 @@
 import { newId } from '../../domain/ids.ts'
+import type { JsonValue } from '../../domain/models.ts'
 import {
   defaultCapabilities,
   type EngineAdapter,
@@ -12,6 +13,11 @@ import {
   type PromptRequest,
   type StartSessionRequest,
 } from '../contract/types.ts'
+import type {
+  EnginePermissionChannel,
+  EnginePermissionDecision,
+  EnginePermissionRequest,
+} from '../interactive-approval.ts'
 
 /**
  * Deterministic mock engine for tests and dev configs. No models, no network:
@@ -37,6 +43,13 @@ export interface MockScriptStep {
    * transport-failure path. Callers must still close the session.
    */
   throw?: string
+  /**
+   * If set, the prompt asks the session's operator approval channel for
+   * permission (the ACP `session/request_permission` wait) before emitting its
+   * scripted events, and carries on with the decision. Skipped when the session
+   * has no channel — the mock stays usable standalone.
+   */
+  requestPermission?: { requestId?: string | null; description?: string; scope?: JsonValue }
 }
 
 export interface MockAdapterOptions {
@@ -49,6 +62,8 @@ export interface MockAdapterOptions {
   script?: MockScriptStep[]
   onPrompt?: (req: PromptRequest, session: EngineSessionInfo) => void
   onStartSession?: (req: StartSessionRequest) => void
+  /** Test hook: called with the decision for a scripted permission request. */
+  onPermissionDecision?: (decision: EnginePermissionDecision, request: EnginePermissionRequest) => void
   /** Test hook: called when a session is closed (leak assertions). */
   onSessionClose?: (session: EngineSessionInfo) => void
 }
@@ -63,18 +78,24 @@ class MockEngineSession implements EngineSession {
   private readonly state: MockSessionState = { interrupted: false, wake: null }
   private readonly script: MockScriptStep[]
   private readonly onPrompt: MockAdapterOptions['onPrompt']
+  private readonly onPermissionDecision: MockAdapterOptions['onPermissionDecision']
   private readonly onSessionClose: MockAdapterOptions['onSessionClose']
+  private readonly approvals: EnginePermissionChannel | null
 
   constructor(
     info: EngineSessionInfo,
     script: MockScriptStep[],
     onPrompt: MockAdapterOptions['onPrompt'],
+    onPermissionDecision: MockAdapterOptions['onPermissionDecision'],
     onSessionClose: MockAdapterOptions['onSessionClose'],
+    approvals: EnginePermissionChannel | null,
   ) {
     this.info = info
     this.script = script
     this.onPrompt = onPrompt
+    this.onPermissionDecision = onPermissionDecision
     this.onSessionClose = onSessionClose
+    this.approvals = approvals
   }
 
   private sleep(ms: number): Promise<void> {
@@ -97,6 +118,15 @@ class MockEngineSession implements EngineSession {
     yield { kind: 'status', status: 'busy' }
     const step = this.script.shift() ?? {}
     if (step.throw !== undefined) throw new Error(step.throw)
+    if (step.requestPermission !== undefined && this.approvals !== null) {
+      const request: EnginePermissionRequest = {
+        requestId: step.requestPermission.requestId ?? null,
+        description: step.requestPermission.description ?? 'mock permission request',
+        scope: step.requestPermission.scope ?? {},
+      }
+      const decision = await this.approvals.requestPermission(request)
+      this.onPermissionDecision?.(decision, request)
+    }
     for (const ev of step.events ?? []) {
       if (this.state.interrupted) break
       yield ev
@@ -118,10 +148,14 @@ class MockEngineSession implements EngineSession {
   async interrupt(): Promise<void> {
     this.state.interrupted = true
     this.state.wake?.()
+    // Teardown settles every pending permission request fail-closed (the
+    // channel is idempotent); an interrupted turn must never hold the engine.
+    this.approvals?.abort('interrupted')
   }
 
   async close(): Promise<void> {
     this.state.wake?.()
+    this.approvals?.abort('session closed')
     this.onSessionClose?.(this.info)
   }
 }
@@ -166,6 +200,13 @@ export class MockEngineAdapter implements EngineAdapter {
       resumeToken: req.resumeToken ?? `mock-resume-${newId('session')}`,
     }
     const script = [...(this.opts.script ?? [])]
-    return new MockEngineSession(info, script, this.opts.onPrompt, this.opts.onSessionClose)
+    return new MockEngineSession(
+      info,
+      script,
+      this.opts.onPrompt,
+      this.opts.onPermissionDecision,
+      this.opts.onSessionClose,
+      req.approvals ?? null,
+    )
   }
 }

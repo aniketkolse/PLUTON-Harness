@@ -16,6 +16,7 @@ import {
   ValidationError,
 } from '../../src/domain/errors.ts'
 import type { AcpSpawnFn } from '../../src/engines/acp/client.ts'
+import { controlledChannel } from '../helpers/controlled-channel.ts'
 import { FakeAcpAgent, fakeSpawn } from '../helpers/fake-acp-agent.ts'
 import { loadQwenFrames, scriptQwen, type QwenScriptOptions } from '../helpers/qwen-script.ts'
 
@@ -523,5 +524,262 @@ describe('qwen adapter: prompts and events', () => {
     await expect(collect(session.sendPrompt({ text: '   ' }))).rejects.toThrowError(ValidationError)
     await session.close()
     await expect(collect(session.sendPrompt({ text: 'late' }))).rejects.toThrowError(/closed/)
+  })
+})
+
+/** Operator channel stub with a test-controlled decision (no timers involved). */
+describe('qwen adapter: interactive operator approval forwarding', () => {
+  it('holds the engine request pending and grants exactly once on operator approval', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [], permissionOnPrompt: true })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'edit a file' })) events.push(event)
+    })()
+
+    const req = await controlled.whenRequested
+    expect(req.requestId).toBe(PERMISSION_CALL_ID)
+    expect(req.description).toContain('Writing to qwen2-write.txt')
+    // The adapter forwards a bounded, recognized-fields-only snapshot; the
+    // broker adds source/engineRequestId and does the redaction (its tests).
+    expect(req.scope).toMatchObject({ toolKind: 'edit', toolTitle: 'Writing to qwen2-write.txt' })
+    // The engine keeps waiting: nothing has been answered yet.
+    expect(agent.receivedResponses.some((m) => m.id === 9000)).toBe(false)
+
+    controlled.respond('allow')
+    await consume
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    })
+    expect(events).toContainEqual({
+      kind: 'approval_request',
+      requestId: PERMISSION_CALL_ID,
+      description: expect.stringContaining('Pluton decision: allow_once(interactive)'),
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: PERMISSION_CALL_ID, decision: 'allow_once(interactive)' }])
+    expect(events.at(-1)).toMatchObject({ kind: 'result', outcome: 'success' })
+    await session.close()
+  })
+
+  it('answers the recorded reject option when the operator denies', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [], permissionOnPrompt: true })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'edit a file' })) events.push(event)
+    })()
+    await controlled.whenRequested
+    controlled.respond('deny')
+    await consume
+
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: PERMISSION_CALL_ID, decision: 'deny(operator)' }])
+    await session.close()
+  })
+
+  it('never escalates an operator approval to allow_always (narrow scope only)', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, {
+      promptUpdates: [],
+      serverRequestDuringPrompt: {
+        method: 'session/request_permission',
+        sessionId: 'SES',
+        options: [
+          { optionId: 'proceed_always', name: 'Allow All Edits', kind: 'allow_always' },
+          { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+        ],
+        toolCall: { toolCallId: 'call_narrow', status: 'pending', title: 'Write to file', kind: 'edit' },
+      },
+    })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const consume = collect(session.sendPrompt({ text: 'edit a file' }))
+    const req = await controlled.whenRequested
+    expect(req.requestId).toBe('call_narrow')
+    controlled.respond('allow')
+    await consume
+
+    // The engine only offered allow_always: the operator's one-time approval
+    // must not become a blanket grant, so the engine's own reject option is
+    // selected instead (never allow_always).
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_narrow', decision: 'deny(no allow_once option)' }])
+    await session.close()
+  })
+
+  it('fails closed immediately when the interactive policy has no operator channel', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [], permissionOnPrompt: true })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(sessionRequest())) as QwenEngineSession
+
+    const events = await collect(session.sendPrompt({ text: 'edit a file' }))
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: PERMISSION_CALL_ID, decision: 'deny(no operator channel)' }])
+    expect(events.at(-1)).toMatchObject({ kind: 'result', outcome: 'success' })
+    await session.close()
+  })
+
+  it('interrupt() aborts a pending operator request fail-closed and answers the engine', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [], permissionOnPrompt: true })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'edit a file', timeoutMs: 5_000 })) events.push(event)
+    })()
+    await controlled.whenRequested
+
+    await session.interrupt()
+    await consume
+    expect(controlled.aborted.length).toBeGreaterThanOrEqual(1)
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    })
+    expect(events.at(-1)).toMatchObject({ kind: 'result', outcome: 'cancelled' })
+    await session.close()
+  })
+
+  it('close() aborts a pending operator request so nothing leaks or hangs', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [], permissionOnPrompt: true })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'edit a file', timeoutMs: 5_000 })) events.push(event)
+    })()
+    await controlled.whenRequested
+
+    await session.close()
+    await consume
+    expect(controlled.aborted).toContain('session closed')
+    // The fail-closed decision never reaches a closed transport, and a late
+    // operator answer after teardown is a no-op (no crash, no response).
+    expect(agent.receivedResponses.find((m) => m.id === 9000)).toBeUndefined()
+    controlled.respond('allow')
+    await Promise.resolve()
+    expect(agent.receivedResponses.find((m) => m.id === 9000)).toBeUndefined()
+  })
+
+  it('settles a pending operator request fail-closed when the engine dies mid-turn', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [] })
+    const original = agent.onMessage
+    // A prompt that sends a permission request and never resolves: the turn is
+    // still in flight when the engine process dies.
+    agent.onMessage = (msg, a) => {
+      if (msg.method === 'session/prompt') {
+        a.send({
+          id: 9000,
+          method: 'session/request_permission',
+          params: {
+            sessionId: 'SES',
+            toolCall: { toolCallId: 'call_dead', status: 'pending', title: 'Write to file', kind: 'edit' },
+            options: [
+              { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        })
+        return true
+      }
+      return original(msg, a)
+    }
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'edit a file', timeoutMs: 5_000 })) events.push(event)
+    })()
+    await controlled.whenRequested
+
+    // The engine dies while its permission request is unanswered: the wait is
+    // settled fail-closed instead of leaking an actionable row until the TTL.
+    agent.emitExit(1, null)
+    await consume
+
+    expect(controlled.aborted[0]).toBe('transport dead')
+    expect(agent.receivedResponses.find((m) => m.id === 9000)).toBeUndefined()
+    await session.close()
+  })
+
+  it('refuses a permission request that arrives after close (no wait, fail-closed answer)', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, { promptUpdates: [] })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const controlled = controlledChannel()
+    const session = (await adapter.startSession(sessionRequest({ approvals: controlled.channel }))) as QwenEngineSession
+
+    await session.close()
+    const response = await session.handleServerRequest('session/request_permission', {
+      sessionId: session.info.nativeSessionId,
+      toolCall: { toolCallId: 'call_late', status: 'pending', title: 'Write to file', kind: 'edit' },
+      options: [
+        { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+      ],
+    })
+
+    expect(response).toEqual({ result: { outcome: { outcome: 'selected', optionId: 'cancel' } } })
+    expect(controlled.requests).toHaveLength(0)
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_late', decision: 'deny(session closed)' }])
+  })
+
+  it('never auto-grants allow_always when the allow_once policy finds no one-time option', async () => {
+    const agent = new FakeAcpAgent()
+    scriptQwen(agent, {
+      promptUpdates: [],
+      serverRequestDuringPrompt: {
+        method: 'session/request_permission',
+        sessionId: 'SES',
+        options: [
+          { optionId: 'proceed_always', name: 'Allow All Edits', kind: 'allow_always' },
+          { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+        ],
+        toolCall: { toolCallId: 'call_fallback', status: 'pending', title: 'Write to file', kind: 'edit' },
+      },
+    })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'allow_once' })
+    const session = (await adapter.startSession(sessionRequest())) as QwenEngineSession
+    const events = await collect(session.sendPrompt({ text: 'edit a file' }))
+
+    // The engine only offered an "always" grant: the one-time policy must fail
+    // closed (engine reject option), never escalate to allow_always.
+    expect(agent.receivedResponses.find((m) => m.id === 9000)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_fallback', decision: 'deny(no grantable option)' }])
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: 'approval_request',
+        requestId: 'call_fallback',
+        description: expect.stringContaining('Pluton decision: deny(no grantable option)'),
+      }),
+    )
+    await session.close()
   })
 })

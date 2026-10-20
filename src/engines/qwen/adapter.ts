@@ -17,12 +17,14 @@ import {
   asRecord,
   assertNonEmptyModel,
   matchModelChoice,
+  permissionScope,
   readModeOption,
   readModelOption,
   toAcpMcpServers,
 } from '../acp/options.ts'
 import { AcpEngineSessionBase, CANCEL_GRACE_MS } from '../acp/session-base.ts'
 import { defaultCapabilities } from '../contract/types.ts'
+import type { EnginePermissionChannel, EnginePermissionDecision } from '../interactive-approval.ts'
 import type {
   EngineAdapter,
   EngineAuthStatus,
@@ -80,7 +82,7 @@ const SESSION_LOAD_TIMEOUT_MS = 120_000
 const CONFIG_SET_TIMEOUT_MS = 20_000
 const PROBE_TIMEOUT_MS = 60_000
 
-export type QwenApprovalPolicy = 'deny' | 'allow_once' | 'allow_always'
+export type QwenApprovalPolicy = 'deny' | 'allow_once' | 'allow_always' | 'interactive'
 
 export interface QwenAdapterOptions {
   /** Injection for tests: replaces node:child_process.spawn for the ACP child. */
@@ -105,7 +107,9 @@ export interface QwenAdapterOptions {
   /**
    * What Pluton does with engine permission requests. 'deny' (default) rejects
    * fail-closed and surfaces an approval_request event; allow_* selections are
-   * explicit operator choices made at adapter construction.
+   * explicit operator choices made at adapter construction; 'interactive'
+   * forwards to the session's operator approval channel and holds the engine's
+   * request open until the decision (a grant is always narrow: `allow_once`).
    */
   approvalPolicy?: QwenApprovalPolicy
   /** Session mode to set explicitly at session start (qwen defaults to 'auto'). */
@@ -137,12 +141,15 @@ export class QwenEngineSession extends AcpEngineSessionBase {
     instructions: string | null
     cancelGraceMs: number
     approvalPolicy: QwenApprovalPolicy
+    /** Required by the 'interactive' policy; other policies ignore it. */
+    permissionChannel?: EnginePermissionChannel | null
   }) {
     super({
       client: args.client,
       nativeSessionId: args.sessionId,
       pinnedModel: args.pinnedModel,
       cancelGraceMs: args.cancelGraceMs,
+      permissionChannel: args.permissionChannel ?? null,
     })
     this.approvalPolicy = args.approvalPolicy
     this.setPendingInstructions(args.instructions)
@@ -152,8 +159,13 @@ export class QwenEngineSession extends AcpEngineSessionBase {
    * Policy-driven approval handling. The engine's option kinds are respected
    * exactly; when the policy cannot be satisfied the request is denied
    * (fail-closed), never silently allowed.
+   *
+   * `interactive` (ask-* Muse modes) forwards the request to the operator
+   * approval channel and holds the engine's request open until the decision;
+   * a grant is always narrow (`allow_once`) and everything else — deny,
+   * timeout, teardown, no channel — answers the reject/cancel outcome.
    */
-  handleServerRequest(method: string, params: unknown): AcpServerRequestResponse | null {
+  async handleServerRequest(method: string, params: unknown): Promise<AcpServerRequestResponse | null> {
     if (method !== 'session/request_permission') return null
     const p = asRecord(params)
     const options: Record<string, unknown>[] = []
@@ -167,6 +179,14 @@ export class QwenEngineSession extends AcpEngineSessionBase {
       options.find((o) => o['kind'] === kind)
     const anyAllow = options.find((o) => typeof o['kind'] === 'string' && (o['kind'] as string).startsWith('allow_'))
     const reject = options.find((o) => typeof o['kind'] === 'string' && (o['kind'] as string).startsWith('reject'))
+    const toolCall = p ? asRecord(p['toolCall']) : null
+    const requestId =
+      toolCall && typeof toolCall['toolCallId'] === 'string' ? (toolCall['toolCallId'] as string) : newId('approval')
+    const title = toolCall && typeof toolCall['title'] === 'string' ? (toolCall['title'] as string) : 'permission'
+
+    if (this.approvalPolicy === 'interactive') {
+      return await this.answerInteractive({ requestId, title, toolCall, options, reject })
+    }
 
     let chosen: Record<string, unknown> | undefined
     let decision: string
@@ -176,7 +196,10 @@ export class QwenEngineSession extends AcpEngineSessionBase {
         decision = chosen === undefined ? 'deny(no grantable option)' : 'allow_always'
         break
       case 'allow_once':
-        chosen = byKind('allow_once') ?? anyAllow
+        // Never fall back to `anyAllow`: a session-persistent `allow_always`
+        // grant is broader than this policy intends, so a frame without a
+        // one-time option is denied (falls through to the reject option).
+        chosen = byKind('allow_once')
         decision = chosen === undefined ? 'deny(no grantable option)' : 'allow_once'
         break
       default:
@@ -185,21 +208,77 @@ export class QwenEngineSession extends AcpEngineSessionBase {
     }
     if (chosen === undefined && this.approvalPolicy !== 'deny') chosen = reject
 
-    const toolCall = p ? asRecord(p['toolCall']) : null
-    const requestId =
-      toolCall && typeof toolCall['toolCallId'] === 'string' ? (toolCall['toolCallId'] as string) : newId('approval')
-    const title = toolCall && typeof toolCall['title'] === 'string' ? (toolCall['title'] as string) : 'permission'
+    this.recordApproval(requestId, title, decision)
+    if (chosen && typeof chosen['optionId'] === 'string') {
+      return { result: { outcome: { outcome: 'selected', optionId: chosen['optionId'] } } }
+    }
+    return { result: { outcome: { outcome: 'cancelled' } } }
+  }
+
+  /**
+   * Interactive path: create the operator approval and wait for it (the engine
+   * stays unanswered meanwhile). Operator consent is narrow — only the
+   * engine's own one-time grant is used; a request with no `allow_once` option
+   * is cancelled rather than escalated to `allow_always`, and the channel's
+   * `deny` (including timeout/teardown) answers the reject option.
+   */
+  private async answerInteractive(parts: {
+    requestId: string
+    title: string
+    toolCall: Record<string, unknown> | null
+    options: Record<string, unknown>[]
+    reject: Record<string, unknown> | undefined
+  }): Promise<AcpServerRequestResponse> {
+    const cancelOutcome: AcpServerRequestResponse =
+      parts.reject && typeof parts.reject['optionId'] === 'string'
+        ? { result: { outcome: { outcome: 'selected', optionId: parts.reject['optionId'] } } }
+        : { result: { outcome: { outcome: 'cancelled' } } }
+
+    // A closed session must never mint a durable, actionable record: its
+    // transport is going away, so the answer would be dropped anyway.
+    if (this.isClosed) {
+      this.recordApproval(parts.requestId, parts.title, 'deny(session closed)')
+      return cancelOutcome
+    }
+
+    const channel = this.permissionChannel
+    if (!channel) {
+      this.recordApproval(parts.requestId, parts.title, 'deny(no operator channel)')
+      return cancelOutcome
+    }
+    const optionKinds = parts.options.map((o) => (typeof o['kind'] === 'string' ? (o['kind'] as string) : 'unknown'))
+    let decision: EnginePermissionDecision
+    try {
+      decision = await channel.requestPermission({
+        requestId: parts.requestId,
+        description: `engine requested permission: ${parts.title}`,
+        scope: permissionScope({ toolCall: parts.toolCall, optionKinds }),
+      })
+    } catch {
+      // The channel contract is "never rejects"; if it still does, fail closed.
+      decision = 'deny'
+    }
+    if (decision !== 'allow') {
+      this.recordApproval(parts.requestId, parts.title, 'deny(operator)')
+      return cancelOutcome
+    }
+    const allowOnce = parts.options.find((o) => o['kind'] === 'allow_once')
+    if (allowOnce && typeof allowOnce['optionId'] === 'string') {
+      this.recordApproval(parts.requestId, parts.title, 'allow_once(interactive)')
+      return { result: { outcome: { outcome: 'selected', optionId: allowOnce['optionId'] } } }
+    }
+    this.recordApproval(parts.requestId, parts.title, 'deny(no allow_once option)')
+    return cancelOutcome
+  }
+
+  /** One approval decision → diagnostics + normalized event (one per request). */
+  private recordApproval(requestId: string, title: string, decision: string): void {
     this.approvalDecisions.push({ requestId, decision })
     this.emit({
       kind: 'approval_request',
       requestId,
       description: `engine requested permission: ${title} — Pluton decision: ${decision} (approvalPolicy=${this.approvalPolicy})`,
     })
-
-    if (chosen && typeof chosen['optionId'] === 'string') {
-      return { result: { outcome: { outcome: 'selected', optionId: chosen['optionId'] } } }
-    }
-    return { result: { outcome: { outcome: 'cancelled' } } }
   }
 
   async close(): Promise<void> {
@@ -447,6 +526,7 @@ export class QwenEngineAdapter implements EngineAdapter {
         instructions: req.resumeToken ? null : (req.instructions ?? null),
         cancelGraceMs: this.opts.cancelGraceMs ?? CANCEL_GRACE_MS,
         approvalPolicy: this.opts.approvalPolicy ?? 'deny',
+        permissionChannel: req.approvals ?? null,
       })
       holder.session = session
       return session

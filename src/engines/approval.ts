@@ -1,7 +1,8 @@
 import { ValidationError } from '../domain/errors.ts'
 import type { ApprovalMode } from '../domain/models.ts'
 import type { EngineAdapter } from './contract/types.ts'
-import { QwenEngineAdapter, type QwenApprovalPolicy } from './qwen/adapter.ts'
+import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
+import { QwenEngineAdapter } from './qwen/adapter.ts'
 import { getEngineAdapter, type EngineCreateOptions } from './registry.ts'
 
 /**
@@ -21,20 +22,21 @@ import { getEngineAdapter, type EngineCreateOptions } from './registry.ts'
  * - `auto`: an LLM classifier auto-approves safe actions; risky ones ask;
  * - `yolo`: every tool is auto-approved.
  *
- * Mapping — there is no interactive operator approval channel yet (Phase 8),
- * so anything the engine still asks is answered fail-closed:
- * - `autonomous-bounded` → `auto` + allow_once: the classifier approves safe
- *   actions; whatever still asks is granted once. "Bounded" by Pluton's
- *   isolated checkout, budgets and the verification gate, not by per-action
- *   prompts.
- * - `ask-for-sensitive-actions` → `auto` + deny: safe actions pass without a
- *   prompt; sensitive ones are denied and surfaced as `approval.engine_decision`
- *   run events until an operator channel exists.
- * - `ask-always` → `default` + deny: every edit/shell asks and is denied
- *   fail-closed. A denial does not stall the turn — the engine ends it having
- *   done nothing, so the task can still record a syntactically "successful"
- *   no-op; only `approval.engine_decision` events (and an empty diff) show why.
- *   Keep `ask-always` off until Phase 8 provides an operator channel.
+ * Mapping — the interactive operator approval channel (Phase 8) exists now,
+ * so anything the engine still asks can be forwarded to the operator:
+ * - `autonomous-bounded` → qwen `auto` + allow_once, but ONLY when the runtime
+ *   can prove the session is bounded by a Pluton-owned throwaway checkout
+ *   (task sessions): the classifier approves safe actions and whatever still
+ *   asks is granted once there. A project-root session (chat/SPA/manager)
+ *   cannot prove that bound, so its residual asks go to the operator instead.
+ *   Engines with no engine-side auto mode keep `deny` fail-closed.
+ * - `ask-for-sensitive-actions` → qwen `auto` + interactive, other engines
+ *   interactive: safe actions pass without a prompt; sensitive ones become
+ *   durable operator approvals (TUI/SPA) while the engine's request is held
+ *   open. With no operator surface the adapter answers deny fail-closed.
+ * - `ask-always` → qwen `default` + interactive: every edit/shell asks and is
+ *   forwarded to the operator. A denial does not stall the turn — the engine
+ *   ends it having done nothing, and the approval record shows why.
  */
 export function engineSessionMode(engineKind: string, approvalMode: ApprovalMode): string | undefined {
   if (engineKind !== 'qwen') return undefined // engines without a mode select keep their own default
@@ -56,26 +58,76 @@ export function engineSessionMode(engineKind: string, approvalMode: ApprovalMode
   }
 }
 
-/** Permission requests that reach Pluton: deny unless the Muse's mode grants bounded autonomy. */
-export function engineApprovalPolicy(approvalMode: ApprovalMode): QwenApprovalPolicy {
-  return approvalMode === 'autonomous-bounded' ? 'allow_once' : 'deny'
+/** How a given engine answers permission requests under a Muse's approval mode. */
+export type EngineApprovalPolicy = 'deny' | 'allow_once' | 'allow_always' | 'interactive'
+
+/** Runtime-proven session isolation. Never inferred from a Muse mode name. */
+export interface EngineIsolationFacts {
+  /** True only when the session's workdir is a Pluton-owned throwaway checkout. */
+  isolatedCheckout: boolean
+}
+
+/**
+ * Permission requests that reach Pluton for a given engine + Muse mode.
+ *
+ * - qwen `autonomous-bounded` + proven isolation → `allow_once`: the session
+ *   runs `auto` (classifier approves safe actions) inside a throwaway task
+ *   checkout; whatever still asks is granted once.
+ * - qwen `autonomous-bounded` without that proof (project root) → the operator
+ *   channel (`interactive`); with no operator channel the adapter denies
+ *   fail-closed.
+ * - ask-* modes → `interactive` on every engine: the request becomes a
+ *   durable operator approval and the engine's request is held open until the
+ *   decision; no operator channel → the adapter denies fail-closed.
+ * - other engines under `autonomous-bounded` keep the fail-closed `deny`:
+ *   only qwen has an engine-side auto-approval mode to lean on.
+ */
+export function engineApprovalPolicy(
+  engineKind: string,
+  approvalMode: ApprovalMode,
+  isolation: EngineIsolationFacts = { isolatedCheckout: false },
+): EngineApprovalPolicy {
+  switch (approvalMode) {
+    case 'autonomous-bounded':
+      if (engineKind !== 'qwen') return 'deny'
+      return isolation.isolatedCheckout ? 'allow_once' : 'interactive'
+    case 'ask-for-sensitive-actions':
+    case 'ask-always':
+      return 'interactive'
+    default:
+      // Same blind-cast rationale as engineSessionMode: refuse loudly rather
+      // than silently falling back to a deny that looks like "nothing happened".
+      throw new ValidationError(
+        `no approval-policy mapping for approval mode '${String(approvalMode as string)}'`,
+      )
+  }
 }
 
 /**
  * The per-Muse engine adapter the run supervisor builds sessions from: engine
- * session settings come from the Muse's recorded approval mode, never from an
- * adapter default. `opts` carries container-mode pins (spawn, in-image binary)
- * and test seams.
+ * session settings come from the Muse's recorded approval mode plus the
+ * caller-proven isolation fact (`opts.isolatedCheckout`), never from an
+ * adapter default. `opts` also carries container-mode pins (spawn, in-image
+ * binary) and test seams.
  */
 export function engineAdapterForMuse(
   muse: { engineKind: string; approvalMode: ApprovalMode },
   opts: EngineCreateOptions = {},
 ): EngineAdapter {
+  const policy = engineApprovalPolicy(muse.engineKind, muse.approvalMode, {
+    isolatedCheckout: opts.isolatedCheckout === true,
+  })
   if (muse.engineKind === 'qwen') {
     return new QwenEngineAdapter({
       ...opts,
       approvalMode: engineSessionMode('qwen', muse.approvalMode),
-      approvalPolicy: engineApprovalPolicy(muse.approvalMode),
+      approvalPolicy: policy,
+    })
+  }
+  if (muse.engineKind === 'opencode') {
+    return new OpenCodeEngineAdapter({
+      ...opts,
+      approvalPolicy: policy === 'interactive' ? 'interactive' : 'deny',
     })
   }
   return getEngineAdapter(muse.engineKind, opts)

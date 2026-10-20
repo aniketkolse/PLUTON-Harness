@@ -13,9 +13,10 @@ import type { RunOptions, RunResult } from '../../util/exec.ts'
 import { AcpClient, type AcpServerRequestResponse, type AcpSpawnFn } from '../acp/client.ts'
 import { withRetry, type RetryOptions } from '../acp/retry.ts'
 import { copyPlatformEnv } from '../acp/env.ts'
-import { asRecord, readModelOption, toAcpMcpServers } from '../acp/options.ts'
+import { asRecord, permissionScope, readModelOption, toAcpMcpServers } from '../acp/options.ts'
 import { AcpEngineSessionBase, CANCEL_GRACE_MS } from '../acp/session-base.ts'
 import { defaultCapabilities } from '../contract/types.ts'
+import type { EnginePermissionChannel, EnginePermissionDecision } from '../interactive-approval.ts'
 import type {
   EngineAdapter,
   EngineAuthStatus,
@@ -50,8 +51,10 @@ export { readModelOption, toAcpMcpServers } from '../acp/options.ts'
  * Capability notes (never faked):
  * - `resumeSession` uses session/load, verified by live probe #2.
  * - `approvals`: permission requests are answered fail-closed (reject) and
- *   surfaced as approval_request events; there is no interactive approval
- *   channel in this build, so the adapter never fabricates consent.
+ *   surfaced as approval_request events. With the `interactive` policy the
+ *   request is forwarded to the session's operator approval channel and the
+ *   engine's request is held open until the decision; a grant is always
+ *   narrow (`allow_once`) and the adapter never fabricates consent.
  * - throwaway containers/Docker isolation is a sandbox concern (Phase 5);
  *   this adapter only manages the engine protocol.
  */
@@ -60,6 +63,9 @@ const INITIALIZE_TIMEOUT_MS = 30_000
 const SESSION_NEW_TIMEOUT_MS = 60_000
 const SESSION_LOAD_TIMEOUT_MS = 120_000
 const MODEL_SET_TIMEOUT_MS = 20_000
+
+/** What Pluton does with an opencode permission request. */
+export type OpenCodeApprovalPolicy = 'deny' | 'interactive'
 
 export interface OpenCodeAdapterOptions {
   /** Injection for tests: replaces node:child_process.spawn for the ACP child. */
@@ -79,6 +85,13 @@ export interface OpenCodeAdapterOptions {
   runFn?: (argv: string[], options?: RunOptions) => Promise<RunResult>
   /** How long to wait for session/cancel to be acknowledged before poisoning the session. */
   cancelGraceMs?: number
+  /**
+   * What Pluton does with engine permission requests. 'deny' (default) rejects
+   * fail-closed and surfaces an approval_request event; 'interactive' forwards
+   * to the session's operator approval channel and holds the engine's request
+   * open until the decision (a grant is always narrow: `allow_once`).
+   */
+  approvalPolicy?: OpenCodeApprovalPolicy
 }
 
 /**
@@ -105,6 +118,9 @@ export function buildEngineEnv(
 
 export class OpenCodeEngineSession extends AcpEngineSessionBase {
   private readonly supportsSessionClose: boolean
+  private readonly approvalPolicy: OpenCodeApprovalPolicy
+  /** Diagnostics: how many permission requests were answered and how. */
+  approvalDecisions: Array<{ requestId: string; decision: string }> = []
 
   constructor(args: {
     client: AcpClient
@@ -113,14 +129,19 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
     instructions: string | null
     cancelGraceMs: number
     supportsSessionClose?: boolean
+    approvalPolicy?: OpenCodeApprovalPolicy
+    /** Required by the 'interactive' policy; other policies ignore it. */
+    permissionChannel?: EnginePermissionChannel | null
   }) {
     super({
       client: args.client,
       nativeSessionId: args.sessionId,
       pinnedModel: args.pinnedModel,
       cancelGraceMs: args.cancelGraceMs,
+      permissionChannel: args.permissionChannel ?? null,
     })
     this.supportsSessionClose = args.supportsSessionClose ?? true
+    this.approvalPolicy = args.approvalPolicy ?? 'deny'
     this.setPendingInstructions(args.instructions)
   }
 
@@ -128,8 +149,13 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
    * Handles server -> client requests; fail-closed by design. opencode did not
    * issue permission requests during live probes, but a rejection path must
    * exist: any request is denied/refused and surfaced as an approval_request.
+   *
+   * Under the `interactive` policy the request is forwarded to the operator
+   * approval channel and the engine's request stays open until the decision; a
+   * grant is always narrow (`allow_once`) and everything else — deny, timeout,
+   * teardown, no channel — answers the reject outcome.
    */
-  handleServerRequest(method: string, params: unknown): AcpServerRequestResponse | null {
+  async handleServerRequest(method: string, params: unknown): Promise<AcpServerRequestResponse | null> {
     if (method !== 'session/request_permission') return null
     const p = asRecord(params)
     const options: Record<string, unknown>[] = []
@@ -143,17 +169,70 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
     const toolCall = p ? asRecord(p['toolCall']) : null
     const requestId =
       toolCall && typeof toolCall['toolCallId'] === 'string' ? (toolCall['toolCallId'] as string) : newId('approval')
-    const description =
-      toolCall && typeof toolCall['title'] === 'string'
-        ? `engine requested permission: ${toolCall['title'] as string}`
-        : 'engine requested permission'
-    this.emit({ kind: 'approval_request', requestId, description })
-    // No interactive approval channel exists yet in this build: deny, but
-    // surface the request. Never fabricate consent.
-    if (reject && typeof reject['optionId'] === 'string') {
-      return { result: { outcome: { outcome: 'selected', optionId: reject['optionId'] } } }
+    const title = toolCall && typeof toolCall['title'] === 'string' ? (toolCall['title'] as string) : null
+    const description = title !== null ? `engine requested permission: ${title}` : 'engine requested permission'
+    const rejectOutcome: AcpServerRequestResponse =
+      reject && typeof reject['optionId'] === 'string'
+        ? { result: { outcome: { outcome: 'selected', optionId: reject['optionId'] } } }
+        : { result: { outcome: { outcome: 'cancelled' } } }
+
+    // A closed session must never mint a durable, actionable record: its
+    // transport is going away, so the answer would be dropped anyway.
+    if (this.isClosed) {
+      this.recordInteractive(requestId, description, 'deny(session closed)')
+      return rejectOutcome
     }
-    return { result: { outcome: { outcome: 'cancelled' } } }
+
+    if (this.approvalPolicy !== 'interactive') {
+      this.approvalDecisions.push({ requestId, decision: 'deny(fail-closed)' })
+      this.emit({
+        kind: 'approval_request',
+        requestId,
+        description: `${description} — Pluton decision: deny(fail-closed) (approvalPolicy=${this.approvalPolicy})`,
+      })
+      // Deny, but surface the request. Never fabricate consent.
+      return rejectOutcome
+    }
+
+    const channel = this.permissionChannel
+    if (!channel) {
+      this.recordInteractive(requestId, description, 'deny(no operator channel)')
+      return rejectOutcome
+    }
+    const optionKinds = options.map((o) => (typeof o['kind'] === 'string' ? (o['kind'] as string) : 'unknown'))
+    let decision: EnginePermissionDecision
+    try {
+      decision = await channel.requestPermission({
+        requestId,
+        description,
+        scope: permissionScope({ toolCall, optionKinds }),
+      })
+    } catch {
+      // The channel contract is "never rejects"; if it still does, fail closed.
+      decision = 'deny'
+    }
+    if (decision === 'allow') {
+      const allowOnce = options.find((o) => o['kind'] === 'allow_once')
+      if (allowOnce && typeof allowOnce['optionId'] === 'string') {
+        this.recordInteractive(requestId, description, 'allow_once(interactive)')
+        return { result: { outcome: { outcome: 'selected', optionId: allowOnce['optionId'] } } }
+      }
+      // The engine offers no one-time grant: never escalate to allow_always.
+      this.recordInteractive(requestId, description, 'deny(no allow_once option)')
+      return rejectOutcome
+    }
+    this.recordInteractive(requestId, description, 'deny(operator)')
+    return rejectOutcome
+  }
+
+  /** Interactive decision → diagnostics + event (emitted once, after settling). */
+  private recordInteractive(requestId: string, description: string, decision: string): void {
+    this.approvalDecisions.push({ requestId, decision })
+    this.emit({
+      kind: 'approval_request',
+      requestId,
+      description: `${description} — Pluton decision: ${decision} (approvalPolicy=interactive)`,
+    })
   }
 
   async close(): Promise<void> {
@@ -191,6 +270,15 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       modelList: true,
       mcpServers: true,
     }
+  }
+
+  /**
+   * Effective session-level approval policy (read-only introspection). Pinned
+   * by the wiring tests so reverting the per-Muse mapping in
+   * `engines/approval.ts` must fail the suite.
+   */
+  get sessionApproval(): { policy: OpenCodeApprovalPolicy } {
+    return { policy: this.opts.approvalPolicy ?? 'deny' }
   }
 
   private resolveBinary(): ReturnType<typeof resolveOpenCodeBinary> {
@@ -373,6 +461,8 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
         pinnedModel: req.muse.model,
         instructions: req.resumeToken ? null : (req.instructions ?? null),
         cancelGraceMs: this.opts.cancelGraceMs ?? CANCEL_GRACE_MS,
+        approvalPolicy: this.opts.approvalPolicy ?? 'deny',
+        permissionChannel: req.approvals ?? null,
       })
       holder.session = session
       return session

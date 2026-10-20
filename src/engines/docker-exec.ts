@@ -149,6 +149,16 @@ export function dockerExecSpawn(ctx: DockerExecContext, spawnFn: AcpSpawnFn = de
       if (HOST_ONLY_ENV_KEYS.has(name)) continue
       containerEnv[name] = tryMapPath(value, ctx.mounts) ?? value
     }
+    // Container-mode filesystems: SQLite databases and process runtime data
+    // require POSIX locking and chmod semantics that DrvFS / 9p host bind mounts
+    // do not support. Direct container-side data and cache to the worker's
+    // native Linux directory (/home/pluton) while preserving configuration and HOME.
+    if (containerEnv['XDG_DATA_HOME']?.startsWith('/pluton/engine-home/data')) {
+      containerEnv['XDG_DATA_HOME'] = '/home/pluton/data'
+    }
+    if (containerEnv['XDG_CACHE_HOME']?.startsWith('/pluton/engine-home/cache')) {
+      containerEnv['XDG_CACHE_HOME'] = '/home/pluton/cache'
+    }
     const argv = ['exec', '-i', '-w', cwd]
     for (const name of Object.keys(containerEnv)) argv.push('-e', name)
     argv.push(ctx.containerName, command, ...args)

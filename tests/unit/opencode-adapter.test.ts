@@ -17,6 +17,7 @@ import {
   ValidationError,
 } from '../../src/domain/errors.ts'
 import type { AcpSpawnFn } from '../../src/engines/acp/client.ts'
+import { controlledChannel } from '../helpers/controlled-channel.ts'
 import { FakeAcpAgent, fakeSpawn } from '../helpers/fake-acp-agent.ts'
 import { loadRecordedFrames, scriptOpencode, type OpencodeScriptOptions } from '../helpers/opencode-script.ts'
 
@@ -334,11 +335,186 @@ describe('opencode adapter: prompts and events', () => {
     expect(events).toContainEqual({
       kind: 'approval_request',
       requestId: 'call_1',
-      description: 'engine requested permission: write file',
+      description: 'engine requested permission: write file — Pluton decision: deny(fail-closed) (approvalPolicy=deny)',
     })
     const response = agent.receivedResponses.find((m) => m.id === 900)
     expect(response?.result).toEqual({ outcome: { outcome: 'selected', optionId: 'reject' } })
     await session.close()
+  })
+
+  it('interactive policy holds the engine request pending and grants the narrow option on approval', async () => {
+    const agent = new FakeAcpAgent()
+    scriptOpencode(agent, {
+      promptUpdates: [],
+      onPrompt: (a, sessionId) => {
+        a.send({
+          id: 901,
+          method: 'session/request_permission',
+          params: {
+            sessionId,
+            toolCall: { toolCallId: 'call_i1', title: 'write file', kind: 'edit' },
+            options: [
+              { optionId: 'always', name: 'Always', kind: 'allow_always' },
+              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        })
+      },
+    })
+    const controlled = controlledChannel()
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(
+      sessionRequest({ approvals: controlled.channel }),
+    )) as OpenCodeEngineSession
+
+    const consume = collect(session.sendPrompt({ text: 'do work' }))
+    const req = await controlled.whenRequested
+    expect(req.requestId).toBe('call_i1')
+    expect(req.description).toContain('write file')
+    expect(req.scope).toMatchObject({ toolKind: 'edit', toolTitle: 'write file' })
+    // The engine keeps waiting while the operator decides.
+    expect(agent.receivedResponses.some((m) => m.id === 901)).toBe(false)
+
+    controlled.respond('allow')
+    await consume
+    // Narrow grant only: never the allow_always option.
+    expect(agent.receivedResponses.find((m) => m.id === 901)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    })
+    await session.close()
+  })
+
+  it('interactive policy answers the reject option when the operator denies', async () => {
+    const agent = new FakeAcpAgent()
+    scriptOpencode(agent, {
+      promptUpdates: [],
+      onPrompt: (a, sessionId) => {
+        a.send({
+          id: 902,
+          method: 'session/request_permission',
+          params: {
+            sessionId,
+            toolCall: { toolCallId: 'call_i2', title: 'shell command' },
+            options: [
+              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        })
+      },
+    })
+    const controlled = controlledChannel()
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(
+      sessionRequest({ approvals: controlled.channel }),
+    )) as OpenCodeEngineSession
+
+    const consume = collect(session.sendPrompt({ text: 'do work' }))
+    await controlled.whenRequested
+    controlled.respond('deny')
+    await consume
+    expect(agent.receivedResponses.find((m) => m.id === 902)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_i2', decision: 'deny(operator)' }])
+    await session.close()
+  })
+
+  it('interactive policy fails closed immediately when no operator channel is wired', async () => {
+    const agent = new FakeAcpAgent()
+    scriptOpencode(agent, {
+      promptUpdates: [],
+      onPrompt: (a, sessionId) => {
+        a.send({
+          id: 903,
+          method: 'session/request_permission',
+          params: {
+            sessionId,
+            toolCall: { toolCallId: 'call_i3', title: 'write file' },
+            options: [
+              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        })
+      },
+    })
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(sessionRequest())) as OpenCodeEngineSession
+
+    await collect(session.sendPrompt({ text: 'do work' }))
+    expect(agent.receivedResponses.find((m) => m.id === 903)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject' },
+    })
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_i3', decision: 'deny(no operator channel)' }])
+    await session.close()
+  })
+
+  it('interrupt() aborts a pending operator request fail-closed and answers the engine', async () => {
+    const agent = new FakeAcpAgent()
+    scriptOpencode(agent, {
+      promptUpdates: [],
+      deferPromptUntilCancel: true,
+      onPrompt: (a, sessionId) => {
+        a.send({
+          id: 904,
+          method: 'session/request_permission',
+          params: {
+            sessionId,
+            toolCall: { toolCallId: 'call_i4', title: 'write file' },
+            options: [
+              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        })
+      },
+    })
+    const controlled = controlledChannel()
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(
+      sessionRequest({ approvals: controlled.channel }),
+    )) as OpenCodeEngineSession
+
+    const events: EngineEvent[] = []
+    const consume = (async () => {
+      for await (const event of session.sendPrompt({ text: 'do work', timeoutMs: 5_000 })) events.push(event)
+    })()
+    await controlled.whenRequested
+
+    await session.interrupt()
+    await consume
+    expect(controlled.aborted.length).toBeGreaterThanOrEqual(1)
+    expect(agent.receivedResponses.find((m) => m.id === 904)?.result).toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject' },
+    })
+    expect(events.at(-1)).toMatchObject({ kind: 'result', outcome: 'cancelled' })
+    await session.close()
+  })
+
+  it('refuses a permission request that arrives after close (no wait, fail-closed answer)', async () => {
+    const agent = new FakeAcpAgent()
+    scriptOpencode(agent, { promptUpdates: [] })
+    const controlled = controlledChannel()
+    const { adapter } = makeAdapter(agent, { approvalPolicy: 'interactive' })
+    const session = (await adapter.startSession(
+      sessionRequest({ approvals: controlled.channel }),
+    )) as OpenCodeEngineSession
+
+    await session.close()
+    const response = await session.handleServerRequest('session/request_permission', {
+      sessionId: session.info.nativeSessionId,
+      toolCall: { toolCallId: 'call_late', title: 'write file' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    })
+
+    expect(response).toEqual({ result: { outcome: { outcome: 'selected', optionId: 'reject' } } })
+    expect(controlled.requests).toHaveLength(0)
+    expect(session.approvalDecisions).toEqual([{ requestId: 'call_late', decision: 'deny(session closed)' }])
   })
 
   it('interrupt() sends session/cancel and the turn ends cancelled (never success)', async () => {

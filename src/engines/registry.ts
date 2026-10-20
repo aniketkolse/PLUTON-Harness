@@ -21,6 +21,12 @@ export interface EngineCreateOptions {
    * mapped separately by the spawn function). Absent = identity.
    */
   mapWorkdir?: (hostPath: string) => string
+  /**
+   * Runtime-proven session isolation: true only when the session's workdir is
+   * a Pluton-owned throwaway task checkout (never inferred from a mode name).
+   * Absent/false = the fail-closed default shared by project-root sessions.
+   */
+  isolatedCheckout?: boolean
 }
 
 export interface EngineFactory {
