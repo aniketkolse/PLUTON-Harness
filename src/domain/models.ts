@@ -17,12 +17,31 @@ export const MUSE_ROLES = [
 ] as const
 export type MuseRole = (typeof MUSE_ROLES)[number]
 
+/** Canonical five persistent roles for ship workers. */
+export const PERSISTENT_MUSE_ROLES = [
+  'supervisor',
+  'tester',
+  'researcher',
+  'coder',
+  'reviewer',
+] as const
+export type PersistentMuseRole = (typeof PERSISTENT_MUSE_ROLES)[number]
+
 export const WORKSPACE_POLICIES = [
   'coordinator-read-only',
   'read-only',
   'isolated-task-checkout',
 ] as const
 export type WorkspacePolicy = (typeof WORKSPACE_POLICIES)[number]
+
+export const ROLE_DEFAULT_WORKSPACE_POLICIES: Readonly<Record<MuseRole, WorkspacePolicy>> = {
+  supervisor: 'coordinator-read-only',
+  researcher: 'read-only',
+  coder: 'isolated-task-checkout',
+  tester: 'isolated-task-checkout',
+  reviewer: 'read-only',
+  custom: 'isolated-task-checkout',
+}
 
 export const APPROVAL_MODES = [
   'autonomous-bounded',
@@ -235,6 +254,8 @@ export interface ApprovalRecord {
   decidedAt: string | null
   expiresAt: string | null
   createdAt: string
+  selectedOption?: string | null
+  answer?: string | null
 }
 
 export interface VerificationCheckRecord {

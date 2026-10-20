@@ -330,7 +330,7 @@ describe('Pluton application server REST & SSE API', () => {
     }
   })
 
-  it('serves task and run diff endpoints', async () => {
+  it('serves task and run diff endpoints and reports an active run in the workspace summary', async () => {
     const { rootDir, appServer } = setupTestProject()
     const server = await appServer
     try {
@@ -360,6 +360,19 @@ describe('Pluton application server REST & SSE API', () => {
         const diffData = (await diffRes.json()) as { ok: boolean; diffs: unknown[] }
         expect(diffData.ok).toBe(true)
         expect(diffData.diffs).toBeInstanceOf(Array)
+
+        // Regression: `active` is the primary live run state. A reload adopts
+        // this summary, so omitting it made the SPA fall back to a stale run.
+        store.setRunState(run.id, 'active')
+        const wsRes = await fetch(`http://127.0.0.1:${server.port}/api/workspace`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(wsRes.status).toBe(200)
+        const wsData = (await wsRes.json()) as {
+          workspace: { activeRun: { id: string; state: string } | null }
+        }
+        expect(wsData.workspace.activeRun?.id).toBe(run.id)
+        expect(wsData.workspace.activeRun?.state).toBe('active')
       } finally {
         store.close()
       }

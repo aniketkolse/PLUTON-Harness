@@ -48,7 +48,7 @@ export interface AppServerInstance {
 
 export async function startAppServer(options: AppServerOptions): Promise<AppServerInstance> {
   const token = options.token ?? generateServerToken()
-  const broadcaster = new ServerEventBroadcaster()
+  const broadcaster = new ServerEventBroadcaster(15000, options.store, options.projectId)
   const router = new ApiRouter({
     store: options.store,
     projectId: options.projectId,

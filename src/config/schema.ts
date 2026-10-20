@@ -1,5 +1,9 @@
 import { z } from 'zod'
-import { APPROVAL_MODES, MUSE_ROLES, WORKSPACE_POLICIES } from '../domain/models.ts'
+import {
+  APPROVAL_MODES,
+  MUSE_ROLES,
+  WORKSPACE_POLICIES,
+} from '../domain/models.ts'
 import { PERMISSIONS } from '../domain/permissions.ts'
 
 export const CONFIG_VERSION = 1

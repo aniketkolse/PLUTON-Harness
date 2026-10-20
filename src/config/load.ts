@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { ConfigError } from '../domain/errors.ts'
 import { CONFIG_VERSION, plutonConfigSchema, type PlutonConfig, type MuseConfig } from './schema.ts'
@@ -25,10 +25,14 @@ export function findProjectRoot(startDir: string): string | null {
   }
 }
 
-export function loadConfig(rootDir: string): LoadedConfig {
-  const configPath = join(rootDir, CONFIG_FILENAME)
+export function loadConfig(rootDirOrPath: string): LoadedConfig {
+  const isDirectFile =
+    rootDirOrPath.endsWith(CONFIG_FILENAME) ||
+    (existsSync(rootDirOrPath) && statSync(rootDirOrPath).isFile())
+  const configPath = isDirectFile ? resolve(rootDirOrPath) : join(rootDirOrPath, CONFIG_FILENAME)
+  const rootDir = isDirectFile ? dirname(resolve(rootDirOrPath)) : resolve(rootDirOrPath)
   if (!existsSync(configPath)) {
-    throw new ConfigError(`no ${CONFIG_FILENAME} found in ${rootDir} — run \`pluton init\` first`)
+    throw new ConfigError(`no ${CONFIG_FILENAME} found in ${rootDirOrPath} — run \`pluton init\` first`)
   }
   let raw: unknown
   try {

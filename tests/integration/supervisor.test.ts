@@ -32,7 +32,7 @@ import { MockEngineAdapter, type MockScriptStep } from '../../src/engines/mock/a
 import { QwenEngineAdapter } from '../../src/engines/qwen/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import type { FileLeaseManager } from '../../src/orchestrator/lease-manager.ts'
-import { RunSupervisor } from '../../src/orchestrator/supervisor.ts'
+import { RunSupervisor, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -113,6 +113,8 @@ interface MakeWorldOptions {
   useDefaultAdapters?: boolean
   /** Capture every engine session request (approval-channel wiring assertions). */
   onStartSession?: (museId: string, req: StartSessionRequest) => void
+  /** Observe the supervisor's live worker inspector events, in emission order. */
+  onWorkerEvent?: (event: WorkerLifecycleEvent) => void
   /** Observe a mock-scripted permission request's answer (read task state synchronously in-hook). */
   onPermissionDecision?: (
     museId: string,
@@ -290,6 +292,7 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
           },
         }),
     workspaceManager: new GitWorkspaceManager({ workspacesRoot }),
+    ...(opts.onWorkerEvent !== undefined ? { onWorkerEvent: opts.onWorkerEvent } : {}),
     diagnostic: () => {},
   })
   ref.supervisor = supervisor
@@ -380,6 +383,52 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(eventCount(world.store, world.runId, 'task.completed')).toBe(2)
     expect(eventCount(world.store, world.runId, 'run.finished')).toBe(1)
     expect(world.store.getRun(world.runId).finalSummary).toBe('mock:success')
+  })
+
+  it('emits worker lifecycle events with the real role, model and checkout path', async () => {
+    const events: WorkerLifecycleEvent[] = []
+    let taskId = ''
+    const world = makeWorld({
+      managerScript: [{ delayMs: 120, text: 'manager report', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        taskId = (await createViaBridge(bridge, { title: 'T1', assigneeMuseId: 'worker-a' })).id
+      },
+      workerScripts: { 'worker-a': [{ delayMs: 10, outcome: 'success' }] },
+      isolatedMuses: ['worker-a'],
+      repoGit: true,
+      onWorkerEvent: (event) => events.push(event),
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+    expect(out.state).toBe('completed')
+
+    const started = events.find((e) => e.type === 'worker.started' && e.taskId === taskId)
+    expect(started).toMatchObject({ role: 'coder', model: 'mock/model-a' })
+    expect(started?.workspace).toContain('workspaces')
+    const completed = events.find((e) => e.type === 'worker.completed' && e.taskId === taskId)
+    expect(completed).toMatchObject({ role: 'coder', model: 'mock/model-a' })
+    expect(completed?.payload).toMatchObject({ summary: expect.stringContaining('mock') })
+  })
+
+  it('emits worker.failed when a task settles failed', async () => {
+    const events: WorkerLifecycleEvent[] = []
+    let taskId = ''
+    const world = makeWorld({
+      managerTools: async (bridge) => {
+        taskId = (await createViaBridge(bridge, { title: 'T1', assigneeMuseId: 'worker-a' })).id
+      },
+      workerScripts: { 'worker-a': [{ delayMs: 10, outcome: 'failure', text: 'boom' }] },
+      maxRetriesPerTask: 0,
+      onWorkerEvent: (event) => events.push(event),
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+    expect(out.state).toBe('failed')
+    const failed = events.find((e) => e.type === 'worker.failed' && e.taskId === taskId)
+    expect(failed).toMatchObject({ role: 'coder', model: 'mock/model-a' })
+    expect(failed?.payload).toMatchObject({ error: expect.any(String) })
   })
 
   it('fails the run when a task fails, leaving dependents visibly queued', async () => {

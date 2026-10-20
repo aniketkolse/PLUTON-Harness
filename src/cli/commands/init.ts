@@ -17,7 +17,7 @@ export interface InitResult {
   notes: string[]
 }
 
-const ROLE_FILES = ['manager.md', 'researcher.md', 'worker.md', 'qa.md', 'reviewer.md'] as const
+const ROLE_FILES = ['manager.md', 'researcher.md', 'worker.md', 'coder.md', 'qa.md', 'reviewer.md'] as const
 
 const GITIGNORE_ENTRIES = [
   '# Pluton-Harness private runtime state',

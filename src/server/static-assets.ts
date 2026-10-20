@@ -11,6 +11,68 @@ export interface StaticAsset {
   content: string
 }
 
+export interface QaQuestionCardOptions {
+  id: string
+  title: string
+  description?: string
+  dependentTasks?: string[]
+  options?: string[]
+  selectedOption?: string
+  resolved?: boolean
+}
+
+export function renderQaQuestionCardHtml(opts: QaQuestionCardOptions): string {
+  const escape = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+  const titleHtml = `<div class="qa-title">${escape(opts.title)}</div>`
+  const descHtml = opts.description ? `<div class="qa-desc">${escape(opts.description)}</div>` : ''
+
+  const badgesHtml =
+    opts.dependentTasks && opts.dependentTasks.length > 0
+      ? `<div class="qa-badges">${opts.dependentTasks
+          .map((t) => `<span class="qa-badge">${escape(t)}</span>`)
+          .join('')}</div>`
+      : ''
+
+  const optionsHtml =
+    opts.options && opts.options.length > 0
+      ? `<div class="qa-options">${opts.options
+          .map((opt) => {
+            const isSelected = opts.selectedOption === opt
+            return `<button type="button" class="qa-option-btn${isSelected ? ' is-selected' : ''}" data-option="${escape(opt)}">${escape(opt)}</button>`
+          })
+          .join('')}</div>`
+      : ''
+
+  const statusHtml = opts.resolved
+    ? `<div class="qa-resolved-status qa-resolved">Unblocked and confirmed${
+        opts.selectedOption ? `: <strong>${escape(opts.selectedOption)}</strong>` : ''
+      }</div>`
+    : ''
+
+  const actionsHtml = `<div class="qa-actions"><button type="button" class="btn-primary qa-confirm-btn${
+    opts.resolved ? ' is-resolved' : ''
+  }" data-confirm-qa="${escape(opts.id)}"${opts.resolved ? ' disabled' : ''}>Confirm & Unblock</button></div>`
+
+  const resolvedClass = opts.resolved ? ' qa-resolved' : ''
+
+  return (
+    `<div class="qa-card${resolvedClass}" id="qa-card-${escape(opts.id)}" data-qa-id="${escape(opts.id)}">` +
+    `<div class="qa-card-head">${titleHtml}${badgesHtml}</div>` +
+    descHtml +
+    optionsHtml +
+    statusHtml +
+    actionsHtml +
+    `</div>`
+  )
+}
+
 export const STATIC_ASSETS: Record<string, StaticAsset> = {
   '/index.html': {
     contentType: 'text/html; charset=utf-8',
@@ -354,6 +416,23 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
         </div>
       </div>
     </main>
+
+    <!-- ============ RIGHT SHIP WORKERS INSPECTOR ============ -->
+    <aside id="rightInspector" class="right-inspector is-hidden" aria-label="Ship Workers Activity Inspector" style="width: 440px;">
+      <div class="right-inspector-head">
+        <div class="right-inspector-title">
+          <span class="inspector-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${plutonMarkBody}</svg>
+          </span>
+          <span>Ship Activity Inspector</span>
+          <span id="rightInspectorCount" class="tag-mono">0 active</span>
+        </div>
+        <button id="rightInspectorClose" class="icon-btn" type="button" title="Close inspector" aria-label="Close inspector">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div id="rightInspectorGrid" class="right-inspector-grid"></div>
+    </aside>
   </div>
 
   <!-- Model popover -->
@@ -974,6 +1053,106 @@ select.mini-select {
 .tool-status.failed { background: rgba(239,68,68,0.18); color: var(--accent-danger); }
 .tool-card-body { padding: 8px 10px; border-top: 1px solid var(--border-soft); font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: pre-wrap; max-height: 220px; overflow: auto; }
 
+/* QA Question Card */
+.qa-card {
+  background: #141124;
+  border: 1px solid #3c2d63;
+  border-left: 3px solid var(--accent-purple);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 100%;
+}
+.qa-card.qa-resolved {
+  border-color: rgba(16, 185, 129, 0.4);
+  border-left-color: var(--accent-ok);
+  background: #0f171c;
+}
+.qa-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.qa-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+.qa-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.qa-badges {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.qa-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: rgba(196, 181, 253, 0.15);
+  color: var(--accent-purple);
+  border: 1px solid rgba(196, 181, 253, 0.3);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.qa-options {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.qa-option-btn {
+  background: #1c182d;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.qa-option-btn:hover {
+  background: #25203b;
+  border-color: var(--border-soft);
+  color: #fff;
+}
+.qa-option-btn.is-selected {
+  background: rgba(196, 181, 253, 0.2);
+  border-color: var(--accent-purple);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--accent-purple);
+}
+.qa-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.qa-confirm-btn {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+}
+.qa-confirm-btn.is-resolved {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.qa-resolved-status {
+  font-size: 12px;
+  color: var(--accent-ok);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+
 /* ===================== Composer ===================== */
 .dock { flex-shrink: 0; padding: 0 16px 10px; background: var(--bg-main); border-top: 1px solid #181624; }
 .build-confirm {
@@ -1066,7 +1245,7 @@ select.mini-select {
   100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0); }
 }
 
-.activity-badge { position: relative; }
+.activity-badge { position: relative; cursor: pointer; }
 .activity-inner { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; border: 1px solid #2b2242; background: #141224; color: var(--accent-purple-soft); font-size: 12px; }
 .activity-text { font-weight: 700; color: #fff; }
 .boat { display: inline-flex; animation: boat 2s ease-in-out infinite; }
@@ -1262,10 +1441,181 @@ select.mini-select {
   background: linear-gradient(180deg, var(--bg-main) 40%, rgba(9,8,14,0) 100%);
 }
 
+/* ===================== Right-Side Inspector Sidebar ===================== */
+.right-inspector {
+  width: 440px;
+  flex-shrink: 0;
+  height: 100%;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  z-index: 20;
+}
+.right-inspector.is-hidden {
+  display: none !important;
+}
+.right-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.right-inspector-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.right-inspector-title .inspector-icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  color: var(--accent-purple);
+}
+.right-inspector-grid {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 1px;
+  background: var(--border-soft);
+}
+.worker-partition {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.worker-partition-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-inset);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.worker-partition-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.worker-badge-role {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(167, 139, 250, 0.15);
+  color: var(--accent-purple-soft);
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.worker-partition-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+}
+.worker-partition-model {
+  font-size: 10px;
+}
+.worker-partition-workspace-line {
+  padding: 2px 12px 4px;
+  font-size: 10px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.worker-partition-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.worker-badge-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.worker-badge-status.is-running,
+.worker-badge-status.is-active {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--accent-ok);
+}
+.worker-badge-status.is-waiting {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--accent-warn);
+}
+.worker-badge-status.is-failed {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--accent-danger);
+}
+.worker-badge-status.is-completed {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent-cyan);
+}
+.worker-stream {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  background: var(--bg-main);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.worker-stream-entry {
+  margin-bottom: 3px;
+}
+.worker-stream-entry.is-token {
+  color: var(--text-soft);
+}
+.worker-stream-entry.is-tool {
+  color: var(--accent-cyan);
+}
+.worker-stream-entry.is-err {
+  color: var(--accent-danger);
+}
+.right-inspector-grid.has-many-workers .worker-partition,
+.right-inspector-grid:has(> :nth-child(5)) .worker-partition {
+  flex: 0 0 auto;
+  min-height: 160px;
+}
+
 /* ===================== Responsive ===================== */
 @media (max-width: 1000px) {
   .app-sidebar { position: absolute; left: 0; top: 0; bottom: 0; z-index: 50; box-shadow: 0 18px 44px rgba(0,0,0,0.55); }
   .app-sidebar.is-collapsed { box-shadow: none; }
+  .right-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 50; box-shadow: -18px 0 44px rgba(0,0,0,0.55); }
+  .worker-partition { flex: 0 0 auto; min-height: 160px; }
   .status-strip { font-size: 11px; }
   .chip { max-width: 220px; }
 }
@@ -1348,6 +1698,8 @@ select.mini-select {
     liveBody: null,
     attachments: [],
     tasks: {},
+    workers: {},
+    rightInspectorOpen: false,
     activeRunId: null,
     selectedRunId: null,
     dagViewMode: 'flow',
@@ -1759,12 +2111,13 @@ select.mini-select {
         conn.classList.remove('is-offline');
         conn.querySelector('.conn-label').textContent = 'Connected';
       }
+      reconstituteWorkerPartitions();
     };
     eventSource.onerror = function () {
       var conn = el('connectionStatus');
       if (conn) {
         conn.classList.add('is-offline');
-        conn.querySelector('.conn-label').textContent = 'Reconnecting\\u2026';
+        conn.querySelector('.conn-label').textContent = 'Reconnecting\u2026';
       }
     };
     eventSource.onmessage = function (e) {
@@ -1775,7 +2128,10 @@ select.mini-select {
   }
 
   function handleServerEvent(ev) {
-    if (ev.type === 'token' && ev.sessionId === state.activeSessionId) {
+    if (ev.type && ev.type.startsWith('worker.')) {
+      if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
+      handleWorkerEvent(ev);
+    } else if (ev.type === 'token' && ev.sessionId === state.activeSessionId) {
       appendStreamingToken(ev.text);
     } else if (ev.type === 'tool' && ev.sessionId === state.activeSessionId) {
       appendToolEvent(ev.tool);
@@ -1787,19 +2143,29 @@ select.mini-select {
     } else if (ev.type === 'usage' && ev.sessionId === state.activeSessionId) {
       updateUsage(ev);
     } else if (ev.type === 'approval_requested') {
-      showPendingApproval(ev.approval);
+      if (isQuestionApproval(ev.approval)) {
+        renderQaQuestionCard(ev.approval);
+      } else {
+        showPendingApproval(ev.approval);
+      }
       loadApprovals();
     } else if (ev.type === 'approval_decided') {
       if (state.pendingApprovalId === ev.approval.id) hidePendingApproval();
+      if (isQuestionApproval(ev.approval)) {
+        var existingQaCard = document.getElementById('qa-card-' + ev.approval.id) || (el('messagesList') && el('messagesList').querySelector('[data-qa-id="' + ev.approval.id + '"]'));
+        if (existingQaCard) updateQaCardSettled(existingQaCard, ev.approval);
+      }
       loadApprovals();
     } else if (ev.type === 'run_state') {
       state.activeRunId = ev.runId;
       applyRunState(ev.state, ev.goal);
       refreshActiveRun();
     } else if (ev.type === 'task_state') {
+      if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
       state.tasks[ev.taskId] = { id: ev.taskId, title: ev.title, state: ev.state, runId: ev.runId };
       if (ev.runId) state.activeRunId = ev.runId;
       updateActivityBadge();
+      reconstituteWorkerPartitions();
     }
   }
 
@@ -1867,6 +2233,7 @@ select.mini-select {
       // A reload during an in-flight turn must show the real state, not a
       // false "ready": the server reports whether the engine is still busy.
       setBusy(res.session.busy === true);
+      await loadApprovals();
     } catch (err) {
       toast('Failed to load session: ' + err.message, true);
     }
@@ -2417,7 +2784,12 @@ select.mini-select {
     try {
       var res = await apiFetch('/api/approvals');
       var all = res.approvals || [];
-      var pending = all.filter(function (a) { return a.status === 'pending'; });
+      all.forEach(function (a) {
+        if (isQuestionApproval(a)) {
+          renderQaQuestionCard(a);
+        }
+      });
+      var pending = all.filter(function (a) { return a.status === 'pending' && !isQuestionApproval(a); });
       renderApprovals(pending);
       if (pending.length > 0 && !state.pendingApprovalId) {
         showPendingApproval(pending[0]);
@@ -2493,17 +2865,194 @@ select.mini-select {
     }
   }
 
+  // ------------------------------------------------------------ qa questions
+  function isQuestionApproval(approval) {
+    if (!approval) return false;
+    return approval.kind === 'question' ||
+      approval.action === 'qa.question' ||
+      (typeof approval.action === 'string' && approval.action.indexOf('question') !== -1);
+  }
+
+  function renderQaQuestionCardHtml(opts) {
+    var titleHtml = '<div class="qa-title">' + escapeHtml(opts.title) + '</div>';
+    var descHtml = opts.description ? '<div class="qa-desc">' + escapeHtml(opts.description) + '</div>' : '';
+    var badgesHtml = opts.dependentTasks && opts.dependentTasks.length > 0
+      ? '<div class="qa-badges">' + opts.dependentTasks.map(function (t) { return '<span class="qa-badge">' + escapeHtml(t) + '</span>'; }).join('') + '</div>'
+      : '';
+    var optionsHtml = opts.options && opts.options.length > 0
+      ? '<div class="qa-options">' + opts.options.map(function (opt) {
+          var isSelected = opts.selectedOption === opt;
+          return '<button type="button" class="qa-option-btn' + (isSelected ? ' is-selected' : '') + '" data-option="' + escapeHtml(opt) + '">' + escapeHtml(opt) + '</button>';
+        }).join('') + '</div>'
+      : '';
+    var statusHtml = opts.resolved
+      ? '<div class="qa-resolved-status qa-resolved">Unblocked and confirmed' + (opts.selectedOption ? ': <strong>' + escapeHtml(opts.selectedOption) + '</strong>' : '') + '</div>'
+      : '';
+    var actionsHtml = '<div class="qa-actions"><button type="button" class="btn-primary qa-confirm-btn' +
+      (opts.resolved ? ' is-resolved' : '') + '" data-confirm-qa="' + escapeHtml(opts.id) + '"' +
+      (opts.resolved ? ' disabled' : '') + '>Confirm & Unblock</button></div>';
+    var resolvedClass = opts.resolved ? ' qa-resolved' : '';
+    return '<div class="qa-card' + resolvedClass + '" id="qa-card-' + escapeHtml(opts.id) + '" data-qa-id="' + escapeHtml(opts.id) + '">' +
+      '<div class="qa-card-head">' + titleHtml + badgesHtml + '</div>' +
+      descHtml +
+      optionsHtml +
+      statusHtml +
+      actionsHtml +
+      '</div>';
+  }
+
+  function renderQaQuestionCard(approval) {
+    var list = el('messagesList');
+    if (!list || !approval) return;
+    var existing = document.getElementById('qa-card-' + approval.id) || list.querySelector('[data-qa-id="' + approval.id + '"]');
+    var isResolved = approval.status === 'approved' || approval.status === 'denied';
+
+    if (existing) {
+      if (isResolved) {
+        updateQaCardSettled(existing, approval);
+      }
+      return;
+    }
+
+    var scope = approval.scope || {};
+    if (typeof scope === 'string') {
+      try { scope = JSON.parse(scope); } catch (e) { scope = {}; }
+    }
+    var title = approval.title || scope.title || scope.question || approval.reason || 'QA Question';
+    var description = approval.description || scope.description || (scope.question && scope.title ? scope.question : '') || '';
+    var dependentTasks = approval.dependentTasks || scope.dependentTasks || (approval.taskId ? [approval.taskId] : []);
+    var options = approval.options || scope.options || [];
+    var selectedOpt = approval.selectedOption || (options.length > 0 ? options[0] : null);
+
+    var container = document.createElement('div');
+    container.innerHTML = renderQaQuestionCardHtml({
+      id: approval.id,
+      title: title,
+      description: description,
+      dependentTasks: dependentTasks,
+      options: options,
+      selectedOption: selectedOpt,
+      resolved: isResolved
+    });
+    var card = container.firstElementChild;
+    if (!card) return;
+    list.appendChild(card);
+    maybeScroll(false);
+
+    bindQaCardEvents(card, approval.id);
+  }
+
+  function bindQaCardEvents(card, approvalId) {
+    var optionBtns = card.querySelectorAll('.qa-option-btn');
+    Array.prototype.forEach.call(optionBtns, function (btn) {
+      btn.addEventListener('click', function () {
+        if (card.classList.contains('qa-resolved')) return;
+        Array.prototype.forEach.call(optionBtns, function (b) { b.classList.remove('is-selected'); });
+        btn.classList.add('is-selected');
+        var confirmBtn = card.querySelector('[data-confirm-qa]');
+        if (confirmBtn) confirmBtn.disabled = false;
+      });
+    });
+
+    var confirmBtn = card.querySelector('[data-confirm-qa]');
+    if (confirmBtn) {
+      confirmBtn.addEventListener('click', async function () {
+        if (confirmBtn.disabled) return;
+        var selectedBtn = card.querySelector('.qa-option-btn.is-selected');
+        var selectedOption = selectedBtn ? selectedBtn.getAttribute('data-option') : undefined;
+        try {
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = 'Unblocking\\u2026';
+          var res = await apiFetch('/api/approvals/' + encodeURIComponent(approvalId) + '/decide', {
+            method: 'POST',
+            body: JSON.stringify({
+              decision: 'approved',
+              selectedOption: selectedOption,
+              autoContinue: true
+            })
+          });
+          toast('Question confirmed & unblocked');
+          updateQaCardSettled(card, { id: approvalId, status: 'approved', selectedOption: selectedOption });
+          await loadApprovals();
+          await refreshActiveRun();
+        } catch (err) {
+          toast('Failed to confirm question: ' + err.message, true);
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Confirm & Unblock';
+        }
+      });
+    }
+  }
+
+  function updateQaCardSettled(card, approval) {
+    if (!card) return;
+    card.classList.add('qa-resolved');
+    var selectedOption = approval.selectedOption;
+    if (!selectedOption) {
+      var selBtn = card.querySelector('.qa-option-btn.is-selected');
+      if (selBtn) selectedOption = selBtn.getAttribute('data-option');
+    }
+    var existingStatus = card.querySelector('.qa-resolved-status');
+    if (!existingStatus) {
+      var statusDiv = document.createElement('div');
+      statusDiv.className = 'qa-resolved-status qa-resolved';
+      statusDiv.innerHTML = 'Unblocked and confirmed' + (selectedOption ? ': <strong>' + escapeHtml(selectedOption) + '</strong>' : '');
+      var actions = card.querySelector('.qa-actions');
+      if (actions) {
+        card.insertBefore(statusDiv, actions);
+      } else {
+        card.appendChild(statusDiv);
+      }
+    } else if (selectedOption) {
+      existingStatus.innerHTML = 'Unblocked and confirmed: <strong>' + escapeHtml(selectedOption) + '</strong>';
+    }
+    var confirmBtn = card.querySelector('[data-confirm-qa]');
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.classList.add('is-resolved');
+      confirmBtn.textContent = 'Confirm & Unblock';
+    }
+    var optionBtns = card.querySelectorAll('.qa-option-btn');
+    Array.prototype.forEach.call(optionBtns, function (b) {
+      if (selectedOption && b.getAttribute('data-option') === selectedOption) {
+        b.classList.add('is-selected');
+      } else if (selectedOption) {
+        b.classList.remove('is-selected');
+      }
+    });
+  }
+
   // ------------------------------------------------------------ orchestra
   async function loadRunDetail(runId) {
     if (!runId) {
       renderOrchestra(null, [], []);
       return;
     }
+    // A different run means the inspector holds stale partitions: drop the
+    // previous run's tasks/workers before reconstituting from this run's data.
+    if (state.loadedRunId && state.loadedRunId !== runId) {
+      state.tasks = {};
+      state.workers = {};
+      var grid = el('rightInspectorGrid');
+      if (grid) grid.innerHTML = '';
+    }
+    state.loadedRunId = runId;
     try {
       var res = await apiFetch('/api/runs/' + encodeURIComponent(runId));
       renderOrchestra(res.run.run, res.run.tasks || [], res.run.edges || []);
+      if (res.run && res.run.tasks) {
+        // Reload/reconnect path: the durable task states are the only source
+        // after a refresh (no SSE replay), so seed the badge from them too.
+        res.run.tasks.forEach(function (t) {
+          if (!t || !t.id) return;
+          state.tasks[t.id] = { id: t.id, title: t.title, state: t.state, runId: runId };
+        });
+        updateActivityBadge();
+        reconstituteWorkerPartitions(res.run.tasks);
+      }
     } catch (err) {
       renderOrchestra(null, [], []);
+      renderDag([], []);
     }
   }
 
@@ -3125,7 +3674,7 @@ select.mini-select {
     if (!badge) return;
     var working = Object.keys(state.tasks).filter(function (id) {
       var t = state.tasks[id];
-      return t.state === 'running' || t.state === 'active';
+      return t.state === 'running' || t.state === 'needs_approval' || t.state === 'needs_input' || t.state === 'verifying';
     });
     var isWorking = working.length > 0 || state.busy || state.streaming;
     if (!isWorking) {
@@ -3134,15 +3683,282 @@ select.mini-select {
     }
     badge.classList.remove('is-hidden');
     var text = el('shipCountText');
-    var shipCount = working.length > 0 ? working.length : (state.mode === 'build' ? 3 : 1);
-    if (text) text.textContent = shipCount + ' Ship' + (shipCount > 1 ? 's' : '') + ' working';
+    // Never invent a head-count: when the manager is still planning there are
+    // zero workers, and the badge says so instead of showing a placeholder 3.
+    if (text) {
+      text.textContent = working.length > 0
+        ? working.length + ' Ship' + (working.length > 1 ? 's' : '') + ' working'
+        : (state.mode === 'build' ? 'Team preparing\u2026' : 'Working\u2026');
+    }
     var tip = el('shipActivityTooltip');
     if (tip) {
       tip.innerHTML = '<div style="font-weight:600;color:#fff;border-bottom:1px solid #241e38;padding-bottom:3px;">Active Ship Tasks</div>' +
         (working.length > 0
-          ? working.map(function (id) { return '<div>\\u2693 ' + escapeHtml(state.tasks[id].title || id) + '</div>'; }).join('')
-          : '<div>\\u2693 ' + (state.mode === 'build' ? 'Team orchestration in progress\\u2026' : 'Prompt turn execution in progress\\u2026') + '</div>');
+          ? working.map(function (id) { return '<div>\u2693 ' + escapeHtml(state.tasks[id].title || id) + '</div>'; }).join('')
+          : '<div>\u2693 ' + (state.mode === 'build' ? 'Team orchestration in progress\u2026' : 'Prompt turn execution in progress\u2026') + '</div>');
     }
+  }
+
+  // -------------------------------------------------- right-side inspector
+  function toggleRightInspector(force) {
+    var insp = el('rightInspector');
+    if (!insp) return;
+    var show = force === undefined ? insp.classList.contains('is-hidden') : force;
+    state.rightInspectorOpen = show;
+    insp.classList.toggle('is-hidden', !show);
+    if (show) {
+      updateInspectorPartitionsLayout();
+      reconstituteWorkerPartitions();
+    }
+  }
+
+  function sanitizeId(str) {
+    return String(str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+
+  function updateInspectorPartitionsLayout() {
+    var grid = el('rightInspectorGrid');
+    if (!grid) return;
+    var partitions = grid.querySelectorAll('.worker-partition');
+    var count = partitions.length;
+    var countBadge = el('rightInspectorCount');
+    if (countBadge) {
+      countBadge.textContent = count + ' worker' + (count === 1 ? '' : 's');
+    }
+    if (count > 4) {
+      grid.classList.add('has-many-workers');
+    } else {
+      grid.classList.remove('has-many-workers');
+    }
+  }
+
+  function createWorkerPartitionElement(worker) {
+    var partitionId = 'worker-partition-' + sanitizeId(worker.taskId);
+    var partition = document.createElement('div');
+    partition.id = partitionId;
+    partition.className = 'worker-partition';
+    partition.setAttribute('data-task-id', worker.taskId);
+
+    var head = document.createElement('div');
+    head.className = 'worker-partition-head';
+
+    var title = document.createElement('div');
+    title.className = 'worker-partition-title';
+    title.innerHTML = '<span class="worker-badge-role">' + escapeHtml(worker.role || 'worker') + '</span> ' +
+      '<span class="worker-partition-name">' + escapeHtml(worker.taskId) + '</span>' +
+      (worker.model ? ' <span class="tag-mono worker-partition-model">' + escapeHtml(worker.model) + '</span>' : '');
+
+    var statusWrap = document.createElement('div');
+    statusWrap.className = 'worker-partition-meta';
+    statusWrap.innerHTML = '<span class="worker-badge-status is-' + escapeHtml(worker.status || 'active') + '">' + escapeHtml(worker.status || 'active') + '</span>';
+
+    head.appendChild(title);
+    head.appendChild(statusWrap);
+
+    var workspaceLine = null;
+    if (worker.workspace) {
+      workspaceLine = document.createElement('div');
+      workspaceLine.className = 'mono worker-partition-workspace-line';
+      workspaceLine.textContent = worker.workspace;
+      workspaceLine.title = worker.workspace;
+    }
+
+    var stream = document.createElement('div');
+    stream.className = 'worker-stream';
+
+    partition.appendChild(head);
+    if (workspaceLine) partition.appendChild(workspaceLine);
+    partition.appendChild(stream);
+    return partition;
+  }
+
+  function updateWorkerPartitionElement(partition, worker) {
+    if (!partition || !worker) return;
+    var roleBadge = partition.querySelector('.worker-badge-role');
+    if (roleBadge && worker.role) {
+      roleBadge.textContent = worker.role;
+    }
+    var statusBadge = partition.querySelector('.worker-badge-status');
+    if (statusBadge) {
+      statusBadge.className = 'worker-badge-status is-' + escapeHtml(worker.status || 'active');
+      statusBadge.textContent = worker.status || 'active';
+    }
+    var title = partition.querySelector('.worker-partition-title');
+    if (!title) return;
+    if (worker.model) {
+      var modelSpan = title.querySelector('.worker-partition-model');
+      if (!modelSpan) {
+        modelSpan = document.createElement('span');
+        modelSpan.className = 'tag-mono worker-partition-model';
+        title.appendChild(modelSpan);
+      }
+      modelSpan.textContent = ' ' + worker.model;
+    }
+    if (worker.workspace) {
+      var wsLine = partition.querySelector('.worker-partition-workspace-line');
+      if (!wsLine) {
+        wsLine = document.createElement('div');
+        wsLine.className = 'mono worker-partition-workspace-line';
+        var streamEl = partition.querySelector('.worker-stream');
+        if (streamEl) partition.insertBefore(wsLine, streamEl);
+        else partition.appendChild(wsLine);
+      }
+      wsLine.textContent = worker.workspace;
+      wsLine.title = worker.workspace;
+    }
+  }
+
+  function appendWorkerStreamEntry(partition, text, entryClass) {
+    if (!partition || !text) return;
+    var stream = partition.querySelector('.worker-stream');
+    if (!stream) return;
+    var atBottom = (stream.scrollHeight - stream.scrollTop - stream.clientHeight) <= 30;
+
+    var entry = document.createElement('div');
+    entry.className = 'worker-stream-entry' + (entryClass ? ' ' + entryClass : '');
+    entry.textContent = text;
+    stream.appendChild(entry);
+
+    if (atBottom) {
+      stream.scrollTop = stream.scrollHeight;
+    }
+  }
+
+  function handleWorkerEvent(ev) {
+    if (!ev || !ev.taskId) return;
+    var worker = state.workers[ev.taskId];
+    if (!worker) {
+      worker = {
+        taskId: ev.taskId,
+        role: ev.role || 'worker',
+        model: ev.model || '',
+        workspace: ev.workspace || '',
+        status: 'active',
+        logs: []
+      };
+      state.workers[ev.taskId] = worker;
+    }
+    if (ev.role) worker.role = ev.role;
+    if (ev.model) worker.model = ev.model;
+    if (ev.workspace) worker.workspace = ev.workspace;
+
+    if (ev.type === 'worker.started' || ev.type === 'worker.progress') {
+      worker.status = 'running';
+    } else if (ev.type === 'worker.question' || ev.type === 'worker.waiting') {
+      worker.status = 'waiting';
+    } else if (ev.type === 'worker.completed') {
+      worker.status = 'completed';
+    } else if (ev.type === 'worker.failed') {
+      worker.status = 'failed';
+    } else if (ev.type === 'worker.cancelled') {
+      worker.status = 'cancelled';
+    } else if (ev.type === 'worker.created') {
+      worker.status = 'created';
+    }
+
+    var grid = el('rightInspectorGrid');
+    var partition = null;
+    if (grid) {
+      var partitionId = 'worker-partition-' + sanitizeId(ev.taskId);
+      partition = document.getElementById(partitionId);
+      if (!partition) {
+        partition = createWorkerPartitionElement(worker);
+        grid.appendChild(partition);
+        updateInspectorPartitionsLayout();
+      } else {
+        updateWorkerPartitionElement(partition, worker);
+      }
+    }
+
+    var entryText = '';
+    var entryClass = '';
+    if (ev.payload) {
+      if (typeof ev.payload.token === 'string') {
+        entryText = ev.payload.token;
+        entryClass = 'is-token';
+      } else if (typeof ev.payload.step === 'string') {
+        entryText = '\u203a ' + ev.payload.step;
+      } else if (typeof ev.payload.text === 'string') {
+        entryText = ev.payload.text;
+      } else if (typeof ev.payload.summary === 'string') {
+        entryText = '\u2714 ' + ev.payload.summary;
+      } else if (typeof ev.payload.error === 'string') {
+        entryText = '\u2716 ' + ev.payload.error;
+        entryClass = 'is-err';
+      } else if (typeof ev.payload.question === 'string') {
+        entryText = '? ' + ev.payload.question;
+      } else {
+        var keys = Object.keys(ev.payload);
+        if (keys.length > 0) {
+          entryText = JSON.stringify(ev.payload);
+        }
+      }
+    }
+    if (!entryText) {
+      entryText = '[' + ev.type.replace('worker.', '') + ']';
+    }
+
+    worker.logs.push({ text: entryText, cls: entryClass, timestamp: ev.timestamp || Date.now() });
+    if (partition) {
+      appendWorkerStreamEntry(partition, entryText, entryClass);
+    }
+    updateActivityBadge();
+  }
+
+  function reconstituteWorkerPartitions(tasksList) {
+    var tasks = tasksList || (state.tasks ? Object.values(state.tasks) : []);
+    var grid = el('rightInspectorGrid');
+    if (!grid) return;
+
+    Object.keys(state.workers).forEach(function (id) {
+      var worker = state.workers[id];
+      var partitionId = 'worker-partition-' + sanitizeId(worker.taskId);
+      var partition = document.getElementById(partitionId);
+      if (!partition) {
+        partition = createWorkerPartitionElement(worker);
+        grid.appendChild(partition);
+        if (worker.logs && worker.logs.length > 0) {
+          worker.logs.forEach(function (log) {
+            appendWorkerStreamEntry(partition, log.text, log.cls);
+          });
+        }
+      } else {
+        updateWorkerPartitionElement(partition, worker);
+      }
+    });
+
+    if (Array.isArray(tasks) && tasks.length > 0) {
+      tasks.forEach(function (t) {
+        if (!t || !t.id) return;
+        var worker = state.workers[t.id];
+        if (!worker) {
+          worker = {
+            taskId: t.id,
+            role: t.role || 'worker',
+            model: t.model || '',
+            workspace: t.workspace || '',
+            status: t.state || 'active',
+            logs: []
+          };
+          state.workers[t.id] = worker;
+        } else {
+          if (t.state) worker.status = t.state;
+          if (!worker.role && t.role) worker.role = t.role;
+          if (!worker.model && t.model) worker.model = t.model;
+          if (!worker.workspace && t.workspace) worker.workspace = t.workspace;
+        }
+        var partitionId = 'worker-partition-' + sanitizeId(t.id);
+        var partition = document.getElementById(partitionId);
+        if (!partition) {
+          partition = createWorkerPartitionElement(worker);
+          grid.appendChild(partition);
+        } else {
+          updateWorkerPartitionElement(partition, worker);
+        }
+      });
+    }
+
+    updateInspectorPartitionsLayout();
   }
 
   // -------------------------------------------------------------- popovers
@@ -3191,6 +4007,11 @@ select.mini-select {
     var modal = el('attachModal');
     if (modal && !modal.classList.contains('is-hidden')) {
       closeAttachModal();
+      return true;
+    }
+    var insp = el('rightInspector');
+    if (insp && !insp.classList.contains('is-hidden')) {
+      toggleRightInspector(false);
       return true;
     }
     if (state.buildConfirmOpen) {
@@ -3416,6 +4237,20 @@ select.mini-select {
       mic.addEventListener('click', toggleVoiceInput);
     }
 
+    var shipBadge = el('shipActivityBadgeContainer');
+    if (shipBadge) {
+      shipBadge.addEventListener('click', function () {
+        toggleRightInspector();
+      });
+    }
+
+    var rightInspectorClose = el('rightInspectorClose');
+    if (rightInspectorClose) {
+      rightInspectorClose.addEventListener('click', function () {
+        toggleRightInspector(false);
+      });
+    }
+
     var restoreBtn = el('btnRestoreSidebar');
     if (restoreBtn) {
       restoreBtn.addEventListener('click', function (e) {
@@ -3573,6 +4408,7 @@ select.mini-select {
       if (queryTab) {
         switchSidebarTab(queryTab);
       }
+      reconstituteWorkerPartitions();
     } catch (err) {
       console.error('Initialization error:', err);
       toast('Initialization failed: ' + err.message, true);

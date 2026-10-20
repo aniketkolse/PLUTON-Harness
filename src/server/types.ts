@@ -61,9 +61,17 @@ export interface SessionDetailView {
   busy: boolean
 }
 
+export interface RunTaskView extends TaskRecord {
+  /** Claim-time assignment, surfaced for inspector partitions. */
+  role?: string
+  model?: string
+  /** Active checkout path for isolated workers (absent for read-only roles). */
+  workspace?: string
+}
+
 export interface RunDetailView {
   run: RunRecord
-  tasks: TaskRecord[]
+  tasks: RunTaskView[]
   edges: TaskEdgeRecord[]
   approvals: ApprovalRecord[]
   usage: {
@@ -72,6 +80,31 @@ export interface RunDetailView {
     totalCostUsd: number
     perMuse: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>
   }
+}
+
+export const WORKER_EVENT_TYPES = [
+  'worker.created',
+  'worker.started',
+  'worker.progress',
+  'worker.question',
+  'worker.waiting',
+  'worker.report',
+  'worker.completed',
+  'worker.failed',
+  'worker.cancelled',
+] as const
+
+export type WorkerEventType = (typeof WORKER_EVENT_TYPES)[number]
+
+export interface WorkerSSEEvent {
+  type: WorkerEventType
+  runId: string
+  taskId: string
+  role: string
+  model?: string
+  workspace?: string
+  payload?: Record<string, unknown>
+  timestamp?: number
 }
 
 export type ServerSSEEvent =
@@ -85,6 +118,7 @@ export type ServerSSEEvent =
   | { type: 'run_state'; runId: string; state: string; goal: string }
   | { type: 'task_state'; taskId: string; runId: string; state: string; title: string }
   | { type: 'heartbeat'; timestamp: number }
+  | WorkerSSEEvent
 
 export interface HealthResponse {
   ok: true

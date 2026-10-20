@@ -24,9 +24,30 @@ import type {
   EngineDiscovery,
   EngineModel,
   EngineSession,
+  ModelAvailability,
   StartSessionRequest,
 } from '../contract/types.ts'
 import { OPENCODE_MISSING_FIX, assertNonEmptyModel, resolveOpenCodeBinary } from './discover.ts'
+
+export { type ModelAvailability } from '../contract/types.ts'
+
+export const SHIP_WORKER_MODELS = [
+  '9router/ag/claude-opus-4-6-thinking',
+  '9router/ag/gemini-3.8-flash',
+  '9router/ag/gemini-3.8-flash-high',
+  'opencode/beam-free',
+  'opencode/big-pickle',
+  'opencode/deepseek-v4.1-flash-free',
+  'opencode/glm-5.3-flash-free',
+  'opencode/longcat-2.5-preview-free',
+  'opencode/mimo-v2.6-flash-free',
+  'opencode/minimax-m3.1-flash-free',
+  'opencode/nemotron-3-ultra-free',
+  'opencode/nemotron-3.5-lightning-free',
+  'opencode/nemotron-3.5-super-vl-free',
+] as const
+
+export type ShipWorkerModel = (typeof SHIP_WORKER_MODELS)[number]
 
 // Kept as re-exports so existing imports (tests included) stay stable; the
 // canonical definitions live in the shared ACP modules.
@@ -67,6 +88,16 @@ const MODEL_SET_TIMEOUT_MS = 20_000
 /** What Pluton does with an opencode permission request. */
 export type OpenCodeApprovalPolicy = 'deny' | 'interactive'
 
+export interface RunMockResult {
+  stdout?: string
+  stderr?: string
+  exitCode?: number | null
+  timedOut?: boolean
+  truncated?: boolean
+  durationMs?: number
+  argv?: string[]
+}
+
 export interface OpenCodeAdapterOptions {
   /** Injection for tests: replaces node:child_process.spawn for the ACP child. */
   spawnFn?: AcpSpawnFn
@@ -82,7 +113,7 @@ export interface OpenCodeAdapterOptions {
   requestTimeoutMs?: number
   versionTimeoutMs?: number
   /** Injection for tests: replaces the bounded subprocess runner. */
-  runFn?: (argv: string[], options?: RunOptions) => Promise<RunResult>
+  runFn?: (argv: string[], options?: RunOptions) => Promise<RunResult | RunMockResult>
   /** How long to wait for session/cancel to be acknowledged before poisoning the session. */
   cancelGraceMs?: number
   /**
@@ -257,7 +288,20 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
 
   constructor(opts: OpenCodeAdapterOptions = {}) {
     this.opts = opts
-    this.runFn = opts.runFn ?? run
+    this.runFn = opts.runFn
+      ? async (argv, options) => {
+          const res = await opts.runFn!(argv, options)
+          return {
+            argv: res.argv ?? argv,
+            exitCode: res.exitCode ?? 0,
+            timedOut: res.timedOut ?? false,
+            stdout: res.stdout ?? '',
+            stderr: res.stderr ?? '',
+            truncated: res.truncated ?? false,
+            durationMs: res.durationMs ?? 0,
+          }
+        }
+      : run
   }
 
   capabilities(): EngineCapabilities {
@@ -344,6 +388,45 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       models.push({ id: line, source: 'engine' })
     }
     return models
+  }
+
+  async listModelsWithAvailability(candidateModels?: string[]): Promise<ModelAvailability[]> {
+    let engineModels: EngineModel[] = []
+    let failureReason: string | undefined
+    try {
+      engineModels = await this.listModels()
+    } catch (err) {
+      failureReason = err instanceof Error ? err.message : String(err)
+    }
+
+    const availableSet = new Set(engineModels.map((m) => m.id))
+    const candidates = candidateModels ?? Array.from(new Set([...SHIP_WORKER_MODELS, ...engineModels.map((m) => m.id)]))
+
+    return candidates.map((id) => {
+      if (failureReason !== undefined) {
+        return {
+          id,
+          available: false,
+          reason: failureReason,
+          source: 'catalog',
+        }
+      }
+      const engineModel = engineModels.find((m) => m.id === id)
+      if (availableSet.has(id)) {
+        return {
+          id,
+          available: true,
+          label: engineModel?.label ?? id,
+          source: engineModel?.source ?? 'engine',
+        }
+      }
+      return {
+        id,
+        available: false,
+        reason: `model '${id}' is not offered by engine '${this.kind}'`,
+        source: 'catalog',
+      }
+    })
   }
 
   async authStatus(configDir: string): Promise<EngineAuthStatus> {
@@ -491,7 +574,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     }
   }
 
-  private async applyModel(
+  async applyModel(
     client: AcpClient,
     sessionId: string,
     configOptions: unknown,
@@ -519,3 +602,5 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     }
   }
 }
+
+export { OpenCodeEngineAdapter as OpenCodeAdapter }

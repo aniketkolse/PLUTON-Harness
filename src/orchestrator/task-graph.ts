@@ -12,6 +12,7 @@ import type { NewTaskSpec, Store } from '../store/store.ts'
  * tasks from another run, duplicates, self-deps, and dependency cycles.
  */
 export interface AdmitTaskRequest {
+  id?: string
   runId: string
   parentTaskId: string | null
   title: string
@@ -80,6 +81,7 @@ export function admitTask(store: Store, req: AdmitTaskRequest, limits: AdmitTask
     // not introduce one before inserting it — belt and braces for future
     // edge-adding APIs that reuse this validator.
     const task = store.createTask({
+      id: req.id,
       runId: req.runId,
       parentTaskId: req.parentTaskId,
       title: req.title,
@@ -167,4 +169,259 @@ export function wouldCreateAncestorCycle(
     current = byId.get(current)?.parentTaskId ?? null
   }
   return false
+}
+
+export interface TaskGraphNodeOptions {
+  role?: string
+  state?: string
+  assigneeMuseId?: string | null
+  [key: string]: unknown
+}
+
+export interface TaskGraphNode {
+  id: string
+  role?: string
+  state: string
+  metadata: Record<string, unknown>
+}
+
+function isWaitingState(state: string): boolean {
+  return (
+    state === 'waiting' ||
+    state === 'needs_input' ||
+    state === 'needs_approval' ||
+    state === 'waiting_for_children' ||
+    state === 'awaiting_input' ||
+    state === 'awaiting_approval' ||
+    state.includes('wait') ||
+    state.startsWith('needs_')
+  )
+}
+
+/**
+ * Pure evaluation helper: checks if a task is blocked because any of its direct or
+ * transitive dependencies in `tasks` is in a waiting state (e.g. 'waiting', 'needs_approval', 'needs_input').
+ *
+ * In Pluton's canonical domain model, `fromTaskId` is the dependent task and `toTaskId` is the dependency
+ * (edge semantics: `from` depends on `to`). If edges are supplied in inverted order (`to` depends on `from`),
+ * this helper adapts accordingly.
+ */
+export function isTaskBlockedOnWaiting(
+  taskId: string,
+  tasks: Map<string, TaskRecord>,
+  edges: TaskEdgeRecord[],
+): boolean {
+  const hasCanonical = edges.some((e) => e.fromTaskId === taskId)
+  const hasInverted = !hasCanonical && edges.some((e) => e.toTaskId === taskId)
+
+  const getPrerequisites = (currentId: string): string[] => {
+    if (hasInverted) {
+      return edges.filter((e) => e.toTaskId === currentId).map((e) => e.fromTaskId)
+    }
+    return edges.filter((e) => e.fromTaskId === currentId).map((e) => e.toTaskId)
+  }
+
+  const seen = new Set<string>()
+  const queue = [...getPrerequisites(taskId)]
+
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (seen.has(current)) continue
+    seen.add(current)
+
+    const task = tasks.get(current)
+    if (task && isWaitingState(task.state)) {
+      return true
+    }
+
+    for (const prereq of getPrerequisites(current)) {
+      if (!seen.has(prereq)) {
+        queue.push(prereq)
+      }
+    }
+  }
+
+  return false
+}
+
+/**
+ * In-memory Task Graph representation for DAG dependency evaluation, selective pausing,
+ * and dispatch readiness calculation.
+ */
+export class TaskGraph {
+  private nodes = new Map<string, TaskGraphNode>()
+  private dependencies = new Map<string, Set<string>>() // dependent -> upstream dependencies
+  private dependents = new Map<string, Set<string>>() // upstream dependency -> downstream dependents
+
+  addTask(id: string, options: TaskGraphNodeOptions = {}): void {
+    const { role, state = 'pending', ...rest } = options
+    const existing = this.nodes.get(id)
+    if (existing) {
+      if (role !== undefined) existing.role = role
+      if (state !== undefined) existing.state = String(state)
+      existing.metadata = { ...existing.metadata, ...rest }
+    } else {
+      this.nodes.set(id, {
+        id,
+        role,
+        state: String(state),
+        metadata: rest,
+      })
+    }
+    if (!this.dependencies.has(id)) {
+      this.dependencies.set(id, new Set())
+    }
+    if (!this.dependents.has(id)) {
+      this.dependents.set(id, new Set())
+    }
+  }
+
+  getTask(id: string): TaskGraphNode | undefined {
+    return this.nodes.get(id)
+  }
+
+  hasTask(id: string): boolean {
+    return this.nodes.has(id)
+  }
+
+  setTaskState(id: string, state: string): void {
+    const node = this.nodes.get(id)
+    if (node) {
+      node.state = state
+    }
+  }
+
+  /**
+   * Adds an edge from upstream (dependency / prerequisite) to downstream (dependent).
+   * e.g. addEdge('task-qa', 'task-coder') indicates task-coder depends on task-qa.
+   */
+  addEdge(fromTaskId: string, toTaskId: string): void {
+    if (!this.nodes.has(fromTaskId)) {
+      this.addTask(fromTaskId)
+    }
+    if (!this.nodes.has(toTaskId)) {
+      this.addTask(toTaskId)
+    }
+
+    if (!this.dependents.has(fromTaskId)) {
+      this.dependents.set(fromTaskId, new Set())
+    }
+    this.dependents.get(fromTaskId)!.add(toTaskId)
+
+    if (!this.dependencies.has(toTaskId)) {
+      this.dependencies.set(toTaskId, new Set())
+    }
+    this.dependencies.get(toTaskId)!.add(fromTaskId)
+  }
+
+  getDependencies(taskId: string): string[] {
+    return Array.from(this.dependencies.get(taskId) ?? [])
+  }
+
+  getDependents(taskId: string): string[] {
+    return Array.from(this.dependents.get(taskId) ?? [])
+  }
+
+  /**
+   * Returns all tasks that transitively depend on the given taskId (downstream tasks).
+   */
+  getTransitiveDependents(taskId: string): string[] {
+    const result: string[] = []
+    const seen = new Set<string>()
+    const queue = Array.from(this.dependents.get(taskId) ?? [])
+
+    while (queue.length > 0) {
+      const nextId = queue.shift()!
+      if (seen.has(nextId)) continue
+      seen.add(nextId)
+      result.push(nextId)
+      for (const child of this.dependents.get(nextId) ?? []) {
+        if (!seen.has(child)) {
+          queue.push(child)
+        }
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Returns all tasks that taskId directly or transitively depends on (upstream tasks).
+   */
+  getTransitiveDependencies(taskId: string): string[] {
+    const result: string[] = []
+    const seen = new Set<string>()
+    const queue = Array.from(this.dependencies.get(taskId) ?? [])
+
+    while (queue.length > 0) {
+      const nextId = queue.shift()!
+      if (seen.has(nextId)) continue
+      seen.add(nextId)
+      result.push(nextId)
+      for (const parent of this.dependencies.get(nextId) ?? []) {
+        if (!seen.has(parent)) {
+          queue.push(parent)
+        }
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Returns tasks that are eligible to be dispatched.
+   * A task is ready if:
+   * 1. Its state is 'pending' or 'queued'.
+   * 2. All of its direct dependencies have state 'completed'.
+   */
+  getReadyTasks(): string[] {
+    const ready: string[] = []
+    for (const [id, node] of this.nodes) {
+      if (node.state !== 'pending' && node.state !== 'queued') {
+        continue
+      }
+      const deps = this.dependencies.get(id)
+      let allDepsCompleted = true
+      if (deps && deps.size > 0) {
+        for (const depId of deps) {
+          const dep = this.nodes.get(depId)
+          if (!dep || dep.state !== 'completed') {
+            allDepsCompleted = false
+            break
+          }
+        }
+      }
+      if (allDepsCompleted) {
+        ready.push(id)
+      }
+    }
+    return ready
+  }
+
+  /**
+   * Returns true if taskId depends directly or transitively on any task in a waiting state.
+   */
+  isTaskBlockedOnWaiting(taskId: string): boolean {
+    const seen = new Set<string>()
+    const queue = Array.from(this.dependencies.get(taskId) ?? [])
+
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      if (seen.has(current)) continue
+      seen.add(current)
+
+      const dep = this.nodes.get(current)
+      if (dep && isWaitingState(dep.state)) {
+        return true
+      }
+
+      for (const parent of this.dependencies.get(current) ?? []) {
+        if (!seen.has(parent)) {
+          queue.push(parent)
+        }
+      }
+    }
+
+    return false
+  }
 }

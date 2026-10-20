@@ -59,6 +59,29 @@ import { newId } from '../domain/ids.ts'
 /** Builds the per-Muse adapter; `session.isolatedCheckout` is a proven runtime fact. */
 export type SupervisorAdapterFactory = (muse: MuseRecord, session: EngineIsolationFacts) => EngineAdapter
 
+/**
+ * Live inspector event for one worker (task). The server maps these onto the
+ * durable `worker.*` event log + SSE frames; the supervisor only describes what
+ * really happened (session start, tool step, settled state), never a guess.
+ */
+export interface WorkerLifecycleEvent {
+  type:
+    | 'worker.started'
+    | 'worker.progress'
+    | 'worker.question'
+    | 'worker.waiting'
+    | 'worker.report'
+    | 'worker.completed'
+    | 'worker.failed'
+    | 'worker.cancelled'
+  runId: string
+  taskId: string
+  role: string
+  model?: string
+  workspace?: string
+  payload?: Record<string, unknown>
+}
+
 export interface SupervisorOptions {
   store: Store
   projectId: string
@@ -97,6 +120,12 @@ export interface SupervisorOptions {
   mcpServerFor?: (muse: MuseRecord, taskId: string | null) => McpServerSpec | null
   wakeups?: WakeupRegistry
   now?: () => number
+  /**
+   * Observer for live per-worker inspector events (SSE). Called synchronously
+   * on the run's hot path, so an observer failure must never break the run:
+   * {@link RunSupervisor} isolates it. Absent in CLI/headless runs.
+   */
+  onWorkerEvent?: (event: WorkerLifecycleEvent) => void
   diagnostic?: (line: string) => void
   leaseManager?: FileLeaseManager
   circuitBreaker?: CircuitBreaker
@@ -166,6 +195,13 @@ export const DEFAULT_OWNERSHIP_TTL_MS = 90_000
 function boundedSummary(text: string | undefined, max = 2_000): string | null {
   if (text === undefined) return null
   return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+/** Read a JSON object value without trusting its shape. */
+function jsonObject(value: JsonValue | null): Record<string, JsonValue> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, JsonValue>)
+    : null
 }
 
 /**
@@ -266,6 +302,19 @@ export function buildManagerPrompt(
   return `${text.slice(0, maxChars)}\n[truncated by Pluton: prompt exceeded max_prompt_chars]`
 }
 
+const activeSupervisors = new Map<string, RunSupervisor>()
+
+export function getActiveSupervisor(runId: string): RunSupervisor | undefined {
+  return activeSupervisors.get(runId)
+}
+
+export function wakeSupervisor(runId: string): void {
+  const supervisor = activeSupervisors.get(runId)
+  if (supervisor) {
+    supervisor.wake()
+  }
+}
+
 export class RunSupervisor {
   private readonly store: Store
   private readonly projectId: string
@@ -290,6 +339,7 @@ export class RunSupervisor {
   private readonly wakeups: WakeupRegistry
   private readonly now: () => number
   private readonly diagnostic: (line: string) => void
+  private readonly onWorkerEvent: ((event: WorkerLifecycleEvent) => void) | null
   readonly leaseManager: FileLeaseManager
   readonly circuitBreaker: CircuitBreaker
   readonly usageLedger: UsageLedger
@@ -342,6 +392,7 @@ export class RunSupervisor {
     this.wakeups = opts.wakeups ?? new WakeupRegistry()
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})
+    this.onWorkerEvent = opts.onWorkerEvent ?? null
     this.leaseManager = opts.leaseManager ?? new FileLeaseManager()
     this.circuitBreaker = opts.circuitBreaker ?? new CircuitBreaker()
     this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
@@ -411,6 +462,76 @@ export class RunSupervisor {
 
   private notifySettled(task: TaskRecord): void {
     notifyTaskSettled(this.wakeups, this.runId, task, taskAncestorIds(this.store, task))
+    this.emitSettledWorkerEvent(task)
+  }
+
+  /** Role/model snapshot captured at claim time (never later muse config edits). */
+  private assignmentFields(task: TaskRecord): { role: string; model?: string } {
+    const assignment = jsonObject(task.assignment)
+    const role = assignment !== null && typeof assignment['role'] === 'string' ? assignment['role'] : 'worker'
+    const model = assignment !== null && typeof assignment['model'] === 'string' ? assignment['model'] : undefined
+    return { role, ...(model !== undefined ? { model } : {}) }
+  }
+
+  /** Tell the live inspector what durable state the task actually settled in. */
+  private emitSettledWorkerEvent(task: TaskRecord): void {
+    const base = { runId: this.runId, taskId: task.id, ...this.assignmentFields(task) }
+    const result = jsonObject(task.result)
+    const failure = jsonObject(task.failure)
+    const summary = typeof result?.['summary'] === 'string' ? result['summary'].slice(0, 2_000) : undefined
+    const failureMessage =
+      typeof failure?.['message'] === 'string'
+        ? failure['message'].slice(0, 2_000)
+        : typeof failure?.['reason'] === 'string'
+          ? failure['reason'].slice(0, 2_000)
+          : undefined
+    switch (task.state) {
+      case 'completed':
+        this.emitWorkerEvent({
+          ...base,
+          type: 'worker.completed',
+          ...(summary !== undefined ? { payload: { summary } } : {}),
+        })
+        return
+      case 'verifying':
+        this.emitWorkerEvent({
+          ...base,
+          type: 'worker.report',
+          ...(summary !== undefined ? { payload: { summary } } : {}),
+        })
+        return
+      case 'failed':
+        this.emitWorkerEvent({ ...base, type: 'worker.failed', payload: { error: failureMessage ?? 'task failed' } })
+        return
+      case 'cancelled':
+        this.emitWorkerEvent({
+          ...base,
+          type: 'worker.cancelled',
+          ...(summary !== undefined ? { payload: { summary } } : {}),
+        })
+        return
+      case 'unknown_outcome':
+        this.emitWorkerEvent({
+          ...base,
+          type: 'worker.failed',
+          payload: { error: failureMessage ?? 'unknown outcome' },
+        })
+        return
+      default:
+        return
+    }
+  }
+
+  /** One live inspector event; an observer failure never breaks the run. */
+  private emitWorkerEvent(event: WorkerLifecycleEvent): void {
+    if (this.onWorkerEvent === null) return
+    try {
+      this.onWorkerEvent(event)
+    } catch (e) {
+      this.diagnostic(
+        `worker event '${event.type}' for task ${event.taskId} failed: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
   }
 
   private instructionsFor(muse: MuseRecord): string | undefined {
@@ -427,7 +548,11 @@ export class RunSupervisor {
   private async runPrompt(
     session: EngineSession,
     prompt: PromptRequest,
-    context?: { taskId?: string; museId?: string },
+    context?: {
+      taskId?: string
+      museId?: string
+      onTool?: (tool: { name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }) => void
+    },
   ): Promise<PromptOutcome> {
     let result: { outcome: PromptOutcome['outcome']; summary?: string } | null = null
     let errorCode: string | null = null
@@ -487,6 +612,9 @@ export class RunSupervisor {
               }
             }
           },
+          onTool: (t) => {
+            context?.onTool?.(t)
+          },
         })
       }
     } catch (e) {
@@ -517,11 +645,20 @@ export class RunSupervisor {
       onError: (code: string) => void
       onApproval?: (a: { requestId: string; description: string }) => void
       onUsage?: (u: { inputTokens: number; outputTokens: number; costUsd: number }) => void
+      onTool?: (t: { name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }) => void
     },
   ): void {
     switch (ev.kind) {
       case 'text':
         hooks.onText(ev.text.length)
+        break
+      case 'tool':
+        hooks.onTool?.({
+          name: ev.name,
+          phase: ev.phase,
+          ...(ev.summary !== undefined ? { summary: ev.summary } : {}),
+          ...(ev.isError !== undefined ? { isError: ev.isError } : {}),
+        })
         break
       case 'result':
         hooks.onResult({ outcome: ev.outcome, ...(ev.summary !== undefined ? { summary: ev.summary } : {}) })
@@ -727,6 +864,15 @@ export class RunSupervisor {
           this.fence ?? undefined,
         )
         this.appendEvent('task.started', { museId: muse.id, engine: adapter.kind, workspaceId }, task.id)
+        this.emitWorkerEvent({
+          type: 'worker.started',
+          runId: this.runId,
+          taskId: task.id,
+          role: muse.role,
+          model: muse.model,
+          workspace: workdir,
+          payload: { step: `session started (${adapter.kind})` },
+        })
       } catch (e) {
         // A control-plane cancel (or a lost fence) can land after engine startup
         // but before these post-start writes commit. The prompt `finally` below
@@ -746,7 +892,24 @@ export class RunSupervisor {
         out = await this.runPrompt(
           session,
           { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
-          { taskId: task.id, museId: muse.id },
+          {
+            taskId: task.id,
+            museId: muse.id,
+            onTool: (tool) => {
+              if (tool.phase !== 'start') return
+              const label =
+                tool.summary !== undefined && tool.summary !== '' ? `${tool.name}: ${tool.summary}` : tool.name
+              this.emitWorkerEvent({
+                type: 'worker.progress',
+                runId: this.runId,
+                taskId: task.id,
+                role: muse.role,
+                model: muse.model,
+                workspace: workdir,
+                payload: { step: stripControlChars(label).slice(0, 300) },
+              })
+            },
+          },
         )
       } finally {
         // CS-9: the session is no longer an interrupt target, and the task's
@@ -950,6 +1113,11 @@ export class RunSupervisor {
     }
   }
 
+  wake(): void {
+    this.wakeups.notify(this.managerChannel(), `wake:${this.runId}`, 'running')
+    this.dispatchReadyTasks()
+  }
+
   private allQuiescent(managerSettled: boolean): boolean {
     if (!managerSettled) return false
     if (this.inFlight.size > 0) return false
@@ -1002,6 +1170,7 @@ export class RunSupervisor {
               try {
                 if (this.store.setTaskStateIf(taskId, 'running', 'needs_approval', {}, this.fence ?? undefined) !== null) {
                   this.appendEvent('task.approval_waiting', { approvalId: approval.id }, taskId)
+                  this.wakeups.notify(this.managerChannel(), taskId, 'needs_approval')
                 }
               } catch (e) {
                 if (!(e instanceof OwnershipLostError)) throw e
@@ -1011,9 +1180,49 @@ export class RunSupervisor {
             onSettled: (approval: ApprovalRecord, settlement: EngineApprovalSettlement) => {
               if (settlement === 'abort') return
               try {
+                const isQuestion =
+                  approval.action === 'qa.question' ||
+                  approval.action.includes('question') ||
+                  approval.selectedOption !== undefined ||
+                  approval.answer !== undefined
+
+                if (isQuestion && approval.status === 'approved') {
+                  if (this.store.setTaskStateIf(taskId, 'needs_approval', 'running', {}, this.fence ?? undefined) !== null) {
+                    this.store.setTaskStateIf(
+                      taskId,
+                      'running',
+                      'completed',
+                      {
+                        result: {
+                          approvalId: approval.id,
+                          resolved: true,
+                          selectedOption: approval.selectedOption ?? null,
+                          answer: approval.answer ?? null,
+                        },
+                      },
+                      this.fence ?? undefined,
+                    )
+                  }
+                  this.appendEvent(
+                    'task.approval_settled',
+                    {
+                      approvalId: approval.id,
+                      action: approval.action,
+                      selectedOption: approval.selectedOption ?? null,
+                      answer: approval.answer ?? null,
+                    },
+                    taskId,
+                  )
+                  this.wakeups.notify(this.managerChannel(), taskId, 'completed')
+                  this.dispatchReadyTasks()
+                  return
+                }
+
                 if (this.store.setTaskStateIf(taskId, 'needs_approval', 'running', {}, this.fence ?? undefined) !== null) {
                   this.appendEvent('task.approval_settled', { approvalId: approval.id }, taskId)
+                  this.wakeups.notify(this.managerChannel(), taskId, 'running')
                 }
+                this.dispatchReadyTasks()
               } catch (e) {
                 if (!(e instanceof OwnershipLostError)) throw e
                 this.markOwnershipLost('run ownership moved while a task approval wait was being settled')
@@ -1201,6 +1410,7 @@ export class RunSupervisor {
       }
       this.fence = { runId: this.runId, token: claim.token }
       this.lastRenewMs = this.now()
+      activeSupervisors.set(this.runId, this)
       if (claim.tookOver) {
         this.diagnostic(
           `took over run ownership from pid ${claim.previousPid ?? 'unknown'} (its heartbeat expired)`,
@@ -1367,6 +1577,7 @@ export class RunSupervisor {
       }
       throw e
     } finally {
+      activeSupervisors.delete(this.runId)
       if (this.fence !== null && !this.ownershipLost) {
         const fence = this.fence
         try {

@@ -38,6 +38,15 @@ export interface EngineModel {
   source: 'engine' | 'static'
 }
 
+export interface ModelAvailability {
+  /** Exact provider-qualified id. */
+  id: string
+  available: boolean
+  reason?: string
+  source?: 'engine' | 'catalog' | 'static'
+  label?: string
+}
+
 export interface EngineAuthStatus {
   /** Presence only — never a secret value. */
   configured: boolean
@@ -150,6 +159,7 @@ export interface EngineAdapter {
   discover(): Promise<EngineDiscovery>
   /** Empty array when capabilities().modelList is false (say so, don't fabricate). */
   listModels(): Promise<EngineModel[]>
+  listModelsWithAvailability?(candidateModels?: string[]): Promise<ModelAvailability[]>
   authStatus(configDir: string): Promise<EngineAuthStatus>
   startSession(req: StartSessionRequest): Promise<EngineSession>
 }

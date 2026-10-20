@@ -20,7 +20,12 @@ import {
   usageBudgetsFromRuntime,
 } from '../../orchestrator/run-setup.ts'
 import { UsageLedger } from '../../orchestrator/usage-ledger.ts'
-import { RunSupervisor, type RunOutcome, type SupervisorAdapterFactory } from '../../orchestrator/supervisor.ts'
+import {
+  RunSupervisor,
+  type RunOutcome,
+  type SupervisorAdapterFactory,
+  type WorkerLifecycleEvent,
+} from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import {
@@ -75,6 +80,11 @@ export interface RunDeps {
   workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
   /** Test seam: replaces the process spawn behind `docker exec` children. */
   dockerSpawn?: AcpSpawnFn
+  /**
+   * Live inspector sink (the SPA server wires this to its SSE broadcaster).
+   * Headless CLI runs leave it unset.
+   */
+  onWorkerEvent?: (event: WorkerLifecycleEvent) => void
 }
 
 export interface RunSummary {
@@ -351,6 +361,7 @@ export function createRunSupervisor(args: {
     verificationConfigured: ctx.loaded.config.project.verification.length > 0,
     ...(args.skipManager !== undefined ? { skipManager: args.skipManager } : {}),
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
+    ...(deps.onWorkerEvent !== undefined ? { onWorkerEvent: deps.onWorkerEvent } : {}),
     workspaceManager,
     engineEnv: () => ({}),
     mcpServerFor: (muse, taskId) => {

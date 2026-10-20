@@ -51,6 +51,15 @@ muses:
     permissions: [project.read, research.report, diff.inspect]
     approval_mode: ask-for-sensitive-actions
 
+  coder:
+    display_name: Coder
+    role: coder
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
+    instructions_file: .pluton/roles/coder.md
+    workspace_policy: isolated-task-checkout
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+
   worker-a:
     display_name: Worker A
     role: coder

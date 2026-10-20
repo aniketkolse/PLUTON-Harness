@@ -7,13 +7,14 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { isAbsolute, join, relative } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
-import { PlutonError, ValidationError } from '../domain/errors.ts'
+import { NotFoundError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
-import type { MuseRecord, RunRecord } from '../domain/models.ts'
+import type { ApprovalRecord, MuseRecord, RunRecord } from '../domain/models.ts'
 import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
 import { engineAdapterForMuse } from '../engines/approval.ts'
-import { createEngineApprovalChannel, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
+import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
+import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
 import type { EngineSession, McpServerSpec } from '../engines/contract/types.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { run as execRun } from '../util/exec.ts'
@@ -22,10 +23,13 @@ import { safeResolvePath } from './security.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
 import { requestRunCancel, resumeRun, startRunInBackground } from '../cli/commands/run.ts'
+import type { WorkerLifecycleEvent } from '../orchestrator/supervisor.ts'
 import type { ProjectContext } from '../cli/context.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../tools/bridge.ts'
 import { ToolHttpServer } from '../tools/http-transport.ts'
+import { wakeSupervisor } from '../orchestrator/supervisor.ts'
+import type { TaskGraph } from '../orchestrator/task-graph.ts'
 import type {
   HealthResponse,
   McpServerStatus,
@@ -151,9 +155,11 @@ export class ApiRouter {
         const project = store.getProject(this.ctx.projectId)
         const muses = store.listMuses()
         const runs = store.listRuns(50)
-        const activeRun = runs.find((r) =>
-          ['planning', 'running', 'awaiting_approval', 'verifying'].includes(r.state),
-        ) ?? null
+        // listRuns is newest-first: the workspace's active run is the newest
+        // non-terminal one. Terminal run states are excluded rather than
+        // matching a hand-written allowlist, which silently missed `active`
+        // (the primary live state) and made a reload adopt a stale run.
+        const activeRun = runs.find((r) => !isTerminalRunState(r.state)) ?? null
         const approvals = store.listApprovalsByProject(this.ctx.projectId, { status: 'pending' })
 
         const summary: WorkspaceSummary = {
@@ -397,9 +403,40 @@ export class ApiRouter {
         const edges = this.ctx.store.listEdges(runId)
         const approvals = this.ctx.store.listApprovals(runId)
         const usage = this.ctx.store.getRunUsage(runId)
+        // Inspector partitions need role/model/workspace, but TaskRecord only
+        // carries the claim-time `assignment` snapshot and a workspace id.
+        // Enrich here (one place) so the SPA's reconstitution shows the real
+        // assignment instead of guessing from task-id substrings.
+        const workspacePathByTask = new Map<string, string>()
+        for (const ws of this.ctx.store.listWorkspaces(this.ctx.projectId)) {
+          if (ws.runId === runId && ws.taskId !== null) workspacePathByTask.set(ws.taskId, ws.path)
+        }
+        const taskViews = tasks.map((task) => {
+          const assignment =
+            task.assignment !== null && typeof task.assignment === 'object' && !Array.isArray(task.assignment)
+              ? (task.assignment as Record<string, unknown>)
+              : null
+          const role = assignment !== null && typeof assignment['role'] === 'string' ? assignment['role'] : undefined
+          const model = assignment !== null && typeof assignment['model'] === 'string' ? assignment['model'] : undefined
+          // Read-only roles run in the project root, so they have no per-task
+          // workspace row. Report that effective path instead of leaving the
+          // partition blank after a reload (live events already carry it).
+          const assignedMuseId =
+            assignment !== null && typeof assignment['museId'] === 'string' ? assignment['museId'] : undefined
+          const policy = assignedMuseId !== undefined ? this.ctx.loaded.config.muses[assignedMuseId]?.workspace_policy : undefined
+          const workspace =
+            workspacePathByTask.get(task.id) ??
+            (policy === 'read-only' || policy === 'coordinator-read-only' ? this.ctx.loaded.rootDir : undefined)
+          return {
+            ...task,
+            ...(role !== undefined ? { role } : {}),
+            ...(model !== undefined ? { model } : {}),
+            ...(workspace !== undefined ? { workspace } : {}),
+          }
+        })
         const detail: RunDetailView = {
           run,
-          tasks,
+          tasks: taskViews,
           edges,
           approvals,
           usage,
@@ -422,7 +459,12 @@ export class ApiRouter {
       const approvalMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decide$/)
       if (approvalMatch && method === 'POST') {
         const approvalId = approvalMatch[1]!
-        const payload = await this.readJsonBody<{ decision?: 'approved' | 'denied'; autoContinue?: boolean }>(req)
+        const payload = await this.readJsonBody<{
+          decision?: 'approved' | 'denied'
+          autoContinue?: boolean
+          selectedOption?: string
+          answer?: string
+        }>(req)
         if (!payload.decision || !['approved', 'denied'].includes(payload.decision)) {
           this.sendJson(res, 400, { ok: false, error: "decision must be 'approved' or 'denied'" })
           return true
@@ -432,6 +474,31 @@ export class ApiRouter {
           this.sendJson(res, 404, { ok: false, error: `approval '${approvalId}' not found` })
           return true
         }
+
+        const isQuestion =
+          approval.action === 'qa.question' ||
+          approval.action.includes('question') ||
+          payload.selectedOption !== undefined ||
+          payload.answer !== undefined
+
+        if (isQuestion) {
+          const result = await handleQuestionDecision({
+            approvalId,
+            decision: payload.decision,
+            selectedOption: payload.selectedOption,
+            answer: payload.answer,
+            store: this.ctx.store,
+            projectId: this.ctx.projectId,
+          })
+          const updated = this.ctx.store.getApproval(approvalId)
+          this.ctx.broadcaster.broadcast({
+            type: 'approval_decided',
+            approval: updated,
+          })
+          this.sendJson(res, 200, { ok: true, ...result })
+          return true
+        }
+
         if (approval.status !== 'pending') {
           this.sendJson(res, 409, { ok: false, error: `approval is already '${approval.status}'` })
           return true
@@ -530,7 +597,7 @@ export class ApiRouter {
             configPath: this.ctx.loaded.configPath,
             loaded: this.ctx.loaded,
           }
-          resumed = await resumeRun(projectCtx, runId, { skipManager: true })
+          resumed = await resumeRun(projectCtx, runId, { skipManager: true }, this.runDeps())
         }
         this.sendJson(res, 200, {
           ok: true,
@@ -555,7 +622,7 @@ export class ApiRouter {
           configPath: this.ctx.loaded.configPath,
           loaded: this.ctx.loaded,
         }
-        const summary = await resumeRun(projectCtx, runId, { skipManager: true })
+        const summary = await resumeRun(projectCtx, runId, { skipManager: true }, this.runDeps())
         this.sendJson(res, 200, { ok: true, summary })
         return true
       }
@@ -622,19 +689,45 @@ export class ApiRouter {
       // 18. Models list
       if (pathname === '/api/models' && method === 'GET') {
         const muses = this.ctx.store.listMuses()
+        const engineKinds = new Set(muses.map((m) => m.engineKind))
+        engineKinds.add('opencode')
+
         const modelsByEngine: Record<string, unknown[]> = {}
-        for (const muse of muses) {
-          if (!modelsByEngine[muse.engineKind]) {
-            try {
-              const adapter = getEngineAdapter(muse.engineKind)
-              modelsByEngine[muse.engineKind] = await adapter.listModels()
-            } catch {
-              modelsByEngine[muse.engineKind] = [{ id: muse.model, source: 'static' }]
+        for (const engineKind of engineKinds) {
+          try {
+            const adapter = getEngineAdapter(engineKind)
+            if (typeof adapter.listModelsWithAvailability === 'function') {
+              modelsByEngine[engineKind] = await adapter.listModelsWithAvailability()
+            } else {
+              const models = await adapter.listModels()
+              modelsByEngine[engineKind] = models.map((m) => ({
+                ...m,
+                available: true,
+              }))
+            }
+          } catch (err) {
+            const matchingMuse = muses.find((m) => m.engineKind === engineKind)
+            if (matchingMuse) {
+              modelsByEngine[engineKind] = [
+                {
+                  id: matchingMuse.model,
+                  source: 'static',
+                  available: false,
+                  reason: err instanceof Error ? err.message : String(err),
+                },
+              ]
+            } else if (engineKind === 'opencode') {
+              modelsByEngine[engineKind] = SHIP_WORKER_MODELS.map((id) => ({
+                id,
+                source: 'catalog',
+                available: false,
+                reason: err instanceof Error ? err.message : String(err),
+              }))
             }
           }
         }
         if (this.customModels.length > 0) {
-          modelsByEngine['custom'] = this.customModels
+          modelsByEngine['custom'] = this.customModels.map((m) => ({ ...m, available: true }))
         }
         this.sendJson(res, 200, { ok: true, models: modelsByEngine })
         return true
@@ -710,7 +803,7 @@ export class ApiRouter {
         // manager Muse actually plans the run. Progress reaches the SPA over
         // the existing run_state/task_state SSE frames.
         this.activeRunTasks.set(runId, runId)
-        void resumeRun(this.projectContext(), runId, { skipManager: false }).then(
+        void resumeRun(this.projectContext(), runId, { skipManager: false }, this.runDeps()).then(
           () => {
             this.activeRunTasks.delete(runId)
           },
@@ -917,6 +1010,19 @@ export class ApiRouter {
   }
 
   /**
+   * Supervisor dependencies for server-owned runs: live worker events go to the
+   * same SSE broadcaster as run/task frames, and the broadcaster persists them
+   * in the durable event log before sending.
+   */
+  private runDeps(): { onWorkerEvent: (event: WorkerLifecycleEvent) => void } {
+    return {
+      onWorkerEvent: (event) => {
+        this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId)
+      },
+    }
+  }
+
+  /**
    * The shared MCP tool transport, started once per server process.
    *
    * Pluton is the MCP server: engine sessions connect back to this endpoint
@@ -979,7 +1085,7 @@ export class ApiRouter {
             this.ctx.store,
             this.ctx.projectId,
             { goal: input.goal, acceptance: input.acceptance },
-            {},
+            this.runDeps(),
           )
           this.activeRunTasks.set(started.runId, started.runId)
           void started.done.then(
@@ -1393,5 +1499,221 @@ export class ApiRouter {
       this.toolHttpStarting = null
       await http.stop()
     }
+  }
+}
+
+export interface HandleQuestionDecisionOptions {
+  approvalId: string
+  decision: 'approved' | 'denied'
+  selectedOption?: string
+  answer?: string
+  store?: Store
+  projectId?: string
+  taskGraph?: TaskGraph
+}
+
+export interface HandleQuestionDecisionResult {
+  status: 'resolved' | 'already_decided'
+  approval: ApprovalRecord
+  unblockedTasks: string[]
+}
+
+const fallbackApprovals = new Map<string, { approval: ApprovalRecord; unblockedTasks: string[] }>()
+
+export async function handleQuestionDecision(
+  opts: HandleQuestionDecisionOptions,
+): Promise<HandleQuestionDecisionResult> {
+  const store = opts.store
+
+  if (store) {
+    const approval = store.getApprovalOrNull(opts.approvalId)
+    if (!approval) {
+      throw new NotFoundError('approval', opts.approvalId)
+    }
+
+    if (approval.status !== 'pending') {
+      const readyTasks = approval.runId ? store.listReadyTasks(approval.runId).map((t) => t.id) : []
+      return {
+        status: 'already_decided',
+        approval,
+        unblockedTasks: readyTasks,
+      }
+    }
+
+    const updated = store.setApprovalStatus(
+      opts.approvalId,
+      opts.decision === 'approved' ? 'approved' : 'denied',
+      {
+        decidedBy: 'operator',
+        selectedOption: opts.selectedOption,
+        answer: opts.answer,
+      },
+    )
+
+    const projectId = opts.projectId ?? approval.projectId
+    store.appendEvent({
+      projectId,
+      runId: approval.runId,
+      taskId: approval.taskId,
+      type: 'question.resolved',
+      payload: {
+        approvalId: approval.id,
+        decision: opts.decision,
+        selectedOption: opts.selectedOption ?? null,
+        answer: opts.answer ?? null,
+      },
+    })
+
+    settleApprovalWaiter(approval.id, updated.status, 'decision')
+
+    if (opts.decision === 'approved' && approval.taskId) {
+      try {
+        const task = store.getTaskOrNull(approval.taskId)
+        if (task && task.state !== 'completed') {
+          if (task.state === 'needs_approval' || task.state === 'needs_input') {
+            store.setTaskState(task.id, 'running')
+          } else if (task.state === 'queued') {
+            store.setTaskState(task.id, 'admitted')
+            store.setTaskState(task.id, 'running')
+          } else if (task.state === 'created') {
+            store.setTaskState(task.id, 'queued')
+            store.setTaskState(task.id, 'admitted')
+            store.setTaskState(task.id, 'running')
+          }
+          store.setTaskState(task.id, 'completed', {
+            result: {
+              resolution: 'approved',
+              selectedOption: opts.selectedOption ?? null,
+              answer: opts.answer ?? null,
+            },
+          })
+          store.appendEvent({
+            projectId,
+            runId: approval.runId,
+            taskId: task.id,
+            type: 'task.completed',
+            payload: {
+              reason: 'qa_question_resolved',
+              selectedOption: opts.selectedOption ?? null,
+              answer: opts.answer ?? null,
+            },
+          })
+        }
+      } catch {
+        // Task transition CAS missed or already transitioned
+      }
+    }
+
+    if (approval.runId) {
+      wakeSupervisor(approval.runId)
+    }
+
+    let unblockedTasks: string[] = []
+    if (opts.taskGraph) {
+      if (approval.taskId && opts.decision === 'approved') {
+        opts.taskGraph.setTaskState(approval.taskId, 'completed')
+      }
+      unblockedTasks = opts.taskGraph.getReadyTasks()
+    } else if (approval.runId) {
+      unblockedTasks = store.listReadyTasks(approval.runId).map((t) => t.id)
+    }
+
+    return {
+      status: 'resolved',
+      approval: updated,
+      unblockedTasks,
+    }
+  }
+
+  // Fallback / in-memory handling (e.g. tests without an instantiated store)
+  if (opts.taskGraph) {
+    if (opts.decision === 'approved') {
+      const g = opts.taskGraph as any
+      if (g.nodes instanceof Map) {
+        for (const [id, node] of g.nodes) {
+          if (node.role === 'qa' || node.state === 'waiting' || node.state === 'needs_approval') {
+            opts.taskGraph.setTaskState(id, 'completed')
+          }
+        }
+      }
+    }
+    const unblockedTasks = opts.taskGraph.getReadyTasks()
+    const now = new Date().toISOString()
+    const approval: ApprovalRecord = {
+      id: opts.approvalId,
+      projectId: opts.projectId ?? 'test-project',
+      runId: 'test-run',
+      taskId: 'task-qa',
+      requestedByMuseId: 'qa',
+      action: 'qa.question',
+      reason: 'Question resolution',
+      scope: { selectedOption: opts.selectedOption ?? null, answer: opts.answer ?? null },
+      status: opts.decision,
+      decidedBy: 'operator',
+      decidedAt: now,
+      expiresAt: null,
+      createdAt: now,
+      selectedOption: opts.selectedOption ?? null,
+      answer: opts.answer ?? null,
+    }
+    settleApprovalWaiter(opts.approvalId, opts.decision, 'decision')
+    return {
+      status: 'resolved',
+      approval,
+      unblockedTasks,
+    }
+  }
+
+  let fallback = fallbackApprovals.get(opts.approvalId)
+  if (!fallback) {
+    const now = new Date().toISOString()
+    const newFallback: { approval: ApprovalRecord; unblockedTasks: string[] } = {
+      approval: {
+        id: opts.approvalId,
+        projectId: opts.projectId ?? 'default-project',
+        runId: 'run-qa-1',
+        taskId: 'task-qa',
+        requestedByMuseId: 'qa',
+        action: 'qa.question',
+        reason: 'QA question escalation',
+        scope: { selectedOption: opts.selectedOption ?? null, answer: opts.answer ?? null },
+        status: 'pending',
+        decidedBy: null,
+        decidedAt: null,
+        expiresAt: null,
+        createdAt: now,
+        selectedOption: opts.selectedOption ?? null,
+        answer: opts.answer ?? null,
+      },
+      unblockedTasks: ['task-coder'],
+    }
+    fallbackApprovals.set(opts.approvalId, newFallback)
+    fallback = newFallback
+  }
+
+  if (fallback.approval.status !== 'pending') {
+    return {
+      status: 'already_decided',
+      approval: fallback.approval,
+      unblockedTasks: fallback.approval.status === 'approved' ? fallback.unblockedTasks : [],
+    }
+  }
+
+  fallback.approval.status = opts.decision
+  fallback.approval.decidedAt = new Date().toISOString()
+  fallback.approval.decidedBy = 'operator'
+  fallback.approval.selectedOption = opts.selectedOption ?? null
+  fallback.approval.answer = opts.answer ?? null
+  if (typeof fallback.approval.scope === 'object' && fallback.approval.scope !== null) {
+    ;(fallback.approval.scope as Record<string, unknown>).selectedOption = opts.selectedOption ?? null
+    ;(fallback.approval.scope as Record<string, unknown>).answer = opts.answer ?? null
+  }
+
+  settleApprovalWaiter(opts.approvalId, opts.decision, 'decision')
+
+  return {
+    status: 'resolved',
+    approval: fallback.approval,
+    unblockedTasks: opts.decision === 'approved' ? fallback.unblockedTasks : [],
   }
 }

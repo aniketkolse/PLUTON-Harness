@@ -195,6 +195,44 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
     }
   })
 
+  it('maps worker approval events to live approval frames (QA question cards)', () => {
+    const fixture = createFixture()
+    try {
+      const fake: FakeBroadcaster = { broadcast: vi.fn() }
+      const watcher = makeWatcher(fixture, fake)
+
+      const approval = fixture.store.createApproval({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        taskId: fixture.taskId,
+        requestedByMuseId: 'tester',
+        action: 'qa.question',
+        reason: 'Which database should the migration target?',
+        scope: { options: ['PostgreSQL', 'SQLite'] },
+        expiresAt: null,
+      })
+      fixture.store.appendEvent({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        taskId: fixture.taskId,
+        museId: 'tester',
+        type: 'approval.requested',
+        payload: { approvalId: approval.id, action: approval.action },
+      })
+
+      watcher.pollOnce()
+
+      expect(emitted(fake)).toEqual([
+        expect.objectContaining({
+          type: 'approval_requested',
+          approval: expect.objectContaining({ id: approval.id, action: 'qa.question' }),
+        }),
+      ])
+    } finally {
+      fixture.store.close()
+    }
+  })
+
   it('emits no frame for events that are neither run.* nor task.*', () => {
     const fixture = createFixture()
     try {

@@ -156,6 +156,7 @@ export interface NewRunSpec {
 }
 
 export interface NewTaskSpec {
+  id?: string
   runId: string
   parentTaskId?: string | null
   title: string
@@ -554,7 +555,7 @@ export class Store {
     if (parent && parent.runId !== spec.runId) {
       throw new ValidationError(`parent task ${parent.id} belongs to run ${parent.runId}, not ${spec.runId}`)
     }
-    const id = newId('task')
+    const id = spec.id ?? newId('task')
     const now = nowIso()
     try {
       this.db
@@ -1177,7 +1178,11 @@ export class Store {
    * a decided approval is final. Re-setting the current status is an idempotent
    * no-op (the record is returned unchanged, the patch is ignored).
    */
-  setApprovalStatus(id: string, status: ApprovalStatus, patch: { decidedBy?: string | null } = {}): ApprovalRecord {
+  setApprovalStatus(
+    id: string,
+    status: ApprovalStatus,
+    patch: { decidedBy?: string | null; selectedOption?: string | null; answer?: string | null } = {},
+  ): ApprovalRecord {
     const approval = this.getApproval(id)
     if (approval.status === status) return approval
     if (approval.status !== 'pending') {
@@ -1186,9 +1191,26 @@ export class Store {
       )
     }
     const now = nowIso()
-    this.db
-      .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?')
-      .run(status, patch.decidedBy ?? null, now, id)
+    let scopeJson: string | null = null
+    if (patch.selectedOption !== undefined || patch.answer !== undefined) {
+      const scopeObj: Record<string, unknown> =
+        approval.scope !== null && typeof approval.scope === 'object' && !Array.isArray(approval.scope)
+          ? { ...(approval.scope as Record<string, unknown>) }
+          : { value: approval.scope }
+      if (patch.selectedOption !== undefined) scopeObj.selectedOption = patch.selectedOption
+      if (patch.answer !== undefined) scopeObj.answer = patch.answer
+      scopeJson = JSON.stringify(scopeObj)
+    }
+
+    if (scopeJson !== null) {
+      this.db
+        .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?, scope_json = ? WHERE id = ?')
+        .run(status, patch.decidedBy ?? null, now, scopeJson, id)
+    } else {
+      this.db
+        .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?')
+        .run(status, patch.decidedBy ?? null, now, id)
+    }
     return this.getApproval(id)
   }
 
@@ -1956,6 +1978,15 @@ function rowToTerminal(r: Row): TerminalRecord {
 function rowToApproval(r: Row): ApprovalRecord {
   const status = str(r, 'status')
   if (!isApprovalStatus(status)) throw new InternalError(`db row: invalid approval status '${status}'`)
+  const scope = parseJsonText<JsonValue>(nstr(r, 'scope_json'), {})
+  const scopeObj =
+    scope !== null && typeof scope === 'object' && !Array.isArray(scope)
+      ? (scope as Record<string, unknown>)
+      : null
+  const selectedOption =
+    scopeObj && typeof scopeObj.selectedOption === 'string' ? scopeObj.selectedOption : null
+  const answer = scopeObj && typeof scopeObj.answer === 'string' ? scopeObj.answer : null
+
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
@@ -1964,12 +1995,14 @@ function rowToApproval(r: Row): ApprovalRecord {
     requestedByMuseId: nstr(r, 'requested_by_muse_id'),
     action: str(r, 'action'),
     reason: str(r, 'reason'),
-    scope: parseJsonText<JsonValue>(nstr(r, 'scope_json'), {}),
+    scope,
     status,
     decidedBy: nstr(r, 'decided_by'),
     decidedAt: nstr(r, 'decided_at'),
     expiresAt: nstr(r, 'expires_at'),
     createdAt: str(r, 'created_at'),
+    ...(selectedOption !== null ? { selectedOption } : {}),
+    ...(answer !== null ? { answer } : {}),
   }
 }
 

@@ -106,6 +106,29 @@ export class ServerLogWatcher {
               title: task.title,
             })
           }
+        } else if (
+          event.type === 'approval.requested' ||
+          event.type === 'approval.decided' ||
+          event.type === 'approval.expired'
+        ) {
+          // Human-approval rows filed by a worker's `approval.request` tool
+          // (and by expiry/decision paths) become live SSE frames here. Without
+          // this the SPA only saw engine-permission requests from chat turns,
+          // so a QA question filed mid-task never rendered its card live.
+          const payload = event.payload
+          const approvalId =
+            payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+              ? (payload as Record<string, unknown>)['approvalId']
+              : undefined
+          if (typeof approvalId === 'string') {
+            const approval = this.store.getApprovalOrNull(approvalId)
+            if (approval !== null) {
+              frames.set(`approval:${approval.id}`, {
+                type: event.type === 'approval.requested' ? 'approval_requested' : 'approval_decided',
+                approval,
+              })
+            }
+          }
         }
       }
       if (events.length < BATCH_LIMIT) break

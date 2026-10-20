@@ -5,6 +5,7 @@ import { slugify } from './domain/ids.ts'
 import { openDatabase } from './store/db.ts'
 import { migrate } from './store/migrations.ts'
 import { Store, type MuseSyncSpec } from './store/store.ts'
+import { ROLE_DEFAULT_WORKSPACE_POLICIES } from './domain/models.ts'
 import { ROLE_DEFAULT_PERMISSIONS } from './domain/permissions.ts'
 
 /**
@@ -50,7 +51,7 @@ export function museSpecs(loaded: LoadedConfig): MuseSyncSpec[] {
     engineKind: m.engine,
     model: m.model,
     instructionsFile: m.instructions_file ?? null,
-    workspacePolicy: m.workspace_policy,
+    workspacePolicy: m.workspace_policy ?? ROLE_DEFAULT_WORKSPACE_POLICIES[m.role],
     permissions: m.permissions ?? (ROLE_DEFAULT_PERMISSIONS[m.role] ? [...ROLE_DEFAULT_PERMISSIONS[m.role]] : []),
     approvalMode: m.approval_mode,
     engineHome: join(engineHomesDir(loaded.rootDir), id),
