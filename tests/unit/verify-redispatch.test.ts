@@ -22,6 +22,7 @@ function createTestSetup(): { store: Store; runId: string; task1Id: string; task
         default_cpu_limit: 1,
         default_memory_mb: 512,
         max_retries_per_task: 1,
+        max_revisions_per_task: 1,
         network_policy: 'restricted' as const,
         max_prompt_chars: 1000,
         max_event_payload_chars: 1000,

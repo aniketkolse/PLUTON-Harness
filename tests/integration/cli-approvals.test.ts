@@ -165,6 +165,33 @@ function futureIso(minutes: number): string {
   return new Date(Date.now() + minutes * 60_000).toISOString()
 }
 
+describe('approval text terminal boundary (raw CLI output)', () => {
+  it('prints legacy rows without terminal control bytes', () => {
+    const fx = makeProject()
+    // Simulate a row persisted before the storage sanitizer existed: raw SQL,
+    // bypassing createApproval. The CLI must still never emit driver bytes.
+    fx.store.db
+      .prepare(
+        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
+                                 status, decided_by, decided_at, expires_at, created_at)
+         VALUES ('approval_legacy_esc', ?, NULL, NULL, 'manager', ?, ?, '{}', 'pending', NULL, NULL, NULL, ?)`,
+      )
+      .run(fx.projectId, 'action\u001b[2Jspoof', 'reason \u001b[31mred\u202ereversed', new Date().toISOString())
+
+    const stdout = execFileSync('node', [join(process.cwd(), 'src', 'cli', 'main.ts'), 'approvals', 'list'], {
+      cwd: fx.dir,
+      encoding: 'utf8',
+      timeout: 90_000,
+      env: { ...process.env },
+    })
+
+    // Readable text survives; escape/control bytes do not.
+    expect(stdout).toContain('spoof')
+    expect(stdout).toContain('reversed')
+    expect(stdout.replace(/\n/g, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/)
+  }, 120_000)
+})
+
 describe('listApprovals — inbox listing and the expiry sweep', () => {
   it('lists pending only by default, --all includes decided, and counts span the project', async () => {
     const fx = makeProject()

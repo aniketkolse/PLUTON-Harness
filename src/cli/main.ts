@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { ConfigError, InternalError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { run as execRun } from '../util/exec.ts'
+import { terminalSafeLine } from '../util/sanitize.ts'
 import { stateDir } from '../config/load.ts'
 import { TERMINAL_TASK_STATES } from '../domain/state.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
@@ -29,6 +30,7 @@ import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
+import { workspaceClean } from './commands/workspace.ts'
 import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProfile } from '../sandbox/image.ts'
 import {
   graphHuman,
@@ -1086,10 +1088,21 @@ program
         )
       }
       for (const c of report.conflicts) {
-        lines.push(`task ${c.taskId}  → conflict, conflicts: ${c.files.join(', ')}`)
+        lines.push(
+          `task ${c.taskId}  → conflict, conflicts: ${c.files.map((f) => terminalSafeLine(f)).join(', ')}`,
+        )
       }
       for (const b of report.blockedProtected) {
-        lines.push(`task ${b.taskId}  → blocked: approval ${b.approvalId} created (${b.files.join(', ')})`)
+        lines.push(
+          `task ${b.taskId}  → blocked: approval ${b.approvalId} created (${b.files.map((f) => terminalSafeLine(f)).join(', ')})`,
+        )
+      }
+      for (const o of report.blockedOverlap) {
+        // File names come from git: sanitize each one at the render boundary,
+        // like the approval rows further down.
+        lines.push(
+          `task ${o.taskId}  → blocked: overlaps another task on ${o.files.map((f) => terminalSafeLine(f)).join(', ')}`,
+        )
       }
       for (const f of report.failed) {
         lines.push(`task ${f.taskId}  → failed: ${f.detail}`)
@@ -1114,6 +1127,50 @@ program
   })
 
 // ---------------------------------------------------------------------------
+// workspace — operator-invoked cleanup of Pluton-owned checkouts (CS-7)
+// ---------------------------------------------------------------------------
+
+const workspaceCmd = program
+  .command('workspace')
+  .description('inspect and clean Pluton workspace checkouts under .pluton/workspaces')
+
+workspaceCmd
+  .command('clean')
+  .description(
+    'remove the Pluton-managed checkouts of finished runs (marker-guarded; artifacts and archived checkouts are never touched)',
+  )
+  .option('--run <id>', 'clean the workspaces of one run (full id or unique suffix; the run must be terminal)')
+  .option('--all-runs', 'clean the workspaces of every terminal run and report the runs still in flight')
+  .action(async (opts: { run?: string; allRuns?: boolean }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await workspaceClean(ctx, {
+        ...(opts.run !== undefined ? { runRef: opts.run } : {}),
+        ...(opts.allRuns === true ? { allRuns: true } : {}),
+      })
+      const lines: string[] = []
+      for (const r of report.removed) {
+        const owner = r.taskId !== null ? `task ${r.taskId}` : 'integration'
+        lines.push(`workspace ${r.workspaceId}  ${r.path}  (${r.kind}, ${owner})  → removed`)
+      }
+      for (const s of report.skipped) {
+        lines.push(`workspace ${s.workspaceId}  ${s.path}  → skipped: ${s.reason}`)
+      }
+      for (const f of report.refusedRuns) {
+        lines.push(`run ${f.runId}  → refused: ${f.reason}`)
+      }
+      lines.push(
+        'removing a checkout discards its branch objects — the only copy of unmerged/unpushed work in it; run pluton integrate first if that work is needed',
+      )
+      lines.push(
+        'artifacts under .pluton/state/artifacts and archived checkouts under .pluton/workspaces-attic are never touched',
+      )
+      emitOk(io, json, lines.join('\n'), report)
+    })
+  })
+
+// ---------------------------------------------------------------------------
 // approvals — the operator inbox: list, approve, deny (fail-closed expiry)
 // ---------------------------------------------------------------------------
 
@@ -1129,7 +1186,11 @@ function approvalLine(a: ApprovalListView['approvals'][number]): string {
       : a.expiresInMinutes < 0
         ? `expired ${String(-a.expiresInMinutes)}m ago`
         : `expires in ${String(a.expiresInMinutes)}m`
-  return `${a.id}  ${a.status}  ${a.action}  by ${by}  age ${String(a.ageMinutes)}m  [${expiry}]  — ${a.reason}`
+  // Render boundary: rows are sanitized at persistence, but a row persisted by
+  // an older build may still carry escape bytes — never print them raw.
+  const action = terminalSafeLine(a.action)
+  const reason = terminalSafeLine(a.reason)
+  return `${a.id}  ${a.status}  ${action}  by ${by}  age ${String(a.ageMinutes)}m  [${expiry}]  — ${reason}`
 }
 
 function approvalsHuman(view: ApprovalListView): string {
@@ -1161,7 +1222,7 @@ approvalsCmd
 
 function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string {
   const lines: string[] = [
-    `approval ${report.approval.id}  ${report.approval.action}  → ${report.approval.status} by ${report.approval.decidedBy}`,
+    `approval ${report.approval.id}  ${terminalSafeLine(report.approval.action)}  → ${report.approval.status} by ${report.approval.decidedBy}`,
   ]
   if (report.applied !== null) {
     lines.push(`applied muse '${report.applied.museId}' → ${report.applied.configPath}`)

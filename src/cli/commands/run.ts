@@ -5,12 +5,13 @@ import {
   InternalError,
   NotFoundError,
   SandboxUnavailableError,
+  StateTransitionError,
   ValidationError,
 } from '../../domain/errors.ts'
 import type { JsonValue, MuseRecord, RunRecord } from '../../domain/models.ts'
 import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
-import { engineAdapterForMuse } from '../../engines/approval.ts'
+import { engineAdapterForMuse, type EngineIsolationFacts } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
 import {
@@ -19,7 +20,7 @@ import {
   usageBudgetsFromRuntime,
 } from '../../orchestrator/run-setup.ts'
 import { UsageLedger } from '../../orchestrator/usage-ledger.ts'
-import { RunSupervisor, type RunOutcome } from '../../orchestrator/supervisor.ts'
+import { RunSupervisor, type RunOutcome, type SupervisorAdapterFactory } from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import {
@@ -147,6 +148,63 @@ function summaryFromRecords(store: Store, run: RunRecord): RunSummary {
 }
 
 /**
+ * CS-9: the operator's cancel path — SIGINT/SIGTERM resolve to the SAME durable
+ * cancel the manager's `run.stop` tool uses. Durability only: this flips the run
+ * to `cancelled` and records why; the supervisor loop's next control tick
+ * (state-driven, ≤ `loopPollMs`) turns the flip into engine interrupts plus a
+ * bounded drain, and a later `pluton run --request-id <id>` resume sees the
+ * terminal state from the records. Idempotent: a terminal run is a no-op
+ * (`false`), so repeated signals can never mint a conflict or a second event.
+ */
+export function requestRunCancel(store: Store, runId: string, reason: string): boolean {
+  const run = store.getRun(runId)
+  if (isTerminalRunState(run.state)) return false
+  try {
+    store.setRunState(runId, 'cancelled')
+  } catch (e) {
+    // A concurrent terminal write (another cancel source) won the CAS: the
+    // cancel intent is already satisfied — still a no-op, and never a second
+    // `run.cancel_requested` event.
+    if (!(e instanceof StateTransitionError)) throw e
+    if (!isTerminalRunState(store.getRun(runId).state)) throw e
+    return false
+  }
+  store.appendEvent({
+    projectId: run.projectId,
+    runId,
+    type: 'run.cancel_requested',
+    payload: { reason, requestedBy: 'operator:signal' },
+  })
+  return true
+}
+
+/**
+ * CS-9: bind operator SIGINT/SIGTERM to {@link requestRunCancel} for one run.
+ * One listener per signal (`process.once`): the FIRST signal rides the durable
+ * cancel path, where the supervisor interrupts in-flight engines and finalizes
+ * through its bounded drain even if an engine refuses to stop. A SECOND signal
+ * after the handler was consumed falls back to Node's default terminate — that
+ * is the deliberate bounded-shutdown escape hatch for a wedged process, not an
+ * accident. Returns an idempotent disposer that removes both listeners.
+ */
+export function installRunCancelSignals(store: Store, runId: string): () => void {
+  const handle = (signal: NodeJS.Signals): void => {
+    requestRunCancel(store, runId, `signal:${signal}`)
+  }
+  const onSigint = (): void => handle('SIGINT')
+  const onSigterm = (): void => handle('SIGTERM')
+  process.once('SIGINT', onSigint)
+  process.once('SIGTERM', onSigterm)
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    process.removeListener('SIGINT', onSigint)
+    process.removeListener('SIGTERM', onSigterm)
+  }
+}
+
+/**
  * Container mode: fail closed before any run row exists — daemon probe, worker
  * image readiness (the `engines` profile is required), then one long-lived
  * container and a `docker exec` spawn context per enabled Muse. Mount
@@ -222,12 +280,15 @@ export async function prepareContainerMode(
 /**
  * The container-mode adapter per Muse: pinned in-image binaries, `docker exec`
  * as the process spawn, Linux platform env construction (the engine process
- * runs inside the container, never on the host).
+ * runs inside the container, never on the host). `session` carries the proven
+ * isolation fact through to the approval policy — a container alone is not
+ * isolation (chat/SPA sessions are mounted at the project root inside it).
  */
 export function containerAdapterFor(
   muse: MuseRecord,
   contexts: Map<string, DockerExecContext>,
   dockerSpawn: AcpSpawnFn | undefined,
+  session: EngineIsolationFacts = { isolatedCheckout: false },
 ): EngineAdapter {
   const exec = contexts.get(muse.id)
   if (exec === undefined) {
@@ -242,6 +303,7 @@ export function containerAdapterFor(
   return engineAdapterForMuse(muse, {
     spawnFn: dockerExecSpawn(exec, dockerSpawn),
     platform: 'linux',
+    isolatedCheckout: session.isolatedCheckout,
     // The ACP session cwd must name a container path; the process spawn cwd
     // (a host path) is mapped independently inside dockerExecSpawn.
     mapWorkdir: (hostPath: string) => mapHostPathToContainer(hostPath, exec.mounts),
@@ -266,12 +328,14 @@ export function createRunSupervisor(args: {
   const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, containerContexts, deps, diagnostic } = args
   const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
   const budgets = usageBudgetsFromRuntime(ctx.loaded.config.runtime)
-  let supervisorAdapterFor = deps.adapterFor
+  let supervisorAdapterFor: SupervisorAdapterFactory | undefined = deps.adapterFor
   if (supervisorAdapterFor === undefined && containerContexts !== null) {
     const contexts = containerContexts
-    supervisorAdapterFor = (muse: MuseRecord): EngineAdapter =>
-      containerAdapterFor(muse, contexts, deps.dockerSpawn)
+    supervisorAdapterFor = (muse, session) => containerAdapterFor(muse, contexts, deps.dockerSpawn, session)
   }
+  // One manager instance for both the supervisor's checkout provisioning and
+  // the per-task bridges' result reads (changed files from real checkouts).
+  const workspaceManager = new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) })
   const supervisor = new RunSupervisor({
     store,
     projectId,
@@ -287,7 +351,7 @@ export function createRunSupervisor(args: {
     verificationConfigured: ctx.loaded.config.project.verification.length > 0,
     ...(args.skipManager !== undefined ? { skipManager: args.skipManager } : {}),
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
-    workspaceManager: new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) }),
+    workspaceManager,
     engineEnv: () => ({}),
     mcpServerFor: (muse, taskId) => {
       const bridge =
@@ -302,6 +366,7 @@ export function createRunSupervisor(args: {
               callerTaskId: taskId,
               limits,
               leaseManager: supervisor.leaseManager,
+              workspaceManager,
               wakeups,
             })
       const { token } = http.register(bridge, {
@@ -415,7 +480,7 @@ export function startRunInBackground(
     const http = new ToolHttpServer({
       serverName: 'pluton-tools',
       serverVersion: PLUTON_VERSION,
-      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+      ...(containerContexts !== null ? { host: '::' } : {}),
     })
     const started = await http.start()
     const bridgeUrl =
@@ -568,7 +633,17 @@ export async function runRun(
           process.stderr.write(`run ${run.id}: ${line}\n`)
         },
       })
-      const outcome = await supervisor.runToCompletion()
+      const dispose = installRunCancelSignals(store, run.id)
+      let outcome: RunOutcome
+      try {
+        // CS-9: Ctrl-C / SIGTERM ride the same durable cancel path as the
+        // manager's run.stop (requestRunCancel); the supervisor's next control
+        // tick interrupts live engines and its bounded drain finalizes the run
+        // even if one refuses to stop.
+        outcome = await supervisor.runToCompletion()
+      } finally {
+        dispose()
+      }
       return {
         runId: outcome.runId,
         state: outcome.state,
@@ -616,7 +691,7 @@ export async function resumeRun(
     const http = new ToolHttpServer({
       serverName: 'pluton-tools',
       serverVersion: PLUTON_VERSION,
-      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+      ...(containerContexts !== null ? { host: '::' } : {}),
     })
     const started = await http.start()
     const bridgeUrl =

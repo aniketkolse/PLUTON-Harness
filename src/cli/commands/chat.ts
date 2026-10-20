@@ -7,11 +7,12 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { findManager } from '../../config/load.ts'
-import { ConfigError, NotFoundError, ValidationError, InternalError } from '../../domain/errors.ts'
+import { ConfigError, NotFoundError, StateTransitionError, ValidationError, InternalError } from '../../domain/errors.ts'
 import { isTerminalRunState } from '../../domain/state.ts'
 import type { ChatSessionRecord, MuseRecord } from '../../domain/models.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse } from '../../engines/approval.ts'
+import { createEngineApprovalChannel } from '../../engines/interactive-approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import type { WorkerImageProbe } from '../../sandbox/image.ts'
@@ -29,6 +30,7 @@ import type { ProjectContext } from '../context.ts'
 import { decideApproval } from './approvals.ts'
 import { resolveMuseByRef } from './mcp.ts'
 import { runLine } from './status.ts'
+import { terminalSafeLine } from '../../util/sanitize.ts'
 import { containerAdapterFor, prepareContainerMode, startRunInBackground, type RunDeps } from './run.ts'
 import { collectDoctorChecks } from './doctor.ts'
 import { PlanManager } from '../../plan/manager.ts'
@@ -185,6 +187,20 @@ export async function chatRun(
       createSandboxManager(ctx.loaded.config)
       adapter = deps.adapterFor?.(muse) ?? engineAdapterForMuse(muse)
     }
+
+    // Interactive engine policies (ask-* Muse modes) forward engine permission
+    // requests to the operator: the request becomes a durable approval shown in
+    // the TUI approval card (and the SPA), and the engine waits — fail-closed —
+    // until the operator decides through the same decision funnel. The chat
+    // poll below discovers it; `/permissions approve|deny` answers it.
+    const engineApprovals = createEngineApprovalChannel({
+      store,
+      projectId,
+      runId: null,
+      taskId: null,
+      museId: muse.id,
+      ttlMinutes: ctx.loaded.config.runtime.approval_timeout_minutes,
+    })
 
     let activeRunId: string | null = null
     let activeRunDone: Promise<unknown> | null = null
@@ -380,7 +396,9 @@ export async function chatRun(
         if (pending.length === 0) return 'no pending approvals'
         const rows = ['ID                       ACTION          REQUESTED BY     REASON']
         for (const a of pending) {
-          rows.push(`${a.id}  ${a.action.padEnd(14)}  ${(a.requestedByMuseId ?? '-').padEnd(15)}  ${a.reason}`)
+          rows.push(
+            `${a.id}  ${terminalSafeLine(a.action).padEnd(14)}  ${(a.requestedByMuseId ?? '-').padEnd(15)}  ${terminalSafeLine(a.reason)}`,
+          )
         }
         return rows.join('\n')
       },
@@ -411,7 +429,16 @@ export async function chatRun(
         if (['completed', 'failed', 'cancelled'].includes(run.state)) {
           return `Run '${targetId}' is already ${run.state}.`
         }
-        store.setRunState(targetId, 'cancelled')
+        try {
+          store.setRunState(targetId, 'cancelled')
+        } catch (e) {
+          // A concurrent terminal write (another cancel source) won the CAS:
+          // the intent is satisfied — report the durable winner, no second event.
+          if (!(e instanceof StateTransitionError)) throw e
+          const fresh = store.getRun(targetId)
+          if (!isTerminalRunState(fresh.state)) throw e
+          return `Run '${targetId}' is already ${fresh.state}.`
+        }
         store.appendEvent({
           projectId,
           runId: targetId,
@@ -788,6 +815,7 @@ export async function chatRun(
       startRun: runStarter,
       slashContext,
       poll: deps.poll ?? defaultPoll,
+      engineApprovals,
       initialNotices,
     })
     sessionInstance = chatSession
@@ -797,6 +825,9 @@ export async function chatRun(
       await chatSession.start()
       exitCode = await chatSession.run()
     } finally {
+      // Chat teardown settles any pending engine permission request fail-closed
+      // (the engine gets a deny, not a hang).
+      engineApprovals.abort('chat session exited')
       chatSession.stop()
       if (activeRunId !== null && activeRunId !== 'pending') {
         try {

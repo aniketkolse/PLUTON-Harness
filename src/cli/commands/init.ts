@@ -24,6 +24,7 @@ const GITIGNORE_ENTRIES = [
   '.pluton/state/',
   '.pluton/engine-homes/',
   '.pluton/workspaces/',
+  '.pluton/workspaces-attic/',
   '.pluton/logs/',
   '.pluton/cache/',
 ] as const

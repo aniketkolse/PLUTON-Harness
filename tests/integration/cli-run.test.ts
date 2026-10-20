@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { runRun, type RunDeps } from '../../src/cli/commands/run.ts'
+import { bootstrapStore } from '../../src/bootstrap.ts'
+import { installRunCancelSignals, requestRunCancel, runRun, type RunDeps } from '../../src/cli/commands/run.ts'
 import type { ProjectContext } from '../../src/cli/context.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { ConflictError, SandboxUnavailableError } from '../../src/domain/errors.ts'
@@ -658,5 +659,73 @@ describe('runRun — container mode (engines through docker exec)', () => {
     expect(fakeSandbox.created).toHaveLength(0)
     const store = openSecondStore(dir)
     expect(store.listRuns()).toHaveLength(0)
+  })
+})
+
+/**
+ * Operator cancel path (CS-9): SIGINT/SIGTERM resolve to the SAME durable cancel
+ * the manager tool uses — a run-state flip plus a `run.cancel_requested` event —
+ * and the supervisor loop's next control tick turns that into real engine
+ * interrupts. Both functions are pure wiring over the store, so they are tested
+ * directly (deterministically — real signals are never emitted).
+ */
+function cancelWorld(): { store: Store; runId: string } {
+  const { ctx } = makeProject(true)
+  const { store, projectId } = bootstrapStore(ctx.loaded)
+  openDbs.push(store.db)
+  const run = store.createRun({
+    projectId,
+    goal: 'cancel me',
+    origin: 'cli',
+    requestedBy: 'tester',
+    acceptanceCriteria: [],
+    managerMuseId: 'manager',
+    budget: {
+      maxConcurrentWorkers: 1,
+      maxTasks: 5,
+      maxDelegationDepth: 1,
+      maxRunMinutes: 10,
+      defaultTaskMinutes: 5,
+    },
+  })
+  return { store, runId: run.id }
+}
+
+describe('runRun — operator cancel path (CS-9)', () => {
+  it('requestRunCancel flips a non-terminal run to cancelled exactly once, then acks idempotently', () => {
+    const { store, runId } = cancelWorld()
+    const cancelEvents = (): { payload_json: string }[] =>
+      store.db
+        .prepare("SELECT payload_json FROM events WHERE run_id = ? AND type = 'run.cancel_requested'")
+        .all(runId) as { payload_json: string }[]
+
+    expect(requestRunCancel(store, runId, 'signal:SIGINT')).toBe(true)
+    expect(store.getRun(runId).state).toBe('cancelled')
+    expect(cancelEvents()).toHaveLength(1)
+    expect(JSON.parse(cancelEvents()[0]?.payload_json as string)).toEqual({
+      reason: 'signal:SIGINT',
+      requestedBy: 'operator:signal',
+    })
+
+    // Idempotent: the run is terminal now — no second flip, no second event.
+    expect(requestRunCancel(store, runId, 'signal:SIGTERM')).toBe(false)
+    expect(store.getRun(runId).state).toBe('cancelled')
+    expect(cancelEvents()).toHaveLength(1)
+  })
+
+  it('installRunCancelSignals registers both signals; the disposer restores the counts exactly', () => {
+    const { store, runId } = cancelWorld()
+    const before = { sigint: process.listenerCount('SIGINT'), sigterm: process.listenerCount('SIGTERM') }
+
+    const dispose = installRunCancelSignals(store, runId)
+    expect(process.listenerCount('SIGINT')).toBe(before.sigint + 1)
+    expect(process.listenerCount('SIGTERM')).toBe(before.sigterm + 1)
+
+    dispose()
+    dispose() // idempotent disposer
+    expect(process.listenerCount('SIGINT')).toBe(before.sigint)
+    expect(process.listenerCount('SIGTERM')).toBe(before.sigterm)
+    // Installing/removing handlers alone never flips the run.
+    expect(store.getRun(runId).state).toBe('created')
   })
 })

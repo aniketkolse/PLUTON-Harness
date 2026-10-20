@@ -6,6 +6,7 @@ import {
   InternalError,
   NotFoundError,
   SandboxUnavailableError,
+  StateTransitionError,
   ValidationError,
 } from '../../domain/errors.ts'
 import type {
@@ -16,7 +17,8 @@ import type {
   MuseRecord,
   RunRecord,
 } from '../../domain/models.ts'
-import type { RunState } from '../../domain/state.ts'
+import { isTerminalRunState, type RunState } from '../../domain/state.ts'
+import { settleApprovalWaiter } from '../../engines/interactive-approval.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import {
   DEFAULT_WORKER_IMAGE_TAG,
@@ -119,7 +121,7 @@ export interface ApprovalDecideReport {
 }
 
 /** The project's pending approvals whose expiry has arrived, flipped + evented. */
-function sweepExpiredApprovals(store: Store, projectId: string, nowIso: string): ApprovalRecord[] {
+export function sweepExpiredApprovals(store: Store, projectId: string, nowIso: string): ApprovalRecord[] {
   const swept = store.expirePendingApprovals(nowIso, projectId)
   for (const row of swept) {
     store.appendEvent({
@@ -129,6 +131,8 @@ function sweepExpiredApprovals(store: Store, projectId: string, nowIso: string):
       type: 'approval.expired',
       payload: { approvalId: row.id, action: row.action, expiresAt: row.expiresAt },
     })
+    // An engine session may be waiting on this request; expiry is fail-closed.
+    settleApprovalWaiter(row.id, 'expired', 'expiry')
   }
   return swept
 }
@@ -377,14 +381,29 @@ function unParkRun(
     if (!stillPending) {
       const finished = store.listEvents(runBefore.id, { type: 'run.finished', limit: 1 })
       if (finished.length === 0) {
-        stateAfter = store.setRunState(runBefore.id, 'active').state
-        resumed = true
-        store.appendEvent({
-          projectId,
-          runId: runBefore.id,
-          type: 'run.resumed_after_approval',
-          payload: { approvalId: approval.id },
-        })
+        try {
+          stateAfter = store.setRunState(runBefore.id, 'active').state
+          resumed = true
+          store.appendEvent({
+            projectId,
+            runId: runBefore.id,
+            type: 'run.resumed_after_approval',
+            payload: { approvalId: approval.id },
+          })
+        } catch (e) {
+          // A concurrent terminal write (e.g. a cancel) won the un-park CAS:
+          // adopt the durable winner — the run did not resume, and no
+          // `run.resumed_after_approval` is minted for a run that is over.
+          if (!(e instanceof StateTransitionError)) throw e
+          const fresh = store.getRun(runBefore.id)
+          if (!isTerminalRunState(fresh.state)) throw e
+          stateAfter = fresh.state
+          const lateFinished = store.listEvents(runBefore.id, { type: 'run.finished', limit: 1 })
+          if (lateFinished.length > 0) {
+            parked = true
+            recordedOutcome = recordedOutcomeFrom(lateFinished[0])
+          }
+        }
       } else {
         parked = true
         recordedOutcome = recordedOutcomeFrom(finished[0])
@@ -506,6 +525,9 @@ export async function decideApproval(
       type: 'approval.decided',
       payload: { approvalId: approval.id, action: approval.action, status: decided.status },
     })
+    // The durable decision is written; wake the engine session (if any) that
+    // is waiting on this exact request. Exactly once, correlated by id.
+    settleApprovalWaiter(decided.id, decided.status, 'decision')
 
     let applied: ApprovalDecideReport['applied'] = null
     if (decided.status === 'approved' && decided.action === 'muse.create') {
@@ -527,7 +549,19 @@ export async function decideApproval(
     if (run !== null && run.resumed && opts.autoContinue) {
       store.close()
       const resumeFn = deps.resumeRunFn ?? resumeRun
-      run.resumeSummary = await resumeFn(ctx, run.id, { skipManager: true })
+      try {
+        run.resumeSummary = await resumeFn(ctx, run.id, { skipManager: true })
+      } catch (e) {
+        // A live supervisor may still own the run (the boundary case: the
+        // process is alive but the operator decision un-parked the row). The
+        // owner keeps driving; resume exists only for parked runs whose
+        // process exited. A claim refusal is not an operator-facing error.
+        if (e instanceof ConflictError && e.code === 'request_conflict') {
+          run.resumeSummary = null
+        } else {
+          throw e
+        }
+      }
     }
 
     return {

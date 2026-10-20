@@ -63,4 +63,15 @@ describe('runInit', () => {
 
     await expect(runInit({ cwd: dir, team: 'bugfix' })).rejects.toThrow(/already exists/)
   }, 60_000)
+
+  it('gitignores the workspaces attic (archived checkouts enter the repo tree)', async () => {
+    const dir = tmpDir('attic')
+    const git = await run(['git', 'init', '--quiet', dir], { timeoutMs: 30_000 })
+    expect(git.exitCode).toBe(0)
+
+    await runInit({ cwd: dir, team: 'full-stack' })
+
+    const gitignore = readFileSync(join(dir, '.gitignore'), 'utf8')
+    expect(gitignore).toContain('.pluton/workspaces-attic/')
+  }, 60_000)
 })

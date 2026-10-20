@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
-import { integrateRun } from '../../src/cli/commands/integrate.ts'
+import { integrateRun, boundedOverlapFiles } from '../../src/cli/commands/integrate.ts'
 import type { ProjectContext } from '../../src/cli/context.ts'
 import { loadConfig, stateDir, workspaceDir } from '../../src/config/load.ts'
 import { ValidationError } from '../../src/domain/errors.ts'
@@ -247,6 +247,7 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(report.committed).toEqual([]) // clean checkouts: no empty commits
     expect(report.conflicts).toEqual([])
     expect(report.blockedProtected).toEqual([])
+    expect(report.blockedOverlap).toEqual([]) // disjoint task files: nothing to block
     expect(report.failed).toEqual([])
     expect(report.notAttempted).toEqual([])
     expect(report.stoppedAfterConflict).toBe(false)
@@ -397,16 +398,22 @@ describe('integrateRun — conflicts stop the loop and are preserved', () => {
   it('keeps the mid-merge state, reports the conflict, names the skipped tasks, and refuses on rerun', async () => {
     const fx = makeProject()
     // Both branches add the same file with different content: add/add conflict.
+    // A batch over that pair is overlap-blocked by design (CS-6), so the
+    // conflict is reached from the checkout state a manual per-task merge left
+    // behind: t1 alone first, then t2 (conflicts) with t3 (skipped) after it.
     const t1 = await seedCompletedTask(fx, 'alpha', (p) => write(p, 'src/app.ts', 'export const value = "alpha"\n'))
     const t2 = await seedCompletedTask(fx, 'beta', (p) => write(p, 'src/app.ts', 'export const value = "beta"\n'))
     const t3 = await seedCompletedTask(fx, 'gamma', (p) => write(p, 'src/g.ts', 'export const g = 1\n'))
 
+    const first = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [t1.task.id] })
+    expect(first.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
+
     const report = await integrateRun(fx.ctx, {
       runRef: fx.run.id,
-      taskRefs: [t1.task.id, t2.task.id, t3.task.id],
+      taskRefs: [t2.task.id, t3.task.id],
     })
 
-    expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
+    expect(report.integrated).toEqual([])
     expect(report.conflicts).toEqual([{ taskId: t2.task.id, files: ['src/app.ts'] }])
     expect(report.failed).toEqual([])
     expect(report.stoppedAfterConflict).toBe(true)
@@ -420,16 +427,221 @@ describe('integrateRun — conflicts stop the loop and are preserved', () => {
     expect(existsSync(join(checkoutPath, '.git', 'MERGE_HEAD'))).toBe(true)
     expect(fx.store.listEvents(fx.run.id, { type: 'integration.conflict' })).toHaveLength(1)
 
-    // Rerun: the unresolved merge is refused before anything is fetched or merged.
+    // Rerun: the unresolved merge is refused before anything is fetched or
+    // merged. t1+t2 are the overlap pair now, so the batch reports them blocked
+    // and the refusal lands on the one task still reaching the merge primitive.
     const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
-    const t2Failure = rerun.failed.find((f) => f.taskId === t2.task.id)
-    expect(t2Failure?.detail).toContain('unresolved merge in progress')
+    expect(rerun.blockedOverlap.map((o) => o.taskId)).toEqual([t1.task.id, t2.task.id])
+    const t3Failure = rerun.failed.find((f) => f.taskId === t3.task.id)
+    expect(t3Failure?.detail).toContain('unresolved merge in progress')
     expect(rerun.integrated).toEqual([])
     expect(rerun.conflicts).toEqual([])
     expect(rerun.notAttempted).toEqual([])
     expect(rerun.stoppedAfterConflict).toBe(false)
+    expect(rerun.artifactPath).toBeNull()
     expect(gitOut(checkoutPath, ['rev-parse', 'HEAD']).trim()).toBe(headAfterConflict)
     expect(existsSync(join(checkoutPath, '.git', 'MERGE_HEAD'))).toBe(true)
+  })
+})
+
+describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
+  it('blocks every member of an overlapping pair, merges nothing and records the overlap events', async () => {
+    const fx = makeProject()
+    const t1 = await seedCompletedTask(fx, 'alpha', (p) => write(p, 'src/shared.ts', 'export const value = "alpha"\n'))
+    const t2 = await seedCompletedTask(fx, 'beta', (p) => write(p, 'src/shared.ts', 'export const value = "beta"\n'))
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    // ALL members of the group are blocked — never first-come-first-served.
+    expect(report.blockedOverlap).toEqual([
+      { taskId: t1.task.id, files: ['src/shared.ts'] },
+      { taskId: t2.task.id, files: ['src/shared.ts'] },
+    ])
+    expect(report.integrated).toEqual([])
+    expect(report.conflicts).toEqual([])
+    expect(report.blockedProtected).toEqual([])
+    expect(report.failed).toEqual([])
+    expect(report.notAttempted).toEqual([])
+    expect(report.stoppedAfterConflict).toBe(false)
+
+    // Nothing merged: the integration checkout still sits on its single base
+    // commit, carries no mid-merge state and no artifact was written.
+    expect(gitOut(report.checkout.path, ['rev-list', '--count', 'HEAD']).trim()).toBe('1')
+    expect(existsSync(join(report.checkout.path, '.git', 'MERGE_HEAD'))).toBe(false)
+    expect(report.artifactPath).toBeNull()
+
+    const events = fx.store.listEvents(fx.run.id, { type: 'integration.overlap_detected' })
+    expect(events).toHaveLength(2)
+    expect(new Set(events.map((e) => e.taskId))).toEqual(new Set([t1.task.id, t2.task.id]))
+    for (const e of events) expect(e.payload).toMatchObject({ files: ['src/shared.ts'] })
+  })
+
+  it('bounds the overlap event payload while the report keeps the full list', async () => {
+    const fx = makeProject()
+    const sharedFiles = Array.from({ length: 101 }, (_, i) => `src/share/f${String(i).padStart(3, '0')}.ts`)
+    const a = await seedCompletedTask(fx, 'wide alpha', (p) => {
+      for (const file of sharedFiles) write(p, file, 'export const value = "a"\n')
+    })
+    const b = await seedCompletedTask(fx, 'wide beta', (p) => {
+      for (const file of sharedFiles) write(p, file, 'export const value = "b"\n')
+    })
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    // The report keeps every shared file…
+    expect(report.blockedOverlap).toEqual([
+      { taskId: a.task.id, files: sharedFiles },
+      { taskId: b.task.id, files: sharedFiles },
+    ])
+    // …while the durable event is bounded: `appendEvent` rejects payloads over
+    // the store's char cap, so an uncapped list would abort integrate mid-run.
+    const events = fx.store.listEvents(fx.run.id, { type: 'integration.overlap_detected' })
+    expect(events).toHaveLength(2)
+    for (const e of events) {
+      expect(e.payload).toEqual({ taskId: e.taskId, files: sharedFiles.slice(0, 100), filesTruncated: true })
+    }
+  })
+
+  it('merges disjoint tasks while the sharing pair stays blocked', async () => {
+    const fx = makeProject()
+    const a = await seedCompletedTask(fx, 'share one', (p) => write(p, 'src/shared.ts', 'export const value = "a"\n'))
+    const b = await seedCompletedTask(fx, 'share two', (p) => write(p, 'src/shared.ts', 'export const value = "b"\n'))
+    const c = await seedCompletedTask(fx, 'disjoint', (p) => write(p, 'src/c.ts', 'export const c = 3\n'))
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    expect(report.blockedOverlap.map((o) => o.taskId)).toEqual([a.task.id, b.task.id])
+    expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([[c.task.id, 'merged']])
+    const logFiles = gitOut(report.checkout.path, ['log', '--name-only', '--format='])
+    expect(logFiles).toContain('src/c.ts')
+    expect(logFiles).not.toContain('src/shared.ts')
+  })
+
+  it('checks overlap before the protected gate: an overlapping protected-path task files no approval', async () => {
+    const fx = makeProject()
+    const a = await seedCompletedTask(fx, 'protected and shared', (p) => {
+      write(p, 'secrets/key.txt', 'KEY=value\n')
+      write(p, 'src/shared.ts', 'export const value = "a"\n')
+    })
+    const b = await seedCompletedTask(fx, 'shared only', (p) => write(p, 'src/shared.ts', 'export const value = "b"\n'))
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    expect(report.blockedOverlap).toEqual([
+      { taskId: a.task.id, files: ['src/shared.ts'] },
+      { taskId: b.task.id, files: ['src/shared.ts'] },
+    ])
+    expect(report.blockedProtected).toEqual([])
+    expect(report.integrated).toEqual([])
+    // Overlap precedes the gate: not even the protected-path half files a row.
+    expect(fx.store.listApprovals(fx.run.id)).toEqual([])
+  })
+
+  it('keeps explicit --task selection as the manual reconciliation path for an overlap group', async () => {
+    const fx = makeProject()
+    const git = (args: string[]): void => {
+      execFileSync('git', args, { cwd: fx.dir, stdio: 'ignore', timeout: 30_000 })
+    }
+    // The shared file already exists on main; A edits one early line and B one
+    // late line — far enough apart that each per-task merge stays conflict-free.
+    const lines = Array.from({ length: 12 }, (_, i) => `export const line${String(i + 1)} = 'main'`)
+    const withEdit = (index: number, value: string): string => {
+      const next = [...lines]
+      next[index] = `export const line${String(index + 1)} = '${value}'`
+      return `${next.join('\n')}\n`
+    }
+    write(fx.dir, 'src/shared.ts', `${lines.join('\n')}\n`)
+    git(['add', 'src/shared.ts'])
+    git(['-c', 'user.name=Pluton', '-c', 'user.email=pluton@localhost', 'commit', '-m', 'add shared'])
+    const a = await seedCompletedTask(fx, 'edit first line', (p) => write(p, 'src/shared.ts', withEdit(0, 'alpha')))
+    const b = await seedCompletedTask(fx, 'edit last line', (p) => write(p, 'src/shared.ts', withEdit(11, 'beta')))
+
+    const full = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(full.blockedOverlap.map((o) => o.taskId)).toEqual([a.task.id, b.task.id])
+    expect(full.integrated).toEqual([])
+
+    const onlyA = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [a.task.id] })
+    expect(onlyA.blockedOverlap).toEqual([])
+    expect(onlyA.integrated.map((i) => [i.taskId, i.status])).toEqual([[a.task.id, 'merged']])
+
+    const onlyB = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [b.task.id] })
+    expect(onlyB.blockedOverlap).toEqual([])
+    expect(onlyB.conflicts).toEqual([])
+    expect(onlyB.integrated.map((i) => [i.taskId, i.status])).toEqual([[b.task.id, 'merged']])
+  })
+
+  it('preps a duplicated task ref once and never self-overlaps it', async () => {
+    const fx = makeProject()
+    const a = await seedCompletedTask(fx, 'duplicated ref', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
+
+    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [a.task.id, a.task.id] })
+
+    // The file→Set<taskId> map keeps one task id per file: no self-overlap.
+    expect(report.blockedOverlap).toEqual([])
+    // Prep runs once for the distinct task: a clean checkout commits nothing.
+    expect(report.committed).toEqual([])
+    // The duplicate candidate entry merges once, then reports already integrated.
+    expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([
+      [a.task.id, 'merged'],
+      [a.task.id, 'already_integrated'],
+    ])
+    expect(fx.store.listEvents(fx.run.id, { type: 'integration.overlap_detected' })).toHaveLength(0)
+  })
+})
+
+describe('boundedOverlapFiles — the overlap event payload is bounded by characters, not just count', () => {
+  it('drops files on the accumulated-character budget so the serialized payload stays under the store cap', () => {
+    // 120 × ~200-char paths: a count-only cap keeps 100 of them and serializes
+    // ~20 000 chars, far over the store's 8 000-char event cap — `appendEvent`
+    // would throw and abort the whole integrate command (the failure this
+    // bound exists to prevent).
+    const longPaths = Array.from(
+      { length: 120 },
+      (_, i) => `src/dir${String(i).padStart(3, '0')}/${'x'.repeat(190)}.ts`,
+    )
+    expect(longPaths[0]!.length).toBeGreaterThan(195)
+
+    const bounded = boundedOverlapFiles(longPaths)
+
+    // The CHAR BUDGET — not the 100-file count cap — is what dropped files.
+    expect(bounded.files.length).toBeLessThan(100)
+    expect(bounded.filesTruncated).toBe(true)
+    // Kept in order, only a prefix.
+    expect(bounded.files).toEqual(longPaths.slice(0, bounded.files.length))
+    const keptChars = bounded.files.reduce((n, file) => n + file.length, 0)
+    expect(keptChars).toBeLessThanOrEqual(4_000)
+    // …so the serialized payload (flag included) stays comfortably under the
+    // store's 8 000-char cap.
+    const serialized = JSON.stringify({ taskId: 'task_x', files: bounded.files, filesTruncated: true })
+    expect(serialized.length).toBeLessThan(5_000)
+  })
+
+  it('accumulates the JSON-escaped length, so escape-heavy names cannot overflow the store cap', () => {
+    // 120 names of 24 raw chars whose JSON form is ~126 chars each ('\u0001'
+    // expands 6×). Raw-length accumulation would keep the full 100-file count
+    // cap (~12 600 serialized chars, over the store's 8 000 cap); measuring the
+    // escaped length must stop far earlier.
+    const escapeHeavy = Array.from(
+      { length: 120 },
+      (_, i) => `f${String(i).padStart(3, '0')}${'\u0001'.repeat(20)}`,
+    )
+    const rawChars = escapeHeavy.reduce((n, file) => n + file.length, 0)
+    expect(rawChars).toBeLessThanOrEqual(4_000)
+
+    const bounded = boundedOverlapFiles(escapeHeavy)
+
+    expect(bounded.files.length).toBeLessThan(100)
+    expect(bounded.filesTruncated).toBe(true)
+    expect(bounded.files).toEqual(escapeHeavy.slice(0, bounded.files.length))
+    const escapedChars = bounded.files.reduce((n, file) => n + JSON.stringify(file).length, 0)
+    expect(escapedChars).toBeLessThanOrEqual(4_000)
+    const serialized = JSON.stringify({ taskId: 'task_x', files: bounded.files, filesTruncated: true })
+    expect(serialized.length).toBeLessThan(5_000)
+  })
+
+  it('keeps every file and reports no truncation when the set fits the budget', () => {
+    const files = ['src/a.ts', 'src/b.ts']
+    expect(boundedOverlapFiles(files)).toEqual({ files, filesTruncated: false })
   })
 })
 
@@ -474,6 +686,94 @@ describe('integrateRun — protected paths gate', () => {
     expect(merged.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
     expect(gitOut(checkoutPath, ['rev-parse', 'HEAD']).trim()).not.toBe(headBefore)
     expect(merged.checks).toHaveLength(2)
+  })
+
+  it('blocks a protected path whose non-ASCII name git would C-quote', async () => {
+    const fx = makeProject()
+    const t1 = await seedCompletedTask(fx, 'touch secrets unicode', (p) =>
+      write(p, 'secrets/ämter.txt', 'KEY=value\n'),
+    )
+
+    const blocked = await integrateRun(fx.ctx, { runRef: fx.run.id })
+
+    // A C-quoted '"secrets/\303\244mter.txt"' never matches the `secrets`
+    // pattern, so the gate used to be skipped entirely for such names.
+    expect(blocked.integrated).toEqual([])
+    expect(blocked.blockedProtected).toHaveLength(1)
+    expect(blocked.blockedProtected[0]).toMatchObject({
+      taskId: t1.task.id,
+      files: ['secrets/ämter.txt'],
+    })
+  })
+
+  it('ignores approved integration.apply rows a Muse could have filed (provenance and disclosure shape)', async () => {
+    const fx = makeProject()
+    const t1 = await seedCompletedTask(fx, 'touch secrets', (p) => write(p, 'secrets/prod.env', 'KEY=value\n'))
+
+    const blocked = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(blocked.blockedProtected).toHaveLength(1)
+    const legitApprovalId = blocked.blockedProtected[0]?.approvalId as string
+
+    // What a Muse can mint through `approval.request`: its own provenance stamp
+    // and a string-only scope (the tool schema has no array values). This row
+    // matches action + scope.taskId but must never satisfy the gate.
+    const forged = fx.store.createApproval({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: t1.task.id,
+      requestedByMuseId: 'manager',
+      action: 'integration.apply',
+      reason: 'routine repository maintenance',
+      scope: { taskId: t1.task.id, files: 'secrets/prod.env' },
+      expiresAt: null,
+    })
+    fx.store.setApprovalStatus(forged.id, 'approved', { decidedBy: 'operator' })
+
+    const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(rerun.integrated).toEqual([])
+    expect(rerun.blockedProtected).toHaveLength(1)
+
+    // Even a muse-stamped row carrying a full `files` array stays rejected:
+    // gate authority requires the gate's own (muse-less) provenance.
+    const forgedShape = fx.store.createApproval({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: t1.task.id,
+      requestedByMuseId: 'manager',
+      action: 'integration.apply',
+      reason: 'routine repository maintenance',
+      scope: { taskId: t1.task.id, files: ['secrets/prod.env'] },
+      expiresAt: null,
+    })
+    fx.store.setApprovalStatus(forgedShape.id, 'approved', { decidedBy: 'operator' })
+
+    const rerun2 = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(rerun2.integrated).toEqual([])
+    expect(rerun2.blockedProtected).toHaveLength(1)
+
+    // A gate-shaped row whose recorded file list does not cover every current
+    // protected match (stale or partial disclosure) must re-block as well.
+    const stale = fx.store.createApproval({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: t1.task.id,
+      requestedByMuseId: null,
+      action: 'integration.apply',
+      reason: 'approved for a different file',
+      scope: { taskId: t1.task.id, runId: fx.run.id, files: ['secrets/other.env'] },
+      expiresAt: null,
+    })
+    fx.store.setApprovalStatus(stale.id, 'approved', { decidedBy: 'operator' })
+
+    const rerun3 = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(rerun3.integrated).toEqual([])
+    expect(rerun3.blockedProtected).toHaveLength(1)
+
+    // The real gate-authored row still unblocks once the operator approves it.
+    fx.store.setApprovalStatus(legitApprovalId, 'approved', { decidedBy: 'operator' })
+    const merged = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    expect(merged.blockedProtected).toEqual([])
+    expect(merged.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
   })
 })
 

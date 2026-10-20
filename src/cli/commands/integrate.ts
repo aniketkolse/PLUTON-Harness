@@ -19,7 +19,19 @@ import { runByRef, taskById } from './status.ts'
  * - the checkout lives at `pluton/integration/<run>` under `.pluton/workspaces/`
  *   and is reused while its workspace row is `active`;
  * - a dirty (uncommitted) task checkout is committed FIRST (ADR-0009), so the
- *   verified work actually lands on the task branch before any merge;
+ *   verified work actually lands on the task branch before any merge. All
+ *   candidates prep before any merge, so `committed` can include a candidate
+ *   the merge loop later reports as `blockedOverlap`;
+ * - before any merge the candidates' changed files are mapped file→tasks: a
+ *   file claimed by two or more tasks blocks EVERY claimant (`blockedOverlap`
+ *   + `integration.overlap_detected`), never first-come-first-served. Overlap
+ *   is checked before the protected gate, so an overlap-blocked task files no
+ *   `integration.apply` approval. Explicit `--task <id>` selection scopes the
+ *   candidate set and is the operator's deliberate per-task path (one candidate
+ *   is never an overlap group), so an overlap group stays reported on every
+ *   later full run even after a manual per-task merge: the pair never
+ *   auto-merges in a batch, and manual reconciliation keeps today's
+ *   conflict-preservation semantics;
  * - every task merge is `fetch` + `merge --no-ff` (the workspace primitives);
  *   a conflict stops the loop and is PRESERVED — Pluton never resets or aborts;
  * - a task whose diff touches `git.protected_paths` is held behind a pending
@@ -31,6 +43,11 @@ import { runByRef, taskById } from './status.ts'
  * The command is verdict data, not a gate: conflicts, blocked tasks and failed
  * checks return `ok: true` in the report. Only pre-flight problems (unknown
  * run, non-completed task selection, nothing to integrate) throw.
+ *
+ * Reading a task's changed files is deliberately NOT caught per task: a git
+ * failure there aborts the whole run before anything is merged — stricter than
+ * a `failed` entry, and safer, because an unreadable diff must never silently
+ * auto-merge.
  */
 
 export interface IntegrateCommandOptions {
@@ -57,6 +74,8 @@ export interface IntegrateReport {
   committed: { taskId: string; commit: string }[]
   conflicts: { taskId: string; files: string[] }[]
   blockedProtected: { taskId: string; files: string[]; approvalId: string }[]
+  /** Tasks sharing a changed file with another candidate: never auto-merged. */
+  blockedOverlap: { taskId: string; files: string[] }[]
   failed: { taskId: string; detail: string }[]
   /** Completed tasks the loop never reached because an earlier merge conflicted. */
   notAttempted: { taskId: string }[]
@@ -73,6 +92,42 @@ export interface IntegrateReport {
 const CHECK_TIMEOUT_MS = 600_000
 const CHECK_MAX_OUTPUT_BYTES = 200_000
 const OUTPUT_TAIL_CHARS = 2_000
+/** Count cap for the `integration.overlap_detected` payload (see {@link boundedOverlapFiles}). */
+const OVERLAP_EVENT_FILE_LIMIT = 100
+/**
+ * Accumulated JSON-escaped-character budget for the included file paths — the
+ * binding half of the bound. The store measures `canonicalJson(payload)`, where
+ * `\`, `"` and control characters expand 2–6×, so counting raw path lengths
+ * could still overshoot the 8 000-char event cap; {@link boundedOverlapFiles}
+ * therefore counts `JSON.stringify(file).length` (quotes included, a faithful
+ * stand-in for canonical string escaping) and stops on whichever cap hits
+ * first, keeping the serialized payload comfortably under the cap.
+ */
+const OVERLAP_EVENT_PATH_CHAR_BUDGET = 4_000
+
+/**
+ * Bound the `integration.overlap_detected` event payload: the store rejects
+ * event payloads over `DEFAULT_MAX_EVENT_CHARS` (8 000) by throwing
+ * `ValidationError`, and an unbounded shared-file set must never abort the
+ * whole integrate command mid-report. Keeps files in order while both the
+ * count cap and the accumulated JSON-escaped-character budget hold; anything
+ * dropped sets `filesTruncated`. The report's `blockedOverlap` keeps the full
+ * list — only the durable event is bounded.
+ */
+export function boundedOverlapFiles(files: string[]): { files: string[]; filesTruncated: boolean } {
+  const kept: string[] = []
+  let escapedChars = 0
+  for (const file of files) {
+    if (kept.length >= OVERLAP_EVENT_FILE_LIMIT) break
+    // The store measures the serialized payload, not the raw path: count what
+    // JSON escaping will actually add.
+    const escaped = JSON.stringify(file).length
+    if (escapedChars + escaped > OVERLAP_EVENT_PATH_CHAR_BUDGET) break
+    kept.push(file)
+    escapedChars += escaped
+  }
+  return { files: kept, filesTruncated: kept.length < files.length }
+}
 
 export function approvalScopeTaskId(scope: JsonValue): string | null {
   if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
@@ -80,16 +135,27 @@ export function approvalScopeTaskId(scope: JsonValue): string | null {
   return typeof value === 'string' ? value : null
 }
 
-/** An approved `integration.apply` approval for exactly this task unblocks the gate. */
-function hasApprovedApply(store: Store, runId: string, taskId: string): boolean {
-  return store
-    .listApprovals(runId)
-    .some(
-      (a) =>
-        a.action === 'integration.apply' &&
-        a.status === 'approved' &&
-        approvalScopeTaskId(a.scope) === taskId,
-    )
+/**
+ * An approved, gate-authored `integration.apply` covering every currently
+ * protected file unblocks the gate. Deliberately strict: the row must carry
+ * the gate's own provenance (no requesting muse — rows filed through
+ * `approval.request` are muse-stamped) and the file-list disclosure it
+ * recorded at block time must cover today's matches, so neither a row a Muse
+ * could forge nor an approval that predates new protected edits authorizes
+ * the merge.
+ */
+function hasApprovedApply(store: Store, runId: string, taskId: string, matches: string[]): boolean {
+  return store.listApprovals(runId).some((a) => {
+    if (a.action !== 'integration.apply' || a.status !== 'approved') return false
+    if (a.taskId !== taskId || a.requestedByMuseId !== null) return false
+    if (approvalScopeTaskId(a.scope) !== taskId) return false
+    const scope = a.scope
+    if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return false
+    const files = (scope as Record<string, JsonValue>)['files']
+    if (!Array.isArray(files)) return false
+    const approved = files.filter((f): f is string => typeof f === 'string')
+    return matches.every((m) => approved.includes(m))
+  })
 }
 
 function resolveCandidates(store: Store, runId: string, taskRefs: string[] | undefined): TaskRecord[] {
@@ -162,11 +228,18 @@ export async function integrateRun(
     const committed: IntegrateReport['committed'] = []
     const conflicts: IntegrateReport['conflicts'] = []
     const blockedProtected: IntegrateReport['blockedProtected'] = []
+    const blockedOverlap: IntegrateReport['blockedOverlap'] = []
     const failed: IntegrateReport['failed'] = []
     const notAttempted: IntegrateReport['notAttempted'] = []
     let stoppedAfterConflict = false
 
-    for (const [index, task] of candidates.entries()) {
+    // Phase 1 — prep each distinct candidate: resolve its workspace, commit a
+    // dirty checkout (ADR-0009) and read its changed files. Duplicate refs prep
+    // once; the merge loop below still visits every candidate entry.
+    const prepByTask = new Map<string, string[]>()
+    const prepFailed = new Set<string>()
+    for (const task of candidates) {
+      if (prepByTask.has(task.id) || prepFailed.has(task.id)) continue
       const ws = store.getWorkspaceByTask(task.id)
       if (ws === null) {
         const detail = 'no active checkout is recorded for this task; nothing to integrate'
@@ -178,6 +251,7 @@ export async function integrateRun(
           type: 'integration.failed',
           payload: { taskId: task.id, detail },
         })
+        prepFailed.add(task.id)
         continue
       }
 
@@ -214,12 +288,61 @@ export async function integrateRun(
           type: 'integration.failed',
           payload: { taskId: task.id, detail },
         })
+        prepFailed.add(task.id)
         continue
       }
 
       const files = await manager.changedFiles(ws.path, ws.baseCommit)
+      prepByTask.set(task.id, files)
+    }
+
+    // Phase 2 — overlap map: a file claimed by two or more distinct prepped
+    // candidates blocks EVERY claimant (never first-come-first-served). It is
+    // built after all preps and before any merge, so an overlap-blocked task
+    // never reaches the protected gate below and files no approval.
+    const claimingTasks = new Map<string, Set<string>>()
+    for (const [taskId, files] of prepByTask) {
+      for (const file of files) {
+        const claiming = claimingTasks.get(file)
+        if (claiming === undefined) claimingTasks.set(file, new Set([taskId]))
+        else claiming.add(taskId)
+      }
+    }
+    const overlapBlocked = new Set<string>()
+    for (const [taskId, files] of prepByTask) {
+      const shared = [...new Set(files.filter((f) => (claimingTasks.get(f)?.size ?? 0) > 1))].sort()
+      if (shared.length === 0) continue
+      blockedOverlap.push({ taskId, files: shared })
+      const eventFiles = boundedOverlapFiles(shared)
+      store.appendEvent({
+        projectId,
+        runId: runRecord.id,
+        taskId,
+        type: 'integration.overlap_detected',
+        payload: {
+          taskId,
+          files: eventFiles.files,
+          ...(eventFiles.filesTruncated ? { filesTruncated: true } : {}),
+        },
+      })
+      overlapBlocked.add(taskId)
+    }
+
+    // Phase 3 — merge loop: candidate order. Prep-failed and overlap-blocked
+    // tasks were already recorded above and are only skipped here.
+    for (const [index, task] of candidates.entries()) {
+      if (prepFailed.has(task.id)) continue // recorded during prep
+      if (overlapBlocked.has(task.id)) continue // recorded in the overlap pass
+      const ws = store.getWorkspaceByTask(task.id)
+      const files = prepByTask.get(task.id)
+      if (ws === null || files === undefined) {
+        // unreachable — every other candidate was prepped above — but record
+        // rather than silently drop the candidate if that ever changes.
+        failed.push({ taskId: task.id, detail: 'internal: candidate was not prepped' })
+        continue
+      }
       const matches = files.filter((f) => protectedPatterns.some((p) => matchProtectedPath(p, f)))
-      if (matches.length > 0 && !hasApprovedApply(store, runRecord.id, task.id)) {
+      if (matches.length > 0 && !hasApprovedApply(store, runRecord.id, task.id, matches)) {
         // Uniform approval expiry: same TTL rule as the tool handlers
         // (runtime.approval_timeout_minutes, 0 = never).
         const ttlMinutes = ctx.loaded.config.runtime.approval_timeout_minutes
@@ -331,6 +454,7 @@ export async function integrateRun(
       committed,
       conflicts,
       blockedProtected,
+      blockedOverlap,
       failed,
       notAttempted,
       stoppedAfterConflict,
