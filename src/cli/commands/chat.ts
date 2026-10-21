@@ -31,7 +31,7 @@ import { decideApproval } from './approvals.ts'
 import { resolveMuseByRef } from './mcp.ts'
 import { runLine } from './status.ts'
 import { terminalSafeLine } from '../../util/sanitize.ts'
-import { containerAdapterFor, prepareContainerMode, startRunInBackground, type RunDeps } from './run.ts'
+import { containerAdapterFor, prepareContainerMode, settleRunCrashed, startRunInBackground, type RunDeps } from './run.ts'
 import { collectDoctorChecks } from './doctor.ts'
 import { PlanManager } from '../../plan/manager.ts'
 import { renderPlanGraph } from '../../tui/plan-graph.ts'
@@ -257,6 +257,12 @@ export async function chatRun(
               }
               const msg = err instanceof Error ? err.message : String(err)
               sessionInstance?.commitLine(`run ${runId} failed: ${msg}`)
+              // A rejected background promise means this run has no live
+              // driver left: settle the durable row here too, or it strands
+              // `created`/`active` with no path to completion (shared rule
+              // with the API route). The chat line above stays the record of
+              // the user-visible outcome.
+              settleRunCrashed(store, projectId, runId, err)
             },
           )
           return { runId }

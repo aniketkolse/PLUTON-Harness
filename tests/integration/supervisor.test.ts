@@ -32,7 +32,7 @@ import { MockEngineAdapter, type MockScriptStep } from '../../src/engines/mock/a
 import { QwenEngineAdapter } from '../../src/engines/qwen/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import type { FileLeaseManager } from '../../src/orchestrator/lease-manager.ts'
-import { RunSupervisor, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
+import { MAX_RESULT_TEXT_CHARS, RunSupervisor, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -364,7 +364,10 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(out.outcome).toBe('success')
     expect(out.unfinishedTasks).toEqual([])
     expect(out.taskCounts).toMatchObject({ completed: 2 })
-    expect(out.managerSummary).toBe('mock:success')
+    // The reported manager summary is the manager's own streamed answer —
+    // not the engine result metadata string (`mock:success`), which stays
+    // stopReason-style metadata (defect 2026-10-21).
+    expect(out.managerSummary).toBe('manager report')
 
     const [t1id, t2id] = created
     const t1 = world.store.getTask(t1id as string)
@@ -382,7 +385,7 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(eventCount(world.store, world.runId, 'task.started')).toBe(2)
     expect(eventCount(world.store, world.runId, 'task.completed')).toBe(2)
     expect(eventCount(world.store, world.runId, 'run.finished')).toBe(1)
-    expect(world.store.getRun(world.runId).finalSummary).toBe('mock:success')
+    expect(world.store.getRun(world.runId).finalSummary).toBe('manager report')
   })
 
   it('emits worker lifecycle events with the real role, model and checkout path', async () => {
@@ -822,6 +825,22 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(out.taskCounts).toEqual({})
     expect(out.unfinishedTasks).toEqual([])
     expect(world.store.listTasks(world.runId)).toHaveLength(0)
+    // The manager's own streamed explanation is the failure summary — engine
+    // metadata (`mock:failure`) must not substitute for available content.
+    expect(world.store.getRun(world.runId).finalSummary).toBe('cannot plan')
+  })
+
+  it('a textless manager failure falls back to the engine result summary (metadata last resort)', async () => {
+    const world = makeWorld({
+      managerScript: [{ delayMs: 10, outcome: 'failure' }],
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('failed')
+    // No streamed explanation exists, so the engine result summary is the
+    // honest (if sparse) failure record; the stopReason also stays in the
+    // run.finished event payload.
     expect(world.store.getRun(world.runId).finalSummary).toBe('mock:failure')
   })
 
@@ -1948,4 +1967,337 @@ describe('RunSupervisor — cancellation interrupts live sessions (CS-9)', () =>
     hanging.releaseAll()
     await Promise.all([...sup.inFlight.values()].map((p) => p.catch(() => {})))
   }, 20_000)
+})
+
+/**
+ * Defect 2026-10-21 regressions: the supervisor used to count streamed text
+ * and discard it, persisting only engine metadata ("stopReason: end_turn") as
+ * the run's final answer and as each worker's entire retrievable result.
+ * These tests pin the corrected data contracts at every stored surface.
+ */
+describe('RunSupervisor — answer and result persistence', () => {
+  it('persists a worker\'s actual streamed answer in result_json, retrievable after the run', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [{ text: 'plan', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        const t = await createViaBridge(bridge, { title: 'Research', assigneeMuseId: 'worker-a' })
+        created.push(t.id)
+      },
+      workerScripts: {
+        'worker-a': [
+          {
+            events: [
+              { kind: 'text', text: 'FINDING A: temperature is 31C.\n' },
+              { kind: 'text', text: 'FINDING B: sources agree.' },
+            ],
+            outcome: 'success',
+          },
+        ],
+      },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    const task = world.store.getTask(created[0]!)
+    expect(task.state).toBe('completed')
+    const answerBody = 'FINDING A: temperature is 31C.\nFINDING B: sources agree.'
+    const result = task.result as Record<string, unknown>
+    // The full body, exactly as streamed, is durably retrievable.
+    expect(result['text']).toBe(answerBody)
+    expect(result['textTruncated']).toBe(false)
+    expect(result['textChars']).toBe(answerBody.length)
+    // Old metadata fields keep their meaning (contract is additive only).
+    expect(result['outcome']).toBe('success')
+    expect(result['engine']).toBe('mock')
+    expect(result['summary']).toBe('mock:success')
+  })
+
+  it('bounds the persisted answer and records the truncation honestly', async () => {
+    const longBody = ' plain'.repeat(30_000) // 180_000 chars > the 50_000 bound
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [{ text: 'plan', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        const t = await createViaBridge(bridge, { title: 'Long research', assigneeMuseId: 'worker-a' })
+        created.push(t.id)
+      },
+      workerScripts: { 'worker-a': [{ text: longBody, outcome: 'success' }] },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    const result = world.store.getTask(created[0]!).result as Record<string, unknown>
+    expect(typeof result['text']).toBe('string')
+    expect(String(result['text']).length).toBe(MAX_RESULT_TEXT_CHARS)
+    expect(result['textTruncated']).toBe(true)
+    // The full count still flowed through — drops are recorded, never silent.
+    expect(result['textChars']).toBe(longBody.length)
+  })
+
+  it('persists the manager\'s streamed answer as finalSummary and keeps stopReason as event metadata', async () => {
+    const world = makeWorld({
+      managerScript: [{ text: 'FINAL REPORT: all checks passed.', outcome: 'success' }],
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('completed')
+    const run = world.store.getRun(world.runId)
+    expect(run.finalSummary).toBe('FINAL REPORT: all checks passed.')
+    expect(run.completedAt).not.toBeNull()
+
+    // run.finished keeps the engine result string as stopReason metadata so an
+    // empty answer stays distinguishable from a dropped one.
+    const events = world.store.eventsSince(world.projectId, 0, 500)
+    const finished = events.filter((e) => e.type === 'run.finished' && e.runId === world.runId)
+    expect(finished.length).toBe(1)
+    const payload = finished[0]!.payload as Record<string, unknown>
+    expect(payload['stopReason']).toBe('mock:success')
+    expect(payload['managerSummary']).toBe('FINAL REPORT: all checks passed.')
+  })
+
+  it('leaves finalSummary honest-null for a successful turn that streamed no answer', async () => {
+    const world = makeWorld({
+      // A tool-only manager turn: engine says success, but no text was ever
+      // produced. The old behavior stored "mock:success" as the run answer —
+      // the corrected contract stores NULL and reports the stopReason in the
+      // event payload instead.
+      managerScript: [{ outcome: 'success' }],
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('completed')
+    const run = world.store.getRun(world.runId)
+    expect(run.finalSummary).toBeNull()
+
+    const events = world.store.eventsSince(world.projectId, 0, 500)
+    const finished = events.filter((e) => e.type === 'run.finished' && e.runId === world.runId)
+    const payload = finished[0]!.payload as Record<string, unknown>
+    expect(payload['stopReason']).toBe('mock:success')
+    expect(payload['managerSummary']).toBe('mock:success')
+  })
+
+  it('carries the persisted answer text in the settled worker lifecycle event', async () => {
+    const events: WorkerLifecycleEvent[] = []
+    let capturedTaskId: string | null = null
+    const world = makeWorld({
+      managerScript: [{ text: 'plan', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        const t = await createViaBridge(bridge, { title: 'Inspected', assigneeMuseId: 'worker-a' })
+        capturedTaskId = t.id
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'RESULT BODY ALPHA', outcome: 'success' }],
+      },
+      onWorkerEvent: (event) => {
+        if (event.type === 'worker.completed') events.push(event)
+      },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+    expect(capturedTaskId).not.toBeNull()
+
+    const completed = events.find((e) => e.taskId === capturedTaskId)
+    expect(completed).toBeDefined()
+    const payload = completed!.payload as Record<string, unknown> | undefined
+    expect(payload).toBeDefined()
+    expect(payload?.['text']).toBe('RESULT BODY ALPHA')
+    expect(payload?.['summary']).toBe('mock:success')
+  })
+
+  it('keeps a failed task failure-side content durable next to a successful sibling — never a uniform success', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [{ text: 'Two probes dispatched; results were mixed.', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        created.push((await createViaBridge(bridge, { title: 'Sibling success', assigneeMuseId: 'worker-a' })).id)
+        created.push((await createViaBridge(bridge, { title: 'Sibling failure', assigneeMuseId: 'worker-b' })).id)
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'SIBLING SUCCESS BODY', outcome: 'success' }],
+        'worker-b': [{ text: 'SIBLING FAILURE BODY', outcome: 'failure' }],
+      },
+      maxRetriesPerTask: 0,
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    // The run is failed — completed siblings never flip it to success.
+    expect(out.state).toBe('failed')
+    expect(out.outcome).toBe('failure')
+    expect(world.store.getRun(world.runId).state).toBe('failed')
+
+    const [successId, failureId] = created
+    // The failed task: state + durable failure body, retrievable on a fresh read.
+    const failed = world.store.getTask(failureId!)
+    expect(failed.state).toBe('failed')
+    const failure = (failed.failure ?? {}) as Record<string, unknown>
+    expect(failure['outcome']).toBe('failure')
+    expect(failure['text']).toBe('SIBLING FAILURE BODY')
+    expect(failure['textTruncated']).toBe(false)
+    expect(failure['textChars']).toBe('SIBLING FAILURE BODY'.length)
+    // The successful sibling keeps its full durable result next to the failure.
+    const succeeded = world.store.getTask(successId!)
+    expect(succeeded.state).toBe('completed')
+    const success = (succeeded.result ?? {}) as Record<string, unknown>
+    expect(success['outcome']).toBe('success')
+    expect(success['text']).toBe('SIBLING SUCCESS BODY')
+    // The manager streamed a real explanation; it — not engine metadata — is
+    // the failed run's final summary (partial-failure policy).
+    expect(world.store.getRun(world.runId).finalSummary).toBe('Two probes dispatched; results were mixed.')
+  })
+
+  it('a manager synthesis failure after workers completed fails honestly and preserves worker results', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      // Workers settle in milliseconds while the manager is still "thinking";
+      // its synthesis then fails — the run must fail, never fabricate success,
+      // and the completed worker outputs must remain retrievable.
+      managerScript: [{ delayMs: 2_000, outcome: 'failure' }],
+      managerTools: async (bridge) => {
+        created.push((await createViaBridge(bridge, { title: 'Done before synthesis', assigneeMuseId: 'worker-a' })).id)
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'WORK RESULT THAT MUST SURVIVE', outcome: 'success' }],
+      },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('failed')
+    expect(out.outcome).toBe('failure')
+
+    // Completed worker outputs are preserved exactly — diagnosis surface.
+    const task = world.store.getTask(created[0]!)
+    expect(task.state).toBe('completed')
+    expect(task.state !== 'failed' && task.state !== 'cancelled').toBe(true)
+    const result = (task.result ?? {}) as Record<string, unknown>
+    expect(result['text']).toBe('WORK RESULT THAT MUST SURVIVE')
+
+    // No fabricated answer: without streamed text the finalSummary stays the
+    // engine result summary (metadata), and the stopReason remains event-only.
+    const run = world.store.getRun(world.runId)
+    expect(run.completedAt).not.toBeNull()
+    expect(run.finalSummary).toBe('mock:failure')
+    const finished = world.store
+      .eventsSince(world.projectId, 0, 500)
+      .filter((e) => e.type === 'run.finished' && e.runId === world.runId)
+    expect(finished).toHaveLength(1)
+    const payload = (finished[0]!.payload ?? {}) as Record<string, unknown>
+    expect(payload['stopReason']).toBe('mock:failure')
+    expect(payload['outcome']).toBe('failure')
+  })
+
+  it('redacts credential-looking prose out of persisted answers and worker results (at rest)', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [
+        {
+          text: 'Ran the checks. login used password=hunter2 and probe key sk-abcdefghijklmnopqrstuvwxyz123456.',
+          outcome: 'success',
+        },
+      ],
+      managerTools: async (bridge) => {
+        created.push((await createViaBridge(bridge, { title: 'Echo secret', assigneeMuseId: 'worker-a' })).id)
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'used bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJyYW5kb20 during setup', outcome: 'success' }],
+      },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('completed')
+    // The manager answer is redacted before persistence (prompt §2.7 at rest).
+    const run = world.store.getRun(world.runId)
+    expect(run.finalSummary).toContain('password=[redacted]')
+    expect(run.finalSummary).toContain('sk-[redacted]')
+    expect(run.finalSummary).not.toContain('hunter2')
+    // The worker result body goes through the same runPrompt choke point.
+    const result = (world.store.getTask(created[0]!).result ?? {}) as Record<string, unknown>
+    expect(String(result['text'])).toContain('bearer [redacted]')
+    expect(String(result['text'])).not.toContain('eyJhbGciOiJIUzI1NiIs')
+  })
+
+  it('answers and worker results survive reopening the same database file (server restart)', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [{ text: 'RESTART REPORT: findings preserved.', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        created.push((await createViaBridge(bridge, { title: 'Durable work', assigneeMuseId: 'worker-a' })).id)
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'RESTART WORK BODY', outcome: 'success' }],
+      },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    const original = world.store.getRun(world.runId)
+    expect(original.finalSummary).toBe('RESTART REPORT: findings preserved.')
+
+    // Fresh handles, exactly the sequence bootstrapStore runs on a restart:
+    // open the same sqlite file, migrate (no-op on a current schema), new Store.
+    const db2 = openDatabase(join(world.dir, '.pluton', 'state', 'pluton.sqlite'))
+    try {
+      migrate(db2)
+      const reopened = new Store(db2)
+      const run = reopened.getRun(world.runId)
+      expect(run.state).toBe('completed')
+      expect(run.completedAt).not.toBeNull()
+      expect(run.finalSummary).toBe('RESTART REPORT: findings preserved.')
+
+      const task = reopened.getTask(created[0]!)
+      expect(task.state).toBe('completed')
+      const result = (task.result ?? {}) as Record<string, unknown>
+      expect(result['text']).toBe('RESTART WORK BODY')
+      expect(result['outcome']).toBe('success')
+    } finally {
+      db2.close()
+    }
+  })
+
+  it('reads pre-fix result records that carry no text keys without breaking the readers', async () => {
+    const created: string[] = []
+    const world = makeWorld({
+      managerScript: [{ text: 'plan', outcome: 'success' }],
+      managerTools: async (bridge) => {
+        created.push((await createViaBridge(bridge, { title: 'Legacy row', assigneeMuseId: 'worker-a' })).id)
+      },
+      workerScripts: {
+        'worker-a': [{ text: 'will be downgraded to the legacy shape', outcome: 'success' }],
+      },
+    })
+
+    await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    // Downgrade the just-written row to the exact pre-fix shape callers
+    // persisted before the answer-persistence fix existed.
+    const legacy = { summary: 'mock:success', outcome: 'success', engine: 'mock' }
+    world.store.db
+      .prepare('UPDATE tasks SET result_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacy), created[0]!)
+
+    const reread = world.store.getTask(created[0]!)
+    expect(reread.state).toBe('completed')
+    const result = (reread.result ?? {}) as Record<string, unknown>
+    expect(result['text']).toBeUndefined()
+    expect(result['textTruncated']).toBeUndefined()
+    expect(result['summary']).toBe('mock:success')
+    expect(result['outcome']).toBe('success')
+    // The run-side records are untouched by the row shape.
+    expect(world.store.getRun(world.runId).state).toBe('completed')
+  })
 })

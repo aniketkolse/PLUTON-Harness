@@ -9,6 +9,7 @@ import {
 } from '../domain/errors.ts'
 import type { ApprovalRecord, JsonValue, MuseRecord, RunRecord, TaskRecord } from '../domain/models.ts'
 import { engineAdapterForMuse, type EngineIsolationFacts } from '../engines/approval.ts'
+import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'
 import {
   createEngineApprovalChannel,
@@ -162,7 +163,16 @@ interface PromptOutcome {
   outcome: 'success' | 'failure' | 'cancelled' | 'unknown'
   summary: string | null
   errorCode: string | null
+  /** Total streamed assistant text across the whole turn (never capped). */
   textChars: number
+  /**
+   * The assistant's own answer body, retained up to
+   * {@link MAX_RESULT_TEXT_CHARS} (host cap, not model-controlled). Empty when
+   * the turn produced no text (tool-only turns).
+   */
+  text: string
+  /** True when more text streamed than the host retains in `text`. */
+  textTruncated: boolean
 }
 
 /**
@@ -192,9 +202,72 @@ const MANAGER_INTERRUPT_KEY = 'manager-session'
  */
 export const DEFAULT_OWNERSHIP_TTL_MS = 90_000
 
+/**
+ * Stranded-run detection for observability ONLY (never an automatic state
+ * write): a non-terminal run is stranded when its supervisor heartbeat is
+ * far past the ownership TTL, or when terminal evidence is still pending but
+ * no heartbeat exists at all. A live supervisor loop renews every `ttl / 3`
+ * even while the manager prompt runs — only driver death explains a stale
+ * heartbeat, so this flag is durable evidence, not engine-slowness guessing.
+ */
+export function isSupervisorStale(run: RunRecord, nowMs: number): boolean {
+  if (TERMINAL_RUN_STATES.has(run.state)) return false
+  if (run.supervisorHeartbeatAt === null) {
+    // A run nobody has started yet (created, never started, never claimed) is
+    // not stranded — there is no abandoned owner, only a start that has not
+    // happened. Once a run has started, a missing heartbeat means the owner
+    // died before it could even renew once.
+    return run.startedAt !== null
+  }
+  return nowMs - run.supervisorHeartbeatAt > DEFAULT_OWNERSHIP_TTL_MS * 2
+}
+
 function boundedSummary(text: string | undefined, max = 2_000): string | null {
   if (text === undefined) return null
   return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+/**
+ * How much assistant answer text one prompt may keep in durable storage
+ * (results_json / final_summary). The count keeps flowing past this bound via
+ * `textChars`, and the truncation flag records it — nothing is silently
+ * dropped. 50k chars ≈ 4-5 pages of text, far beyond any honest final report;
+ * engine-side transcripts remain the unlimited record. Exported so tests bind
+ * to the real bound instead of duplicating a literal.
+ */
+export const MAX_RESULT_TEXT_CHARS = 50_000
+/**
+ * How much answer text one SSE worker-lifecycle event may carry: the inspector
+ * re-renders every frame in memory, so live worker payloads stay smaller than
+ * the persisted bound. Full text always remains in `result_json`.
+ */
+const MAX_EVENT_TEXT_CHARS = 8_000
+
+/**
+ * Retained per-turn text accumulator: keeps counting every streamed char while
+ * retaining only the first {@link max} of them. The extra chars exist (log
+ * files, engine-side sessions) — they are just not copied into the result row.
+ */
+class BoundedText {
+  totalChars = 0
+  private kept = ''
+  private readonly max: number
+
+  constructor(max: number) {
+    this.max = max
+  }
+
+  add(chunk: string): void {
+    this.totalChars += chunk.length
+    if (this.kept.length < this.max) {
+      this.kept += chunk.length > this.max - this.kept.length ? chunk.slice(0, this.max - this.kept.length) : chunk
+    }
+  }
+
+  /** Retained text (≤ max) and whether any stream text was dropped from it. */
+  take(): { text: string; textTruncated: boolean } {
+    return { text: this.kept, textTruncated: this.totalChars > this.kept.length }
+  }
 }
 
 /** Read a JSON object value without trusting its shape. */
@@ -479,6 +552,12 @@ export class RunSupervisor {
     const result = jsonObject(task.result)
     const failure = jsonObject(task.failure)
     const summary = typeof result?.['summary'] === 'string' ? result['summary'].slice(0, 2_000) : undefined
+    // The settled event carries the persisted result body too: what the
+    // inspector shows is what `task.get_result` will keep returning after the
+    // worker (and even the host) is gone. Bounded smaller than the stored
+    // bound so one frame never floods a client's replay buffer.
+    const resultText =
+      typeof result?.['text'] === 'string' && result['text'] !== '' ? (result['text'] as string) : undefined
     const failureMessage =
       typeof failure?.['message'] === 'string'
         ? failure['message'].slice(0, 2_000)
@@ -490,14 +569,20 @@ export class RunSupervisor {
         this.emitWorkerEvent({
           ...base,
           type: 'worker.completed',
-          ...(summary !== undefined ? { payload: { summary } } : {}),
+          payload: {
+            ...(summary !== undefined ? { summary } : {}),
+            ...(resultText !== undefined ? { text: resultText.slice(0, MAX_EVENT_TEXT_CHARS) } : {}),
+          },
         })
         return
       case 'verifying':
         this.emitWorkerEvent({
           ...base,
           type: 'worker.report',
-          ...(summary !== undefined ? { payload: { summary } } : {}),
+          payload: {
+            ...(summary !== undefined ? { summary } : {}),
+            ...(resultText !== undefined ? { text: resultText.slice(0, MAX_EVENT_TEXT_CHARS) } : {}),
+          },
         })
         return
       case 'failed':
@@ -556,7 +641,10 @@ export class RunSupervisor {
   ): Promise<PromptOutcome> {
     let result: { outcome: PromptOutcome['outcome']; summary?: string } | null = null
     let errorCode: string | null = null
-    let textChars = 0
+    // The assistant's own answer: counted in full, retained up to
+    // MAX_RESULT_TEXT_CHARS (defect 2026-10-21: only a char count was kept,
+    // so the final answer and worker results were never durably storable).
+    const answer = new BoundedText(MAX_RESULT_TEXT_CHARS)
     let timedOut = false
     const timer =
       prompt.timeoutMs !== undefined
@@ -568,8 +656,8 @@ export class RunSupervisor {
     try {
       for await (const ev of session.sendPrompt(prompt)) {
         this.absorbEvent(ev, {
-          onText: (n) => {
-            textChars += n
+          onText: (chunk) => {
+            answer.add(chunk)
           },
           onResult: (r) => {
             result = r
@@ -622,25 +710,43 @@ export class RunSupervisor {
     } finally {
       if (timer !== null) clearTimeout(timer)
     }
+    // Single redaction choke point for every prompt's retained prose (manager
+    // answer and worker result bodies alike): a model echoing a credential
+    // into free text must not persist it (prompt §2.7). Char counts stay raw.
+    const taken = answer.take()
+    const answerBody = { ...taken, text: redactProseSecrets(taken.text) }
     if (timedOut) {
-      return { outcome: 'unknown', summary: 'prompt exceeded its time bound', errorCode: 'prompt_timeout', textChars }
+      return {
+        outcome: 'unknown',
+        summary: 'prompt exceeded its time bound',
+        errorCode: 'prompt_timeout',
+        textChars: answer.totalChars,
+        ...answerBody,
+      }
     }
     if (result === null) {
-      return { outcome: 'unknown', summary: 'engine stream ended without a result event', errorCode, textChars }
+      return {
+        outcome: 'unknown',
+        summary: 'engine stream ended without a result event',
+        errorCode,
+        textChars: answer.totalChars,
+        ...answerBody,
+      }
     }
     const r: { outcome: PromptOutcome['outcome']; summary?: string } = result
     return {
       outcome: r.outcome,
       summary: boundedSummary(r.summary ?? undefined),
       errorCode,
-      textChars,
+      textChars: answer.totalChars,
+      ...answerBody,
     }
   }
 
   private absorbEvent(
     ev: EngineEvent,
     hooks: {
-      onText: (n: number) => void
+      onText: (chunk: string) => void
       onResult: (r: { outcome: PromptOutcome['outcome']; summary?: string }) => void
       onError: (code: string) => void
       onApproval?: (a: { requestId: string; description: string }) => void
@@ -650,7 +756,7 @@ export class RunSupervisor {
   ): void {
     switch (ev.kind) {
       case 'text':
-        hooks.onText(ev.text.length)
+        hooks.onText(ev.text)
         break
       case 'tool':
         hooks.onTool?.({
@@ -921,11 +1027,19 @@ export class RunSupervisor {
         })
       }
 
+      // Result contract: metadata (`summary`/`outcome`/`engine`/`textChars`)
+      // PLUS the actual assistant answer body (`text`, bounded, with an honest
+      // truncation flag). Defect 2026-10-21 stored only the metadata here, so
+      // `task.get_result` could never return worker findings. `result_json` /
+      // `failure_json` are JSON TEXT columns — the extra keys are additive and
+      // old records without them keep reading as before.
       const resultPayload: JsonValue = {
         summary: out.summary,
         outcome: out.outcome,
         engine: adapter.kind,
         textChars: out.textChars,
+        text: out.text,
+        textTruncated: out.textTruncated,
         ...(out.errorCode !== null ? { error: out.errorCode } : {}),
       }
       // CS-4/CS-9 seam: the session teardown above aborts any pending ask without
@@ -1642,9 +1756,18 @@ export class RunSupervisor {
 
     const managerOutcome = this.managerOutcomeCache
     const managerError = this.managerErrorCache
+    // The real answer: the manager's own streamed text (bounded by runPrompt at
+    // the same MAX_RESULT_TEXT_CHARS cap, so no second truncation). `summary`
+    // is engine metadata (`stopReason: end_turn`) and is persisted as metadata
+    // only — defect 2026-10-21 mistakenly stored it as the whole final summary.
+    const managerAnswer = managerOutcome !== null && managerOutcome.text !== '' ? managerOutcome.text : null
     const managerSummary = this.skipManager
       ? 'resumed worker dispatch'
       : boundedSummary(managerOutcome?.summary ?? undefined)
+    const errorSummary = managerError !== null ? boundedSummary(managerError) : undefined
+    // What the run REPORTS (event payload / CLI / RunOutcome): the answer when
+    // one exists, else the engine result summary, else the manager error.
+    const reportedSummary = managerAnswer ?? managerSummary ?? errorSummary
 
     let outcome: RunOutcome['outcome']
     let runState: RunState
@@ -1677,6 +1800,25 @@ export class RunSupervisor {
     }
 
     const current = this.store.getRun(this.runId)
+    // What final_summary should hold for THIS terminal state — branch-specific:
+    // a completed/verifying run persists the actual answer and NOTHING ELSE
+    // (never the `stopReason` metadata string); a successful turn that
+    // produced no text leaves final_summary NULL (an honest empty answer —
+    // the stopReason stays in the event payload as metadata); failed/cancelled
+    // runs prefer the manager's own streamed explanation (real content, e.g.
+    // the plan narrative or the failure diagnosis), then the manager error,
+    // and fall back to the engine result summary (metadata) only when nothing
+    // better exists — metadata must never substitute for available content.
+    let persistedSummary: string | undefined
+    if (this.skipManager) {
+      persistedSummary = managerSummary ?? undefined
+    } else if (runState === 'completed' || runState === 'verifying') {
+      persistedSummary = managerAnswer ?? undefined
+    } else if (managerError !== null) {
+      persistedSummary = errorSummary ?? managerAnswer ?? managerSummary ?? undefined
+    } else {
+      persistedSummary = managerAnswer ?? errorSummary ?? managerSummary ?? undefined
+    }
     // Never force a transition the state machine forbids: while the run waits on
     // an operator (approval/input) the supervisor records the outcome and leaves
     // the decision to the operator.
@@ -1690,7 +1832,7 @@ export class RunSupervisor {
         this.store.setRunState(
           this.runId,
           runState,
-          { finalSummary: managerSummary ?? undefined },
+          { finalSummary: persistedSummary },
           this.fence ?? undefined,
         )
       } catch (e) {
@@ -1716,7 +1858,14 @@ export class RunSupervisor {
       state: actualState,
       taskCounts,
       ...(blocked.length > 0 ? { blockedTasks: blocked } : {}),
-      ...(managerSummary !== null ? { managerSummary } : {}),
+      // The streamed stopReason is engine metadata, never the answer: it stays
+      // in this event payload so a completed run with an empty answer remains
+      // distinguishable from a fabricated/dropped one.
+      ...(managerOutcome?.summary !== undefined && managerOutcome.summary !== null
+        ? { stopReason: managerOutcome.summary }
+        : {}),
+      ...(reportedSummary !== undefined && reportedSummary !== null ? { managerSummary: reportedSummary } : (managerSummary !== null ? { managerSummary } : {})),
+      ...(managerOutcome?.textTruncated === true ? { answerTruncated: true } : {}),
       ...(managerError !== null ? { managerError } : {}),
       durationMs: this.now() - startedMs,
     }
@@ -1725,7 +1874,7 @@ export class RunSupervisor {
       runId: this.runId,
       state: actualState,
       outcome,
-      managerSummary,
+      managerSummary: reportedSummary ?? managerSummary,
       taskCounts,
       unfinishedTasks: unfinished,
       blockedTasks: blocked,

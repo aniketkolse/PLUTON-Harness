@@ -10,6 +10,8 @@ import {
 } from '../../domain/errors.ts'
 import type { JsonValue, MuseRecord, RunRecord } from '../../domain/models.ts'
 import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
+import { redactProseSecrets } from '../../util/redact.ts'
+import { stripControlChars } from '../../util/sanitize.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse, type EngineIsolationFacts } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
@@ -532,6 +534,60 @@ export function startRunInBackground(
   })()
 
   return { runId: run.id, done }
+}
+
+/**
+ * Settle a run whose background driver crashed, from OUTSIDE the supervisor.
+ *
+ * The supervisor only finalizes while its loop is alive; a rejection of the
+ * background promise (sandbox preparation failed, transport could not start,
+ * or a supervisor crash that never reached `finalize`) is durable evidence
+ * there is no live driver left. Without this settlement the row stays
+ * `created`/`active` forever (defect 2026-10-21, live record
+ * `run_mvgh70nha675003a`). Idempotent and terminal-safe: an already-terminal
+ * run is left exactly as it is, and a concurrent owner winning the terminal
+ * write makes this a no-op.
+ *
+ * Shared by the API route (which adds its own SSE frame broadcast) and the
+ * CLI chat (which adds its own transcript line).
+ */
+export function settleRunCrashed(
+  store: Store,
+  projectId: string,
+  runId: string,
+  err: unknown,
+  via: 'background_crash' | 'start_failure' = 'background_crash',
+): void {
+  const raw = stripControlChars((err instanceof Error ? err.message : String(err)).slice(0, 2_000))
+  const prefix = via === 'background_crash' ? 'run crashed before completion' : 'supervised start failed'
+  let run: RunRecord
+  try {
+    run = store.getRun(runId)
+  } catch {
+    return
+  }
+  if (isTerminalRunState(run.state)) return
+  try {
+    store.setRunState(runId, 'failed', {
+      finalSummary: redactProseSecrets(`${prefix}: ${raw}`).slice(0, 2_000),
+    })
+  } catch {
+    // A concurrent owner already moved the run to a terminal state; the
+    // durable state is the record and there is nothing left to settle.
+    return
+  }
+  try {
+    // The event log is what the SSE log-watcher derives the terminal
+    // `run_state` frame from; deterministic arrival is not required.
+    store.appendEvent({
+      projectId,
+      runId,
+      type: 'run.finished',
+      payload: { outcome: 'failure', via, error: redactProseSecrets(raw) },
+    })
+  } catch {
+    // Best-effort: the durable run state is the record of record.
+  }
 }
 
 export async function runRun(
