@@ -82,15 +82,29 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
 
 ## 5. Isolation and the sandbox
 
-- Real isolation is the Docker container per Muse (`src/sandbox/`, ADR-0004).
-  When the Docker daemon or the worker image is unavailable, Pluton **fails
-  closed** with `SandboxUnavailableError` and an exact fix — it never silently
-  degrades to unsandboxed execution.
-- The dev-only `local-process` backend requires an explicit
-  `local_process_acknowledged: true` in the project config and is refused
-  otherwise.
+- **Native execution** (`sandbox.kind: native` — default runtime; see [`docs/NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and [`docs/MIGRATION.md`](MIGRATION.md)).
+  Runs engine processes directly on the host operating system without Docker.
+  Pluton enforces a strict partial-enforcement model: working directories are
+  confined within allowed project and workspace roots, environment variables are
+  filtered against an explicit allowlist, execution sessions are bounded by
+  wall-clock timeouts, and process trees are terminated cleanly on exit.
+  Because native processes run under the host user account and share the host
+  network stack, native mode **fails closed** unless the operator explicitly
+  acknowledges `sandbox.native.acknowledge_partial_enforcement: true`,
+  `sandbox.native.acknowledge_host_network: true`, and configures
+  `runtime.network_policy: open`.
+- **Docker isolation** (`sandbox.kind: docker` — legacy opt-in container provider; ADR-0004).
+  Each Muse runs in a dedicated Linux container. When the Docker daemon or the
+  worker image is unavailable, Pluton **fails closed** with `SandboxUnavailableError`
+  and an exact fix — it never silently degrades to unsandboxed execution.
+- **Local process development mode** (`sandbox.kind: local-process`).
+  A dev-only backend requiring an explicit `local_process_acknowledged: true`
+  in the project config, refused otherwise.
 - **tmux is not a security boundary.** tmux sessions exist for visibility and
-  window-targeted interruption only; the container is the boundary.
+  window-targeted interruption only. In native mode, `pluton attach` connects
+  directly to host native `tmux` sessions; in container mode, it connects via
+  `docker exec` into the container's tmux. Detaching (`Ctrl-B d`) does not kill
+  the running engine or task in either mode.
 
 ## 6. Secrets
 
@@ -149,11 +163,13 @@ Stated plainly so nobody over-reads the guarantees above:
    human commands are not sandboxed against the host.
 7. **Deny lists are conservative blocklists**, not capability systems. They
    reduce accidental damage; the config allow list is the real control.
-8. **Container-mode runs bind the tool bridge on all interfaces.** Containers
-   reach the host through the Docker gateway, so the bridge listens on `0.0.0.0`
-   for the run's duration (loopback in host mode). Per-session 256-bit bearer
-   tokens gate every call, but the port is LAN-reachable while a container-mode
-   run is live — firewall the host if the network is untrusted.
+8. **Container-mode runs bind the tool bridge on all interfaces.** When running in
+   container mode (`sandbox.kind: docker`), containers reach the host through the
+   Docker gateway, so the bridge listens on `0.0.0.0` for the run's duration.
+   Per-session 256-bit bearer tokens gate every call, but the port is LAN-reachable
+   while a container-mode run is live — firewall the host if the network is untrusted.
+   In contrast, native host mode (`sandbox.kind: native`) binds strictly to loopback
+   (`127.0.0.1`), eliminating this external LAN exposure.
 9. **Bind-mount ownership is untested on Linux hosts (NOT RUN).** The sandbox
    passes `--user <uid>:<gid>`; on POSIX non-root hosts `resolveContainerUser()`
    selects the host uid:gid, while Windows uses `10001:10001`. If that identity

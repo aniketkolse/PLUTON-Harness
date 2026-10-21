@@ -5,9 +5,9 @@
 Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent
 AI coding agent identities — *Muses*. Each Muse has its own engine (OpenCode, …), model, role
 instructions, permissions, workspace policy, resource limits and a persistent tmux terminal.
-Pluton is not a coding model: engines do inference, containers provide process isolation, tmux
-provides terminal persistence, Git tracks changes, and a durable local runtime (SQLite) records
-what was requested, accepted, dispatched, completed, failed or left uncertain.
+Pluton is not a coding model: engines do inference, native process policies (or optional containers)
+provide execution isolation, tmux provides terminal persistence, Git tracks changes, and a durable local
+runtime (SQLite) records what was requested, accepted, dispatched, completed, failed or left uncertain.
 
 > Status: **early implementation** — see [`docs/ROADMAP.md`](docs/ROADMAP.md) for delivered vs
 > planned features and [`docs/`](docs/) for architecture, security and operational documents.
@@ -26,22 +26,24 @@ provides the missing control plane for local multi-agent development:
   engine's real capabilities. No global "one engine for everyone" switch.
 - **Durable task truth** — SQLite-backed runs, tasks, dependency edges, receipts, events and
   approvals; request idempotency; explicit `unknown_outcome` instead of blind replay.
-- **Real isolation** — workers run in Linux containers (Docker Desktop/WSL2 on Windows); tmux is
-  terminal persistence, *not* a security boundary.
+- **Native-first execution** — first-class host execution (`sandbox.kind: native`, see
+  [`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md)) runs directly without Docker. Linux containers
+  (`sandbox.kind: docker`) remain available as an opt-in legacy substrate for containerized boundaries.
 - **Verification, not vibes** — acceptance criteria and configured checks gate run completion.
 
-## Prerequisites (first supported setup: Windows 11 + WSL2 + Docker Desktop)
+## Prerequisites
 
 | Requirement | Notes |
 |---|---|
-| Windows 11 with WSL2 | `wsl --version` must report WSL 2 |
-| Docker Desktop (Linux containers) | the daemon must be running; Pluton talks to it via the `docker` CLI |
 | Node.js ≥ 24 | local daemon + CLI; uses the built-in `node:sqlite` |
 | Git ≥ 2.40 | checkout isolation and diff capture |
-| An engine CLI | e.g. OpenCode v2 (`opencode acp` protocol); model auth configured per engine |
+| An engine CLI | e.g. OpenCode v2 (`opencode acp` protocol) or Qwen Code; model auth configured per engine |
+| Docker Desktop *(optional for native)* | required only when using container mode (`sandbox.kind: docker`) |
+| Windows 11 with WSL2 / Linux | tested on Windows 11 and Linux hosts |
 
-Linux is fully supported as the daemon host; macOS is untested. Native PowerShell has no tmux —
-worker terminals live inside Linux containers. See
+Native host execution (`sandbox.kind: native`) runs without Docker Desktop or containers. See
+[`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md) for native configuration and security details. For
+container mode, worker terminals live inside Linux containers. See
 [`docs/PLUTON_ARCHITECTURE.md`](docs/PLUTON_ARCHITECTURE.md) and the WSL2 notes in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -80,12 +82,12 @@ pluton --tui                       # launches interactive terminal chat TUI inst
 ### Command-line Operations
 
 ```bash
-pluton doctor                      # checks OS/runtime, Docker, Git, tmux, engines, config
-pluton init                        # write pluton.yaml + .pluton/roles in the current project
+pluton doctor                      # checks OS/runtime, Git, tmux, engines, config (Docker optional)
+pluton init                        # write pluton.yaml + .pluton/roles in the current project (native default)
 pluton chat [muse]                 # chat with an operator Muse (default: supervisor) or `pluton muse chat <muse>`
-pluton run --goal "Implement auth" # supervised run: the manager Muse plans and delegates
+pluton run --goal "Implement auth" # supervised run: the manager Muse plans and delegates (Docker-free)
 pluton verify --run <id>           # run the project's verification checks, apply the verdict
-pluton attach <muse>               # live tmux session inside the Muse's container
+pluton attach <muse>               # live tmux session on host (or container in docker mode)
 pluton integrate --run <id>        # merge verified task branches into the integration checkout (never main)
 pluton approvals list              # operator inbox: list/approve/deny pending approvals
 pluton status                      # shows recent runs and task counts from durable state
@@ -157,8 +159,9 @@ src/runtime/        durable scheduler & lifecycle supervision
 src/persistence/    SQLite schema + migrations (node:sqlite)
 src/engines/        engine contract + adapters (opencode, second engine, deterministic mock)
 src/orchestration/  Manager tool bridge, task graph, budgets, approvals
-src/sandbox/        Docker container lifecycle policy
-src/terminal/       tmux session lifecycle & safe attach
+src/execution/      native execution provider & process-policy enforcement
+src/sandbox/        Docker container lifecycle policy (legacy opt-in substrate)
+src/terminal/       host & container tmux session lifecycle & safe attach
 src/workspace/      checkout isolation, diffs, integration
 src/verification/   acceptance checks & run verdicts
 src/config/         pluton.yaml schema + loaders
@@ -169,7 +172,9 @@ docs/               product, architecture, security, ADRs, reverse-engineering
 
 ## Documentation index
 
-[ROADMAP](docs/ROADMAP.md) · [SECURITY](docs/SECURITY.md) · [RELEASE](docs/RELEASE.md) ·
+[NATIVE EXECUTION](docs/NATIVE_EXECUTION.md) · [MIGRATION GUIDE](docs/MIGRATION.md) ·
+[ACCEPTANCE REPORT](docs/ACCEPTANCE_REPORT.md) · [ROADMAP](docs/ROADMAP.md) ·
+[SECURITY](docs/SECURITY.md) · [RELEASE](docs/RELEASE.md) ·
 [ARCHITECTURE](docs/PLUTON_ARCHITECTURE.md) · [BASELINE](docs/PLUTON_BASELINE_REPORT.md) ·
 [DELIVERY REPORT](docs/delivery-report.md) · [ADRs](docs/adr/) ·
 [Reverse engineering](docs/reverse-engineering/)
