@@ -47,6 +47,8 @@ project:
   verification: []
 runtime:
   approval_timeout_minutes: 30
+sandbox:
+  kind: docker
 muses:
   manager:
     display_name: Manager
@@ -57,11 +59,11 @@ muses:
     approval_mode: autonomous-bounded
 `
 
-/** sandbox.kind defaults to docker; this one is the acknowledged dev-only host mode. */
-const HOST_CONFIG = `${BASE_CONFIG}sandbox:
-  kind: local-process
-  local_process_acknowledged: true
-`
+/** sandbox.kind defaults to docker in BASE_CONFIG; this one is the acknowledged dev-only host mode. */
+const HOST_CONFIG = BASE_CONFIG.replace(
+  'sandbox:\n  kind: docker',
+  'sandbox:\n  kind: local-process\n  local_process_acknowledged: true',
+)
 
 const ENGINE_IMAGE_ID = `sha256:${'a'.repeat(64)}`
 

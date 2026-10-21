@@ -437,6 +437,16 @@ export function doctorExitCode(checks: CheckResult[]): number {
   return checks.some((c) => c.status === 'fail') ? 1 : 0
 }
 
+export interface DoctorReport {
+  checks: CheckResult[]
+  exitCode: number
+}
+
+export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
+  const checks = await collectDoctorChecks(opts)
+  return { checks, exitCode: doctorExitCode(checks) }
+}
+
 export function engineHomeExists(root: string, museId: string): boolean {
   return existsSync(join(engineHomesDir(root), museId))
 }
