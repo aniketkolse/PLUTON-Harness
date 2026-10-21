@@ -61,7 +61,7 @@ export const runtimeConfigSchema = z
     /** Per-task cap on manager-requested revisions of failed tasks; 0 = revisions disabled. */
     max_revisions_per_task: z.number().int().min(0).max(10).default(1),
     /** Worker network policy: 'restricted' = bridge with DNS (not an egress filter — see docs/SECURITY.md). */
-    network_policy: z.enum(['restricted', 'none', 'open']).default('restricted'),
+    network_policy: z.enum(['restricted', 'none', 'open']).default('open'),
     /** Custom Docker network for restricted policy isolation (e.g. internal network with egress disabled). */
     internal_network_name: z
       .string()
@@ -88,13 +88,46 @@ export const runtimeConfigSchema = z
   .strict()
   .prefault({})
 
+/**
+ * Native host execution policy. This provider runs engine processes directly on
+ * the host; it is deliberately explicit about its partial enforcement. There is
+ * no OS filesystem/network/resource confinement, so the two acknowledgements
+ * are hard gates rather than defaults. Docker remains the isolation provider.
+ */
+export const nativeSandboxConfigSchema = z
+  .object({
+    mode: z.enum(['read-only', 'workspace-write']).default('workspace-write'),
+    /** Required: the operator must acknowledge process-level enforcement is partial. */
+    acknowledge_partial_enforcement: z.boolean().default(false),
+    /** Required: native processes use the host network (network_policy must be 'open'). */
+    acknowledge_host_network: z.boolean().default(false),
+    /** Additional host environment variable NAMES copied into native processes. */
+    env_allowlist: z
+      .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'valid environment variable name'))
+      .default([]),
+    /** Grace between SIGTERM and SIGKILL for process trees. */
+    terminate_grace_seconds: z.number().min(0).max(60).default(2),
+    /** Wall-clock bound for one engine session; 0 disables the bound. */
+    session_timeout_minutes: z.number().int().min(0).max(1_440).default(0),
+    /** Hard cap for a single bounded `exec` stream. */
+    max_output_bytes: z.number().int().min(1_024).max(16_777_216).default(1_048_576),
+  })
+  .strict()
+  .prefault({})
+
 export const sandboxConfigSchema = z
   .object({
-    kind: z.enum(['docker', 'local-process']).default('docker'),
+    /**
+     * docker = legacy container provider during the native migration;
+     * local-process = acknowledged dev mode;
+     * native = first-class host process provider (partial enforcement).
+     */
+    kind: z.enum(['docker', 'local-process', 'native']).default('native'),
     /** Digest-pinned worker image reference; resolved by scripts/build-worker-image. */
     image: z.string().min(1).optional(),
     /** local-process sandbox is dev-only and must be explicitly acknowledged. */
     local_process_acknowledged: z.boolean().default(false),
+    native: nativeSandboxConfigSchema,
   })
   .strict()
   .prefault({})

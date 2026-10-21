@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertInside, loadConfig, validateConfig } from '../../src/config/load.ts'
+import { plutonConfigSchema } from '../../src/config/schema.ts'
 import { ConfigError } from '../../src/domain/errors.ts'
 
 function minimal(projectOverrides: Record<string, unknown> = {}, top: Record<string, unknown> = {}) {
@@ -24,13 +25,32 @@ const ROOT = join(tmpdir(), 'pluton-config-test-root')
 const PATH = join(ROOT, 'pluton.yaml')
 
 describe('validateConfig', () => {
+  it('defaults sandbox.kind to native and network_policy to open', () => {
+    const parsed = plutonConfigSchema.parse({
+      version: 1,
+      project: { name: 'test-proj' },
+      muses: {
+        manager: {
+          display_name: 'Manager',
+          role: 'supervisor',
+          engine: 'mock',
+          model: 'mock/model',
+          workspace_policy: 'coordinator-read-only',
+        },
+      },
+    })
+    expect(parsed.sandbox.kind).toBe('native')
+    expect(parsed.runtime.network_policy).toBe('open')
+  })
+
   it('accepts a minimal config and applies runtime defaults', () => {
     const loaded = validateConfig(minimal(), ROOT, PATH)
     expect(loaded.config.project.name).toBe('demo')
     expect(loaded.config.runtime.max_concurrent_workers).toBe(3)
     expect(loaded.config.runtime.approval_timeout_minutes).toBe(60)
     expect(loaded.config.runtime.max_revisions_per_task).toBe(1)
-    expect(loaded.config.sandbox.kind).toBe('docker')
+    expect(loaded.config.runtime.network_policy).toBe('open')
+    expect(loaded.config.sandbox.kind).toBe('native')
     expect(loaded.config.git.require_approval_for_main_branch_integration).toBe(true)
     expect(loaded.config.muses).toEqual({})
   })

@@ -13,10 +13,14 @@ runtime:
   max_delegation_depth: 1
   max_tasks_per_run: 6
   max_run_minutes: 30
-  network_policy: none
+  network_policy: open
 
 sandbox:
-  kind: docker
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+    mode: workspace-write
 
 muses:
   manager:

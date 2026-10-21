@@ -21,10 +21,14 @@ runtime:
   max_tasks_per_run: 20
   max_run_minutes: 90
   default_task_minutes: 30
-  network_policy: restricted
+  network_policy: open
 
 sandbox:
-  kind: docker
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+    mode: workspace-write
 
 git:
   require_approval_for_main_branch_integration: true
