@@ -14,6 +14,7 @@
  */
 
 import type { Store } from '../store/store.ts'
+import { stripControlChars } from '../util/sanitize.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import type { ServerSSEEvent } from './types.ts'
 
@@ -84,6 +85,15 @@ export class ServerLogWatcher {
   /** Drains the log since the cursor and broadcasts at most one frame per entity. */
   pollOnce(): void {
     const frames = new Map<string, ServerSSEEvent>()
+    // Referents seen this pass, in first-seen order (Set preserves insertion
+    // order). A busy window can hold many events per entity, and every frame
+    // carries the CURRENT durable state anyway, so each entity is read exactly
+    // once after the scan instead of once per event: a burst of N events for
+    // one task costs one row read, not N. The scan is synchronous, so a
+    // post-pass read observes the same final state the per-event reads saw —
+    // the collapse-to-final-state contract is unchanged.
+    const runIds = new Set<string>()
+    const taskIds = new Set<string>()
     for (let batch = 0; batch < MAX_BATCHES_PER_POLL; batch += 1) {
       const events = this.store.eventsSince(this.projectId, this.cursor, BATCH_LIMIT)
       for (const event of events) {
@@ -91,21 +101,9 @@ export class ServerLogWatcher {
         // unmappable event can never wedge the watcher on a stalled backlog.
         this.cursor = event.seq
         if (event.type.startsWith('run.') && event.runId !== null) {
-          const run = this.store.getRunOrNull(event.runId)
-          if (run !== null) {
-            frames.set(run.id, { type: 'run_state', runId: run.id, state: run.state, goal: run.goal })
-          }
+          runIds.add(event.runId)
         } else if (event.type.startsWith('task.') && event.taskId !== null) {
-          const task = this.store.getTaskOrNull(event.taskId)
-          if (task !== null) {
-            frames.set(task.id, {
-              type: 'task_state',
-              taskId: task.id,
-              runId: task.runId,
-              state: task.state,
-              title: task.title,
-            })
-          }
+          taskIds.add(event.taskId)
         } else if (
           event.type === 'approval.requested' ||
           event.type === 'approval.decided' ||
@@ -133,9 +131,43 @@ export class ServerLogWatcher {
       }
       if (events.length < BATCH_LIMIT) break
     }
-    // One frame per entity per pass: the Map keeps first-seen order and the last
-    // write wins, so a fast burst (task.started + task.completed in one window)
-    // yields a single frame carrying the final state.
+
+    // One frame per entity per pass: unique entities -> one fresh row read
+    // each. Runs first, then tasks — the SPA applies the two frame kinds
+    // independently, so cross-kind order carries no semantics, and each kind
+    // keeps first-seen order. A burst (task.started + task.completed in one
+    // window) yields a single frame carrying the final state.
+    for (const runId of runIds) {
+      const run = this.store.getRunOrNull(runId)
+      if (run !== null) {
+        // Frames carry real model text now (the answer, failure reasons):
+        // sanitize like the worker-event path does server-side (control
+        // chars out; key-based secret redaction applies to keyed objects,
+        // and embedded secret strings in prose are the engine's input the
+        // operator already owns — loopback + token frames, operator data).
+        frames.set(run.id, {
+          type: 'run_state',
+          runId: run.id,
+          state: run.state,
+          goal: stripControlChars(run.goal),
+          summary:
+            run.finalSummary !== null ? stripControlChars(run.finalSummary.slice(0, 20_000)) : undefined,
+          error: run.state === 'failed' ? (run.finalSummary !== null ? stripControlChars(run.finalSummary.slice(0, 20_000)) : undefined) : undefined,
+        })
+      }
+    }
+    for (const taskId of taskIds) {
+      const task = this.store.getTaskOrNull(taskId)
+      if (task !== null) {
+        frames.set(task.id, {
+          type: 'task_state',
+          taskId: task.id,
+          runId: task.runId,
+          state: task.state,
+          title: stripControlChars(task.title),
+        })
+      }
+    }
     for (const frame of frames.values()) this.broadcaster.broadcast(frame)
   }
 }

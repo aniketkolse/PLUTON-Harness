@@ -4,20 +4,20 @@
  */
 
 export const PALETTE = {
-  bg: '#0B0C10',
-  primaryAccent: '#8B5CF6',
-  accentLight: '#A78BFA',
+  bg: '#111114',
+  primaryAccent: '#71717A',
+  accentLight: '#A1A1AA',
   cyan: '#38BDF8',
-  info: '#7C8CFF',
+  info: '#94A3B8',
   link: '#60A5FA',
   success: '#34D399',
   error: '#F87171',
   warning: '#FBBF24',
-  textPrimary: '#F3F0FA',
-  textSecondary: '#E2E0EC',
-  textMuted: '#A49FB4',
-  textDim: '#8E8A9F',
-  border: '#2A2F45',
+  textPrimary: '#F4F4F5',
+  textSecondary: '#E4E4E7',
+  textMuted: '#A1A1AA',
+  textDim: '#71717A',
+  border: '#27272A',
 } as const
 
 export type ColorLevel = 'truecolor' | '256' | '16' | 'none'
@@ -85,20 +85,18 @@ export interface UITheme {
 }
 
 const HEX_RGB: Record<string, [number, number, number]> = {
-  [PALETTE.bg]: [11, 12, 16],
-  [PALETTE.primaryAccent]: [139, 92, 246],
-  [PALETTE.accentLight]: [167, 139, 250],
+  [PALETTE.bg]: [17, 17, 20],
+  [PALETTE.primaryAccent]: [113, 113, 122],
+  [PALETTE.accentLight]: [161, 161, 170],
   [PALETTE.cyan]: [56, 189, 248],
-  [PALETTE.info]: [124, 140, 255],
+  [PALETTE.info]: [148, 163, 184],
   [PALETTE.link]: [96, 165, 250],
   [PALETTE.success]: [52, 211, 153],
   [PALETTE.error]: [248, 113, 113],
   [PALETTE.warning]: [251, 191, 36],
-  [PALETTE.textPrimary]: [243, 240, 250],
-  [PALETTE.textSecondary]: [226, 224, 236],
-  [PALETTE.textMuted]: [164, 159, 180],
-  [PALETTE.textDim]: [142, 138, 159],
-  [PALETTE.border]: [42, 47, 69],
+  [PALETTE.textPrimary]: [244, 244, 245],
+  [PALETTE.textSecondary]: [228, 228, 231],
+  [PALETTE.border]: [39, 39, 42],
 }
 
 const ROLE_HEX: Record<UIRole, string> = {

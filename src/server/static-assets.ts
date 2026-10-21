@@ -88,6 +88,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
 <body>
   <div id="app" class="app-shell">
 
+
     <div id="sidebarScrim" class="sidebar-scrim" aria-hidden="true"></div>
 
     <!-- COLLAPSED SIDEBAR RESTORE BUTTON -->
@@ -264,15 +265,15 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             </div>
           </div>
 
-          <!-- Ship Specific AI Models Configuration -->
+          <!-- Agent Model Configuration -->
           <div class="card">
             <div class="card-head">
               <span class="card-title">
                 <span class="card-title-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${plutonMarkBody}</svg></span>
-                Custom Ship Worker AI Model
+                Agent Model Configuration
               </span>
             </div>
-            <div class="card-sub">Writes the live Muse model</div>
+            <div class="card-sub">Configure model per team role</div>
             <div id="museModelList" class="muse-models"></div>
           </div>
 
@@ -302,6 +303,10 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <span class="brand-badge">Agentic Harness</span>
         </div>
         <div class="header-tools">
+          <button id="btnToggleSplitView" class="tool-btn" type="button" title="Toggle Sub-Agents Split View">
+            <span class="boat" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${plutonMarkBody}</svg></span>
+            <span id="splitViewBtnLabel">Sub-Agents Split View</span>
+          </button>
           <div id="connectionStatus" class="conn" title="Local runtime status">
             <span class="conn-dot"></span><span class="conn-label">Connected</span>
           </div>
@@ -332,7 +337,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <span class="tag-mono">build</span>
         </div>
         <div id="buildConfirmBody" class="build-confirm-body">
-          <div class="build-confirm-row"><span class="build-confirm-key">Operation</span><span class="build-confirm-val">Supervised build - the manager Muse plans and delegates to the team</span></div>
+          <div class="build-confirm-row"><span class="build-confirm-key">Operation</span><span class="build-confirm-val">Supervised build - the manager agent plans and delegates to the team</span></div>
           <div class="build-confirm-row"><span class="build-confirm-key">Workspace</span><span class="build-confirm-val mono" id="buildConfirmWorkspace">-</span></div>
           <div class="build-confirm-row"><span class="build-confirm-key">Goal</span><span class="build-confirm-val" id="buildConfirmGoal">-</span></div>
           <div class="build-confirm-note">A build provisions worker containers and spends engine tokens. Nothing is dispatched until you confirm.</div>
@@ -343,6 +348,11 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
         </div>
       </div>
 
+      <button id="btnJumpToLatest" class="jump-to-latest is-hidden" type="button" title="Jump to latest message">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+        <span>Jump to latest</span>
+      </button>
+
       <div class="dock">
         <div class="composer">
           <textarea id="promptInput" class="composer-textarea" rows="1" placeholder="Ask Pluton to plan, implement, investigate… (Enter to submit, Shift+Enter for newline)" spellcheck="false"></textarea>
@@ -352,8 +362,8 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <div class="composer-bar">
             <div class="composer-left">
               <div class="mode-switch" role="group" aria-label="Interaction mode">
-                <button id="modeChatBtn" class="mode-btn is-active" type="button" title="Send the prompt straight to the active Muse">Chat</button>
-                <button id="modeBuildBtn" class="mode-btn" type="button" title="Run the prompt as a supervised build: the manager Muse plans and delegates to the team">Build</button>
+                <button id="modeChatBtn" class="mode-btn is-active" type="button" title="Chat mode: direct conversation with active agent">Chat</button>
+                <button id="modeToggleBtn" class="mode-btn" type="button" title="Toggle Plan / Build mode"><span id="modeToggleLabel">Plan</span></button>
               </div>
 
               <button id="btnAttach" class="tool-btn" type="button" title="Attach a workspace file to the prompt">
@@ -390,7 +400,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
               <span id="thinkingText">Ready</span>
             </span>
             <span class="status-divider">|</span>
-            <span class="chip" id="workspaceChip" title="Active workspace">
+            <span class="chip" id="workspaceChip" title="Workspace (pinned by the server) — click for details">
               <span class="chip-folder" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg></span>
               <span id="workspaceName">—</span>
               <span class="chip-sep">·</span>
@@ -399,7 +409,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <span class="status-divider">·</span>
             <span class="status-item">
               Model:
-              <button id="modelLabelBtn" class="link-btn" type="button" title="Switch the active Muse model">
+              <button id="modelLabelBtn" class="link-btn" type="button" title="Switch active model">
                 <span id="activeModelName">—</span><span class="caret" aria-hidden="true">▾</span>
               </button>
             </span>
@@ -499,38 +509,40 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
   '/app.css': {
     contentType: 'text/css; charset=utf-8',
     content: `:root {
-  /* Surfaces */
-  --bg-main: #09080e;
-  --bg-sidebar: #0c0b12;
-  --bg-surface: #12101b;
-  --bg-message-ai: #12111a;
-  --bg-message-user: #19132a;
-  --bg-inset: #0e0d16;
-  --bg-hover: #1e1a2e;
-  --bg-active: #251c3d;
+  /* Surfaces — ChatGPT-inspired charcoal/grey */
+  --bg-main: #111114;
+  --bg-sidebar: #17171a;
+  --bg-surface: #1e1e24;
+  --bg-message-ai: #17171a;
+  --bg-message-user: #212126;
+  --bg-inset: #17171a;
+  --bg-hover: #222228;
+  --bg-active: #2a2a33;
 
   /* Lines */
-  --border: #242036;
-  --border-soft: #1d1b2b;
-  --border-strong: #2a2440;
-  --border-user: #332656;
+  --border: #2a2a30;
+  --border-soft: #222228;
+  --border-strong: #32323a;
+  --border-user: #3f3f46;
 
   /* Accents */
-  --accent-purple: #a78bfa;
-  --accent-purple-deep: #8b5cf6;
-  --accent-purple-soft: #d8b4fe;
+  --accent-purple: #71717a;
+  --accent-purple-deep: #52525b;
+  --accent-purple-soft: #a1a1aa;
+  --accent-plan: #f59e0b;
+  --accent-build: #60a5fa;
   --accent-cyan: #38bdf8;
   --accent-ok: #34d399;
   --accent-warn: #fbbf24;
   --accent-danger: #f87171;
 
   /* Text */
-  --text: #f3f0fa;
-  --text-soft: #e2e0ec;
-  --text-muted: #a49fb4;
-  --text-dim: #8e8a9f;
+  --text: #f4f4f5;
+  --text-soft: #e4e4e7;
+  --text-muted: #a1a1aa;
+  --text-dim: #71717a;
 
-  --font-sans: Inter, "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
 
   --radius-sm: 4px;
@@ -562,12 +574,12 @@ body {
 .is-hidden { display: none !important; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #0c0b12; border-radius: 999px; }
-::-webkit-scrollbar-thumb { background: #221e33; border-radius: 999px; border: 1px solid rgba(255,255,255,0.02); }
-::-webkit-scrollbar-thumb:hover { background: #342e4f; }
-::selection { background: rgba(139,92,246,0.35); color: #fff; }
+::-webkit-scrollbar-track { background: var(--bg-main); border-radius: 999px; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 999px; border: 1px solid rgba(255,255,255,0.02); }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+::selection { background: rgba(161,161,170,0.3); color: #fff; }
 ::-webkit-scrollbar-corner { background: transparent; }
-* { scrollbar-width: thin; scrollbar-color: #221e33 #0c0b12; }
+* { scrollbar-width: thin; scrollbar-color: #27272a var(--bg-main); }
 
 :focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
 
@@ -578,11 +590,12 @@ body {
   position: relative;
   flex-shrink: 0;
   background: var(--bg-sidebar);
-  border-right: 1px solid #1a1826;
+  border-right: 1px solid var(--border-soft);
   display: flex;
   flex-direction: column;
   height: 100%;
   min-width: 0;
+  max-width: 100vw;
   overflow: hidden;
   transition: width 90ms ease;
 }
@@ -593,7 +606,7 @@ body {
   flex-shrink: 0;
   height: 100%;
   background: var(--bg-sidebar);
-  border-right: 1px solid #1a1826;
+  border-right: 1px solid var(--border-soft);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -607,15 +620,15 @@ body {
   align-items: center;
   gap: 6px;
   padding: 8px;
-  border-bottom: 1px solid #191726;
+  border-bottom: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
 .sidebar-tabs {
   display: flex;
   align-items: center;
   gap: 2px;
-  background: #12101b;
-  border: 1px solid #1f1c2e;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px;
   flex: 1;
@@ -640,11 +653,11 @@ body {
   transition: background 120ms ease, color 120ms ease;
 }
 .tab-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
-.tab-btn:hover { color: #d4d0e5; }
+.tab-btn:hover { color: var(--text); }
 .tab-btn.is-active {
   background: var(--bg-active);
-  color: var(--accent-purple-soft);
-  border-color: rgba(76,53,117,0.6);
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 .icon-btn {
   display: inline-flex;
@@ -654,15 +667,15 @@ body {
   height: 30px;
   flex-shrink: 0;
   border-radius: 6px;
-  background: #12101b;
-  border: 1px solid #1f1c2e;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
   color: var(--text-muted);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
-.icon-btn.is-active { background: var(--bg-active); color: var(--accent-purple-soft); border-color: rgba(76,53,117,0.6); }
+.icon-btn.is-active { background: var(--bg-active); color: var(--text); border-color: var(--border-strong); }
 
 .sidebar-pane { flex: 1; min-height: 0; display: flex; }
 .pane-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
@@ -676,7 +689,7 @@ body {
   cursor: col-resize;
   z-index: 10;
 }
-.sidebar-resizer:hover { background: rgba(167,139,250,0.4); }
+.sidebar-resizer:hover { background: rgba(255,255,255,0.15); }
 
 /* ===================== Sessions ===================== */
 .btn-new {
@@ -686,16 +699,16 @@ body {
   width: 100%;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #2f2749;
-  background: linear-gradient(180deg, #241b3c, #1b1530);
-  color: var(--accent-purple-soft);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text);
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease;
 }
-.btn-new:hover { border-color: var(--accent-purple); background: linear-gradient(180deg, #2b2049, #201836); }
+.btn-new:hover { border-color: var(--border-strong); background: var(--bg-hover); }
 
 .session-list { display: flex; flex-direction: column; gap: 4px; }
 .session-item {
@@ -709,16 +722,16 @@ body {
   gap: 2px;
   transition: background 120ms ease;
 }
-.session-item:hover { background: #14121f; }
-.session-item.is-active { background: #1e192f; border-color: #3b2d63; }
-.session-title { font-size: 12px; color: #a7a2b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-item:hover { background: var(--bg-hover); }
+.session-item.is-active { background: var(--bg-active); border-color: var(--border-strong); }
+.session-title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-item.is-active .session-title { color: #fff; }
 .session-meta { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
 .empty-hint { padding: 10px; font-size: 12px; color: var(--text-dim); line-height: 1.5; }
 
 /* ===================== Files ===================== */
 .pane-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-muted); padding: 0 2px; }
-.pane-tag { color: var(--accent-purple); font-size: 11px; }
+.pane-tag { color: var(--text-muted); font-size: 11px; }
 .sub-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-soft); }
 .sub-tab {
   flex: 1;
@@ -732,7 +745,7 @@ body {
   font-weight: 600;
   cursor: pointer;
 }
-.sub-tab.is-active { color: var(--text); border-bottom-color: var(--accent-purple); }
+.sub-tab.is-active { color: var(--text); border-bottom-color: var(--text); }
 .file-list { display: flex; flex-direction: column; max-height: 46vh; overflow-y: auto; }
 .file-row {
   display: flex;
@@ -745,24 +758,38 @@ body {
   cursor: pointer;
   user-select: none;
 }
-.file-row:hover { background: #14121f; color: var(--text); }
-.file-row.is-active { background: rgba(139,92,246,0.16); color: #fff; }
+.file-row:hover { background: #222228; color: var(--text); }
+.file-row.is-active { background: rgba(255,255,255,0.08); color: #fff; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-chevron { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-dim); transition: transform 120ms ease; }
 .file-dir.is-open .file-chevron { transform: rotate(90deg); }
-.file-icon { width: 13px; height: 13px; flex-shrink: 0; }
-.file-dir .file-icon { color: var(--accent-purple); }
-.file-item .file-icon { color: var(--text-dim); }
+.file-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.file-icon-dir { color: #f59e0b; }
+.icon-ts { color: #3b82f6; }
+.icon-tsx { color: #38bdf8; }
+.icon-js { color: #facc15; }
+.icon-jsx { color: #22d3ee; }
+.icon-py { color: #60a5fa; }
+.icon-json { color: #fbbf24; }
+.icon-yaml { color: #a1a1aa; }
+.icon-md { color: #94a3b8; }
+.icon-html { color: #f97316; }
+.icon-css { color: #38bdf8; }
+.icon-img { color: #94a3b8; }
+.icon-sh { color: #4ade80; }
+.icon-manifest { color: #f43f5e; }
+.icon-config { color: #a1a1aa; }
+.icon-file { color: #71717a; }
 .file-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
 .file-children.is-collapsed { display: none; }
 .file-preview { border: 1px solid var(--border-soft); border-radius: var(--radius-md); overflow: hidden; }
-.file-preview-name { padding: 6px 8px; background: #12101b; border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--accent-cyan); }
+.file-preview-name { padding: 6px 8px; background: #17171a; border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--accent-cyan); }
 .file-preview-body { max-height: 40vh; overflow: auto; padding: 8px; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; white-space: pre; color: var(--text-soft); }
 
 /* ===================== Settings cards ===================== */
 .card {
-  background: #151221;
-  border: 1px solid #2f2749;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px;
   display: flex;
@@ -772,9 +799,9 @@ body {
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .card-head-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .card-title { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #fff; }
-.card-title svg { width: 15px; height: 15px; color: var(--accent-purple); }
+.card-title svg { width: 15px; height: 15px; color: var(--text-muted); }
 .card-sub { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
-.tag-mono { font-family: var(--font-mono); font-size: 11px; color: var(--accent-purple); }
+.tag-mono { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
 .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; }
 .badge-ok { background: rgba(16,185,129,0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
 .badge-off { background: rgba(239,68,68,0.12); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); }
@@ -788,15 +815,15 @@ body {
 .notice { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; line-height: 1.45; border-radius: 6px; padding: 8px 9px; }
 .notice svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; }
 .notice-warn { background: rgba(239,68,68,0.14); border: 1px solid rgba(239,68,68,0.45); color: #fca5a5; }
-.notice-muted { background: #12101b; border: 1px solid var(--border); color: var(--text-muted); }
+.notice-muted { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text-muted); }
 
 .registry { display: flex; flex-direction: column; gap: 6px; }
 .registry-group { border: 1px solid var(--border-soft); border-radius: 6px; overflow: hidden; }
-.registry-head { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: #12101b; font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); }
+.registry-head { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: var(--bg-inset); font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); }
 .registry-list { max-height: 160px; overflow-y: auto; }
 .registry-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 8px; font-size: 11px; font-family: var(--font-mono); color: var(--text-soft); }
-.registry-item + .registry-item { border-top: 1px solid #16141f; }
-.registry-item.is-current { color: var(--accent-purple-soft); background: rgba(139,92,246,0.1); }
+.registry-item + .registry-item { border-top: 1px solid var(--border-soft); }
+.registry-item.is-current { color: var(--text); background: rgba(255,255,255,0.06); }
 
 .muse-models { display: flex; flex-direction: column; gap: 8px; }
 .muse-row { display: flex; flex-direction: column; gap: 4px; }
@@ -805,7 +832,7 @@ body {
 .muse-role { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 select.mini-select {
   width: 100%;
-  background: #0c0b12;
+  background: var(--bg-inset);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   color: var(--text);
@@ -817,25 +844,25 @@ select.mini-select {
 .permissions { display: flex; flex-direction: column; gap: 8px; }
 .perm-row { display: flex; flex-direction: column; gap: 3px; }
 .perm-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
-.perm-mode { font-size: 11px; font-family: var(--font-mono); color: var(--accent-purple-soft); }
+.perm-mode { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip-perm { font-family: var(--font-mono); font-size: 11px; padding: 2px 5px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--text-muted); }
 
 .approvals { display: flex; flex-direction: column; gap: 6px; }
-.approval-row { border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 5px; background: #12101b; }
+.approval-row { border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 5px; background: var(--bg-inset); }
 .approval-row-action { font-size: 12px; font-weight: 600; color: var(--accent-warn); }
 .approval-row-reason { font-size: 11px; color: var(--text-muted); }
 .approval-row-actions { display: flex; gap: 5px; }
 
 .mcp-list { display: flex; flex-direction: column; gap: 5px; }
-.mcp-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 6px; background: #0c0b12; font-size: 11px; }
+.mcp-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg-inset); font-size: 11px; }
 .mcp-item-name { font-family: var(--font-mono); color: var(--text); }
 .mcp-item-detail { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
 
 .orchestra { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
 .orchestra-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dag-container { display: flex; flex-direction: column; gap: 10px; }
-.dag-task-card { background: #12101b; border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; }
+.dag-task-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; }
 .dag-task-card.state-completed { border-color: rgba(52,211,153,0.45); }
 .dag-task-card.state-running, .dag-task-card.state-active { border-color: rgba(56,189,248,0.45); }
 .dag-task-card.state-verifying, .dag-task-card.state-needs_approval { border-color: rgba(251,191,36,0.45); }
@@ -846,20 +873,20 @@ select.mini-select {
 .dag-task-actions { display: flex; gap: 5px; margin-top: 6px; }
 .dag-flow-container { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; align-items: flex-start; }
 .dag-stage-col { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
-.dag-stage-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-purple-soft); border-bottom: 1px solid var(--border-soft); padding-bottom: 4px; }
-.dag-flow-arrow { align-self: center; color: var(--accent-purple); font-size: 12px; }
-.path-box { background: #0c0b12; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 11px; color: var(--accent-purple-soft); }
+.dag-stage-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border-soft); padding-bottom: 4px; }
+.dag-flow-arrow { align-self: center; color: var(--text-muted); font-size: 12px; }
+.path-box { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 11px; color: var(--text-soft); }
 
 /* Settings: Account & Profile */
 .account-box { display: flex; flex-direction: column; gap: 8px; }
 .account-profile {
   display: flex; align-items: center; gap: 10px;
-  background: #0c0b12; border: 1px solid var(--border-soft);
+  background: var(--bg-inset); border: 1px solid var(--border-soft);
   border-radius: 6px; padding: 8px 10px;
 }
 .account-avatar {
   width: 32px; height: 32px; border-radius: 50%;
-  background: linear-gradient(135deg, #7c3aed, #4f46e5);
+  background: #3f3f46;
   color: #fff; font-weight: 700; font-size: 13px;
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
@@ -896,22 +923,22 @@ select.mini-select {
 .toggle-row {
   display: flex; align-items: center; justify-content: space-between;
   font-size: 12px; color: var(--text-soft); padding: 6px 9px;
-  background: #0c0b12; border: 1px solid var(--border-soft);
+  background: var(--bg-inset); border: 1px solid var(--border-soft);
   border-radius: 6px; cursor: pointer; user-select: none;
 }
 .toggle-row:hover { border-color: var(--border-strong); }
-.checkbox-custom { accent-color: var(--accent-purple-deep); width: 16px; height: 16px; cursor: pointer; }
+.checkbox-custom { accent-color: var(--text-muted); width: 16px; height: 16px; cursor: pointer; }
 
 /* Settings: Select Box */
 .select-box {
-  width: 100%; background: #0c0b12; border: 1px solid var(--border);
+  width: 100%; background: var(--bg-inset); border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 10px; font-size: 12px;
   color: var(--text); font-family: inherit; outline: none; cursor: pointer;
 }
-.select-box:focus { border-color: var(--accent-purple); }
+.select-box:focus { border-color: var(--border-strong); }
 
 /* ===================== Main column ===================== */
-.app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; background: var(--bg-main); }
+.app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; background: var(--bg-main); position: relative; }
 
 .app-header {
   display: flex;
@@ -920,22 +947,24 @@ select.mini-select {
   gap: 12px;
   height: 52px;
   padding: 0 18px;
-  border-bottom: 1px solid #181624;
+  border-bottom: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .brand-mark {
   display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; border-radius: 6px;
-  background: #1d1730; border: 1px solid #3c2d63; color: var(--accent-purple);
+  background: #222228; border: 1px solid var(--border); color: var(--text);
 }
 .brand-mark svg { width: 20px; height: 20px; }
 .brand-name { font-weight: 700; font-size: 14px; letter-spacing: 0.08em; color: #fff; }
-.brand-badge { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #151320; border: 1px solid #242036; color: var(--text-muted); }
+.brand-badge { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #222228; border: 1px solid var(--border); color: var(--text-muted); }
 .header-tools { display: flex; align-items: center; gap: 10px; }
-.conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.conn { display: none; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.conn.is-offline, .conn.is-reconnected { display: inline-flex; }
 .conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent-ok); border: 2px solid rgba(52,211,153,0.25); }
 .conn.is-offline .conn-dot { background: var(--accent-danger); border-color: rgba(248,113,113,0.25); }
+.conn.is-reconnected .conn-dot { background: var(--accent-ok); border-color: rgba(52,211,153,0.25); }
 
 /* Approval banner */
 .approval-banner {
@@ -955,12 +984,37 @@ select.mini-select {
 /* ===================== Conversation ===================== */
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 20px 8px; }
 .messages { display: flex; flex-direction: column; gap: 14px; max-width: 880px; }
+#leftSidebar.is-collapsed ~ .app-main .messages,
+.app-sidebar.is-collapsed ~ .app-main .messages { max-width: 100%; }
+
+.jump-to-latest {
+  position: absolute;
+  bottom: 84px;
+  right: 28px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+.jump-to-latest:hover { background: #323238; color: #fff; }
+.jump-to-latest svg { width: 14px; height: 14px; }
+.jump-to-latest.is-hidden { display: none; }
 
 .msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
 .msg-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
 .msg-avatar { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
 .msg-avatar svg { width: 14px; height: 14px; }
-.msg-you { color: var(--accent-purple); }
+.msg-you { color: var(--text-muted); }
 .msg-pluton { color: var(--accent-cyan); }
 
 .msg-user {
@@ -973,13 +1027,13 @@ select.mini-select {
 .msg-user .msg-head { margin-bottom: 2px; }
 .msg-ai {
   background: var(--bg-message-ai);
-  border: 1px solid #1f1d2e;
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px 14px;
 }
 .msg-ai .msg-head { margin-bottom: 6px; }
 .msg-body { font-size: 13px; color: var(--text-soft); line-height: 1.6; overflow-wrap: anywhere; word-break: break-word; }
-.msg-user .msg-body { color: #f1eff7; }
+.msg-user .msg-body { color: var(--text); }
 
 .msg-system { color: var(--text-muted); font-size: 12px; padding: 2px 4px; }
 .msg-system .msg-body { font-size: 12px; color: var(--text-muted); }
@@ -992,7 +1046,7 @@ select.mini-select {
 .msg-body h1 { font-size: 17px; } .msg-body h2 { font-size: 15px; } .msg-body h3 { font-size: 14px; } .msg-body h4 { font-size: 13px; }
 .msg-body ul, .msg-body ol { margin: 0 0 8px; padding-left: 20px; }
 .msg-body li { margin-bottom: 3px; }
-.msg-body blockquote { margin: 0 0 8px; padding: 6px 0 6px 12px; border-left: 1px solid #4c3575; background: rgba(139,92,246,0.05); color: var(--text-muted); }
+.msg-body blockquote { margin: 0 0 8px; padding: 6px 0 6px 12px; border-left: 1px solid var(--border-strong); background: rgba(255,255,255,0.03); color: var(--text-muted); }
 .msg-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .md-table-wrap { overflow-x: auto; margin: 0 0 10px; }
 .md-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -1004,7 +1058,7 @@ select.mini-select {
   text-transform: uppercase;
   color: var(--text);
   padding: 6px 10px;
-  background: rgba(139,92,246,0.08);
+  background: rgba(255,255,255,0.04);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -1015,37 +1069,57 @@ select.mini-select {
 .msg-body code {
   font-family: var(--font-mono);
   font-size: 12px;
-  background: #1c1a29;
-  border: 1px solid #2a273d;
-  color: #e2e0ec;
+  background: #1c1c21;
+  border: 1px solid var(--border);
+  color: var(--text-soft);
   padding: 1px 5px;
   border-radius: 4px;
 }
 .msg-body pre.code-block {
-  background: #0e0d16;
-  border: 1px solid #232036;
+  background: #141418;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
   overflow-x: auto;
   margin: 0 0 10px;
 }
 .msg-body pre.code-block code { background: none; border: none; padding: 0; font-size: 12px; line-height: 1.55; white-space: pre; }
-.tok-cm { color: #8e8a9f; font-style: italic; }
+.tok-cm { color: #71717a; font-style: italic; }
 .tok-st { color: #a5d6a7; }
-.tok-kw { color: #c4b5fd; }
+.tok-kw { color: #93c5fd; }
 .tok-num { color: #fcd34d; }
 .caret-blink { display: inline-block; width: 7px; height: 14px; background: var(--accent-cyan); vertical-align: text-bottom; animation: blink 1s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
 
-/* Tool cards */
+/* Tool cards & Activity Timeline */
 .tool-card {
-  background: #12101b;
+  background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
   max-width: 100%;
 }
-.tool-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; background: rgba(0,0,0,0.2); }
+.tool-card summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.tool-card summary::-webkit-details-marker {
+  display: none;
+}
+.tool-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: rgba(0,0,0,0.25);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.tool-card-head:hover {
+  background: rgba(255,255,255,0.03);
+}
 .tool-name { font-family: var(--font-mono); font-size: 12px; color: var(--accent-cyan); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; }
 .tool-status.running { background: rgba(251,191,36,0.18); color: var(--accent-warn); }
@@ -1055,9 +1129,9 @@ select.mini-select {
 
 /* QA Question Card */
 .qa-card {
-  background: #141124;
-  border: 1px solid #3c2d63;
-  border-left: 3px solid var(--accent-purple);
+  background: #17171a;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent-plan);
   border-radius: var(--radius-md);
   padding: 12px 14px;
   margin: 10px 0;
@@ -1096,9 +1170,9 @@ select.mini-select {
 .qa-badge {
   font-family: var(--font-mono);
   font-size: 10px;
-  background: rgba(196, 181, 253, 0.15);
-  color: var(--accent-purple);
-  border: 1px solid rgba(196, 181, 253, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-soft);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 2px 6px;
 }
@@ -1108,7 +1182,7 @@ select.mini-select {
   flex-wrap: wrap;
 }
 .qa-option-btn {
-  background: #1c182d;
+  background: var(--bg-surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1118,16 +1192,16 @@ select.mini-select {
   transition: all 0.15s ease;
 }
 .qa-option-btn:hover {
-  background: #25203b;
-  border-color: var(--border-soft);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
   color: #fff;
 }
 .qa-option-btn.is-selected {
-  background: rgba(196, 181, 253, 0.2);
-  border-color: var(--accent-purple);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: #71717a;
   color: #fff;
   font-weight: 600;
-  box-shadow: 0 0 0 1px var(--accent-purple);
+  box-shadow: 0 0 0 1px #71717a;
 }
 .qa-actions {
   display: flex;
@@ -1154,20 +1228,20 @@ select.mini-select {
 }
 
 /* ===================== Composer ===================== */
-.dock { flex-shrink: 0; padding: 0 16px 10px; background: var(--bg-main); border-top: 1px solid #181624; }
+.dock { flex-shrink: 0; padding: 0 16px 10px; background: var(--bg-main); border-top: 1px solid var(--border-soft); }
 .build-confirm {
   flex-shrink: 0;
   margin: 10px 16px 0;
   background: var(--bg-inset);
-  border: 1px solid #3c2d63;
-  border-left: 3px solid var(--accent-purple);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent-build);
   border-radius: 10px;
   overflow: hidden;
 }
 .build-confirm-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 9px 12px; font-size: 12px; font-weight: 600; color: #fff;
-  border-bottom: 1px solid #1f1b30;
+  border-bottom: 1px solid var(--border);
 }
 .build-confirm-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .build-confirm-row { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
@@ -1178,16 +1252,33 @@ select.mini-select {
 .build-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 0 12px 11px; }
 .composer {
   background: var(--bg-inset);
-  border: 1px solid #232036;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
-  transition: border-color 120ms ease;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
-.composer:focus-within { border-color: #4c3575; }
+.composer:focus-within {
+  border-color: #52525b;
+  box-shadow: 0 0 0 1px rgba(161, 161, 170, 0.25);
+}
+.composer.mode-plan:focus-within {
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.3);
+}
+.composer.mode-build:focus-within {
+  border-color: rgba(96, 165, 250, 0.6);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3);
+}
+.composer.mode-chat:focus-within {
+  border-color: #52525b;
+  box-shadow: 0 0 0 1px rgba(161, 161, 170, 0.25);
+}
 .composer-textarea {
   width: 100%;
   background: transparent;
   border: none;
+  outline: none;
+  box-shadow: none;
   resize: none;
   color: var(--text-soft);
   font-family: inherit;
@@ -1197,26 +1288,51 @@ select.mini-select {
   max-height: 180px;
   display: block;
 }
+.composer-textarea:focus,
+.composer-textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
 .composer-textarea::placeholder { color: var(--text-dim); }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #181625; flex-wrap: wrap; }
 .composer-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .composer-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-.mode-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; background: #14121f; border: 1px solid #252238; border-radius: 6px; }
+.mode-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; background: #17171a; border: 1px solid #2a2a30; border-radius: 6px; }
 .mode-btn {
   padding: 4px 10px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
-.mode-btn:hover { color: #d4d0e5; }
-.mode-btn.is-active { background: #1f1a30; color: var(--accent-cyan); box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+.mode-btn:hover { color: #fff; background: rgba(255,255,255,0.04); }
+.mode-btn.is-active {
+  background: #27272a;
+  color: #fff;
+  border-color: #3f3f46;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+.mode-btn#modeToggleBtn.is-active.is-plan {
+  color: var(--accent-plan);
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+}
+.mode-btn#modeToggleBtn.is-active.is-build {
+  color: var(--accent-build);
+  border-color: rgba(96, 165, 250, 0.4);
+  background: rgba(96, 165, 250, 0.12);
+}
+.mode-btn#modeChatBtn.is-active {
+  color: #fff;
+  border-color: #3f3f46;
+  background: #27272a;
+}
 
 .tool-btn {
   display: inline-flex; align-items: center; gap: 5px;
@@ -1231,7 +1347,7 @@ select.mini-select {
   transition: background 120ms ease, color 120ms ease;
 }
 .tool-btn svg { width: 14px; height: 14px; }
-.tool-btn:hover:not(.is-disabled) { background: #1c1a2b; color: #fff; }
+.tool-btn:hover:not(.is-disabled) { background: var(--bg-hover); color: #fff; }
 .tool-btn.is-disabled { opacity: 0.45; cursor: not-allowed; }
 .tool-btn.is-listening {
   color: var(--accent-danger) !important;
@@ -1246,12 +1362,12 @@ select.mini-select {
 }
 
 .activity-badge { position: relative; cursor: pointer; }
-.activity-inner { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; border: 1px solid #2b2242; background: #141224; color: var(--accent-purple-soft); font-size: 12px; }
+.activity-inner { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-inset); color: var(--text-muted); font-size: 12px; }
 .activity-text { font-weight: 700; color: #fff; }
 .boat { display: inline-flex; animation: boat 2s ease-in-out infinite; }
 .boat svg { width: 16px; height: 16px; }
 .card-title-mark { display: inline-flex; }
-.card-title-mark svg { width: 16px; height: 16px; color: var(--accent-purple); }
+.card-title-mark svg { width: 16px; height: 16px; color: var(--text-muted); }
 @keyframes boat {
   0% { transform: translateY(0) rotate(-3deg) translateX(0); }
   50% { transform: translateY(-4px) rotate(3deg) translateX(3px); }
@@ -1263,21 +1379,21 @@ select.mini-select {
   100% { transform: translateY(1px) rotate(-4deg); }
 }
 @keyframes sea-waves {
-  0% { background-position: 0% 50%; box-shadow: 0 0 10px rgba(124,58,237,0.25); }
-  50% { background-position: 100% 50%; box-shadow: 0 0 16px rgba(56,189,248,0.35); }
-  100% { background-position: 0% 50%; box-shadow: 0 0 10px rgba(124,58,237,0.25); }
+  0% { background-position: 0% 50%; box-shadow: 0 0 10px rgba(255,255,255,0.08); }
+  50% { background-position: 100% 50%; box-shadow: 0 0 16px rgba(56,189,248,0.25); }
+  100% { background-position: 0% 50%; box-shadow: 0 0 10px rgba(255,255,255,0.08); }
 }
 .activity-badge.sea-waves .activity-inner {
-  background: linear-gradient(135deg, #1d1433, #151f38, #1d1433);
+  background: linear-gradient(135deg, #1e1e24, #27272a, #1e1e24);
   background-size: 200% 200%;
-  border-color: #4c3575;
+  border-color: var(--border-strong);
   animation: sea-waves 4s ease infinite;
 }
 .boat-anim { animation: boat-anim 1.8s ease-in-out infinite !important; }
 .activity-tip {
   position: absolute; bottom: calc(100% + 6px); left: 0;
   width: 260px; padding: 8px 10px; border-radius: 6px;
-  background: #141120; border: 1px solid #352954; box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  background: var(--bg-surface); border: 1px solid var(--border); box-shadow: 0 12px 30px rgba(0,0,0,0.5);
   font-size: 11px; color: var(--text-soft); display: none; z-index: 60;
 }
 .activity-badge:hover .activity-tip { display: block; }
@@ -1287,38 +1403,38 @@ select.mini-select {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 6px 14px;
   border-radius: 6px;
-  background: #1b172a;
-  border: 1px solid #3b2d63;
-  color: #c4b5fd;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  color: #f4f4f5;
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: background 120ms ease, transform 80ms ease;
 }
-.btn-primary:hover { background: #252038; }
+.btn-primary:hover { background: #3f3f46; color: #fff; }
 .btn-primary:active { transform: scale(0.97); }
 .btn-primary.is-busy { border-color: #7f1d1d; color: #fca5a5; }
-.stop-square { width: 8px; height: 8px; border-radius: 2px; background: var(--accent-purple); display: inline-block; }
+.stop-square { width: 8px; height: 8px; border-radius: 2px; background: #f4f4f5; display: inline-block; }
 .btn-primary.is-busy .stop-square { background: var(--accent-danger); }
 
 .btn-secondary {
   padding: 5px 10px; border-radius: 6px;
-  background: #1c192b; border: 1px solid var(--border-strong);
-  color: #b5b1c9; font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+  background: var(--bg-surface); border: 1px solid var(--border-strong);
+  color: var(--text-soft); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
 }
-.btn-secondary:hover { background: #25213b; color: #fff; }
+.btn-secondary:hover { background: var(--bg-hover); color: #fff; }
 .btn-sm { padding: 4px 9px; border-radius: 6px; font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid transparent; }
 .btn-ok { background: #065f46; color: #d1fae5; border-color: #047857; }
 .btn-ok:hover { background: #047857; }
 .btn-danger { background: #7f1d1d; color: #fee2e2; border-color: #991b1b; }
 .btn-danger:hover { background: #991b1b; }
-.btn-primary.btn-sm { background: #7c3aed; color: #fff; }
-.btn-primary.btn-sm:hover { background: #6d28d9; }
+.btn-primary.btn-sm { background: #27272a; border-color: #3f3f46; color: #fff; }
+.btn-primary.btn-sm:hover { background: #3f3f46; }
 
 /* Attachments */
-.attachment-tray { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #181625; }
-.attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 8px; border-radius: 6px; background: #161422; border: 1px solid #2a263d; font-size: 11px; font-family: var(--font-mono); color: var(--text-soft); }
+.attachment-tray { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 8px; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border); font-size: 11px; font-family: var(--font-mono); color: var(--text-soft); }
 .attach-chip button { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
 .attach-chip button:hover { color: var(--accent-danger); }
 .attach-size { color: var(--text-dim); }
@@ -1328,32 +1444,42 @@ select.mini-select {
 .status-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .status-right { display: flex; align-items: center; gap: 8px; }
 .status-item { display: inline-flex; align-items: center; gap: 5px; }
-.status-anchor { color: var(--accent-purple); display: inline-flex; }
+.status-anchor { color: var(--text-muted); display: inline-flex; transition: color 150ms ease; }
 .status-anchor svg { width: 14px; height: 14px; }
+.status-thinking { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); transition: color 150ms ease; }
 .status-thinking.is-busy .status-anchor { animation: boat 1.6s ease-in-out infinite; }
-.status-divider { color: #2f2b42; }
-.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 6px; background: #14121f; border: 1px solid #252238; color: var(--text-soft); max-width: 320px; }
-.chip-folder { display: inline-flex; }
+.status-thinking.mode-plan.is-busy .status-anchor,
+.status-thinking.mode-plan.is-busy #thinkingText { color: var(--accent-plan) !important; }
+.status-thinking.mode-build.is-busy .status-anchor,
+.status-thinking.mode-build.is-busy #thinkingText { color: var(--accent-build) !important; }
+.status-thinking.mode-chat.is-busy .status-anchor,
+.status-thinking.mode-chat.is-busy #thinkingText { color: var(--text-muted) !important; }
+.status-thinking.is-error .status-anchor,
+.status-thinking.is-error #thinkingText { color: var(--accent-danger) !important; }
+.status-divider { color: #2a2a33; }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 6px; background: #17171a; border: 1px solid #2a2a30; color: var(--text-soft); max-width: 320px; cursor: pointer; transition: background 120ms ease, border-color 120ms ease; }
+.chip:hover { background: #222228; border-color: #3f3f46; }
+.chip-folder { display: inline-flex; color: #a1a1aa; }
 .chip-folder svg { width: 14px; height: 14px; }
-.chip-sep { color: #8e8a9f; }
-.chip #workspacePath { color: #b5b1c9; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-sep { color: #52525b; }
+.chip #workspacePath { color: #d4d4d8; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .link-btn { background: none; border: none; padding: 0; font: inherit; color: #fff; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; max-width: 260px; overflow: hidden; }
 .link-btn:hover { text-decoration: underline; }
 .link-btn #activeModelName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .caret { color: var(--text-muted); font-size: 11px; }
-.mcp-btn { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border-radius: 6px; background: #151221; border: 1px solid #2d2646; color: var(--text-soft); font-family: inherit; font-size: 12px; cursor: pointer; }
-.mcp-btn:hover { background: #1e1930; }
-.mcp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-purple); }
+.mcp-btn { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-soft); font-family: inherit; font-size: 12px; cursor: pointer; }
+.mcp-btn:hover { background: var(--bg-hover); }
+.mcp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-cyan); }
 .mcp-btn.is-zero .mcp-dot { background: #4b5563; }
 .mcp-label { font-weight: 600; letter-spacing: 0.04em; }
-.mcp-count { padding: 1px 6px; border-radius: 4px; background: #271e42; border: 1px solid rgba(76,53,117,0.6); color: #c4b5fd; font-size: 11px; font-weight: 600; }
+.mcp-count { padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-size: 11px; font-weight: 600; }
 
 /* ===================== Popovers ===================== */
 .popover {
   position: fixed;
   z-index: 80;
-  background: #12101c;
-  border: 1px solid #2a2440;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 18px 44px rgba(0,0,0,0.55);
   font-family: var(--font-sans);
@@ -1361,65 +1487,65 @@ select.mini-select {
 }
 .popover-models { width: 320px; }
 .popover-mcp { width: 290px; }
-.popover-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; font-size: 12px; font-weight: 600; color: #fff; border-bottom: 1px solid #1f1b30; }
+.popover-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; font-size: 12px; font-weight: 600; color: #fff; border-bottom: 1px solid var(--border-soft); }
 .popover-body { padding: 6px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .popover-item { padding: 7px 9px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
-.popover-item:hover { background: #181528; }
-.popover-item.is-current { background: #1d1730; border-color: #3b2d63; }
+.popover-item:hover { background: var(--bg-hover); }
+.popover-item.is-current { background: var(--bg-active); border-color: var(--border-strong); }
 .popover-item-name { font-family: var(--font-mono); font-size: 12px; color: #fff; overflow: hidden; text-overflow: ellipsis; }
 .popover-item-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.popover-item-engine { font-size: 11px; font-family: var(--font-mono); color: var(--accent-purple); }
+.popover-item-engine { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); }
 .popover-empty { padding: 12px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
-.mcp-popover-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: #0c0b12; border: 1px solid #1f1b30; }
+.mcp-popover-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--bg-inset); border: 1px solid var(--border-soft); }
 .mcp-popover-detail { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin-top: 2px; }
 
 /* ===================== Modals ===================== */
 .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,0.62); backdrop-filter: blur(3px); }
-.modal-card { width: 100%; max-width: 420px; background: #14121f; border: 1px solid #31274f; border-radius: 10px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.modal-card { width: 100%; max-width: 420px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .modal-wide { max-width: 560px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .modal-title { font-size: 14px; font-weight: 600; color: #fff; display: inline-flex; align-items: center; gap: 8px; }
-.modal-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-purple); }
+.modal-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-cyan); }
 .modal-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .modal-hint { margin-right: auto; font-size: 12px; color: var(--text-dim); }
 .field { display: flex; flex-direction: column; gap: 5px; }
-.field-label { font-size: 12px; font-weight: 500; color: #b5b1c9; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-soft); }
 .field input {
   width: 100%;
-  background: #0c0b12;
-  border: 1px solid #2a2440;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
   color: #fff;
   font-family: inherit;
   font-size: 13px;
 }
-.field input:focus { border-color: var(--accent-purple); }
+.field input:focus { border-color: var(--border-strong); }
 .attach-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border-soft); border-radius: 10px; padding: 6px; }
 .attach-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); cursor: pointer; }
-.attach-row:hover { background: #181528; color: #fff; }
-.attach-row.is-attached { background: rgba(139,92,246,0.14); color: var(--accent-purple-soft); }
+.attach-row:hover { background: var(--bg-hover); color: #fff; }
+.attach-row.is-attached { background: rgba(255,255,255,0.08); color: #fff; }
 .attach-row-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ===================== Toasts ===================== */
 .toast-host { position: fixed; right: 18px; bottom: 18px; z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-.toast { background: #14121f; border: 1px solid var(--accent-purple); color: var(--text); padding: 9px 14px; border-radius: 10px; box-shadow: 0 14px 36px rgba(0,0,0,0.5); font-size: 12px; max-width: 380px; opacity: 1; transition: opacity 250ms ease; }
+.toast { background: var(--bg-surface); border: 1px solid var(--border-strong); color: var(--text); padding: 9px 14px; border-radius: 10px; box-shadow: 0 14px 36px rgba(0,0,0,0.5); font-size: 12px; max-width: 380px; opacity: 1; transition: opacity 250ms ease; }
 .toast.is-error { border-color: var(--accent-danger); color: #fca5a5; }
 .toast.is-fading { opacity: 0; }
 .toast { display: flex; align-items: center; gap: 12px; }
 .toast-action {
   flex: 0 0 auto;
   background: transparent;
-  border: 1px solid var(--accent-purple);
-  color: var(--accent-purple);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
   border-radius: 6px;
   padding: 3px 10px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
-.toast-action:hover { background: rgba(167,139,250,0.14); }
-.toast-action:focus-visible { outline: 2px solid var(--accent-purple); outline-offset: 2px; }
+.toast-action:hover { background: var(--bg-hover); }
+.toast-action:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
 
 .sidebar-scrim {
   position: fixed;
@@ -1444,6 +1570,7 @@ select.mini-select {
 /* ===================== Right-Side Inspector Sidebar ===================== */
 .right-inspector {
   width: 440px;
+  max-width: 100vw;
   flex-shrink: 0;
   height: 100%;
   background: var(--bg-sidebar);
@@ -1479,7 +1606,7 @@ select.mini-select {
   height: 18px;
   display: flex;
   align-items: center;
-  color: var(--accent-purple);
+  color: var(--text-muted);
 }
 .right-inspector-grid {
   flex: 1;
@@ -1522,8 +1649,8 @@ select.mini-select {
   font-size: 10px;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
-  background: rgba(167, 139, 250, 0.15);
-  color: var(--accent-purple-soft);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-soft);
   text-transform: uppercase;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -1612,9 +1739,9 @@ select.mini-select {
 
 /* ===================== Responsive ===================== */
 @media (max-width: 1000px) {
-  .app-sidebar { position: absolute; left: 0; top: 0; bottom: 0; z-index: 50; box-shadow: 0 18px 44px rgba(0,0,0,0.55); }
+  .app-sidebar { position: absolute; left: 0; top: 0; bottom: 0; z-index: 50; box-shadow: 0 18px 44px rgba(0,0,0,0.55); width: min(440px, 100vw); max-width: 100vw; }
   .app-sidebar.is-collapsed { box-shadow: none; }
-  .right-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 50; box-shadow: -18px 0 44px rgba(0,0,0,0.55); }
+  .right-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 50; box-shadow: -18px 0 44px rgba(0,0,0,0.55); width: min(440px, 100vw); max-width: 100vw; }
   .worker-partition { flex: 0 0 auto; min-height: 160px; }
   .status-strip { font-size: 11px; }
   .chip { max-width: 220px; }
@@ -1633,6 +1760,15 @@ select.mini-select {
   .link-btn { max-width: 140px; }
   .tool-btn-text { display: none; }
   .approval-actions { flex-wrap: wrap; }
+}
+@media (max-width: 480px) {
+  .app-header { padding: 8px 10px; }
+  #splitViewBtnLabel { display: none; }
+  .header-tools { gap: 6px; }
+  .chip { max-width: 140px; }
+  .mode-switch { width: 100%; }
+  .mode-btn { flex: 1 1 auto; text-align: center; padding: 4px 6px; }
+  .status-strip { gap: 6px; font-size: 10px; }
 }
 `,
   },
@@ -1692,6 +1828,7 @@ select.mini-select {
     modelChoice: null,
     mcp: { connected: 0, total: 0, transportUp: false, servers: [] },
     mode: 'chat',
+    buildOrPlanMode: 'plan',
     busy: false,
     streaming: false,
     streamingText: '',
@@ -2007,14 +2144,41 @@ select.mini-select {
   function isNearBottom() {
     var box = el('chatScrollContainer');
     if (!box) return true;
-    return (box.scrollHeight - box.scrollTop - box.clientHeight) < 90;
+    return (box.scrollHeight - box.scrollTop - box.clientHeight) <= 80;
   }
 
-  function maybeScroll(force) {
+  function maybeScroll(force, smooth) {
     var box = el('chatScrollContainer');
     if (!box) return;
+    var jumpBtn = el('btnJumpToLatest');
     if (force || isNearBottom()) {
-      box.scrollTop = box.scrollHeight;
+      if (smooth && typeof box.scrollTo === 'function') {
+        box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+      } else {
+        box.scrollTop = box.scrollHeight;
+      }
+      if (jumpBtn) jumpBtn.classList.add('is-hidden');
+    } else {
+      if (jumpBtn) jumpBtn.classList.remove('is-hidden');
+    }
+  }
+
+  /**
+   * Bounded live message history: durable storage keeps the whole transcript
+   * (and a session reload replays ALL of it — renderTranscript sets
+   * state.bulkRendering, so bulk renders never trim). LIVE appends drop only
+   * the oldest node, only while the operator follows the bottom (isNearBottom,
+   * same 80 px threshold as the auto-scroll test) — a fast tool/worker burst
+   * cannot grow the DOM forever, and scrolled-up reading never loses position.
+   */
+  var MAX_MESSAGES_DOM = 400;
+
+  function trimMessagesList() {
+    if (state.bulkRendering) return;
+    var list = el('messagesList');
+    if (!list) return;
+    while (list.childElementCount > MAX_MESSAGES_DOM && isNearBottom()) {
+      list.removeChild(list.firstElementChild);
     }
   }
 
@@ -2023,6 +2187,7 @@ select.mini-select {
     if (!list) return null;
     var node = buildMessage(role, html, extraClass);
     list.appendChild(node);
+    trimMessagesList();
     maybeScroll(false);
     return node;
   }
@@ -2044,32 +2209,88 @@ select.mini-select {
       list.appendChild(hint);
       return;
     }
-    messages.forEach(function (msg) {
-      if (msg.role === 'tool') {
-        appendToolEvent({ name: 'tool', summary: msg.text, status: 'succeeded', output: '' });
-      } else if (msg.role === 'system') {
-        appendPlain('system', msg.text);
-      } else {
-        appendPlain(msg.role === 'user' ? 'user' : 'assistant', msg.text);
-      }
-    });
+    // Full replay: every persisted message renders — the live-history trim
+    // below this is suspended while this bulk render is in progress.
+    state.bulkRendering = true;
+    try {
+      messages.forEach(function (msg) {
+        if (msg.role === 'tool') {
+          appendToolEvent({ name: 'tool', summary: msg.text, status: 'succeeded', output: '' });
+        } else if (msg.role === 'system') {
+          appendPlain('system', msg.text);
+        } else {
+          appendPlain(msg.role === 'user' ? 'user' : 'assistant', msg.text);
+        }
+      });
+    } finally {
+      state.bulkRendering = false;
+    }
     maybeScroll(true);
+  }
+
+  /**
+   * Display-time prose-secret redaction. This pattern set DELIBERATELY
+   * mirrors src/util/redact.ts (PROSE_SECRET_PATTERNS / redactProseSecrets):
+   * the server redacts at-rest surfaces, the SPA redacts at display — a
+   * pattern change on either side must be applied to both (the spa-ui parity
+   * test enforces it). Do not add patterns here without adding them there.
+   */
+  function redactSecrets(text) {
+    if (!text || typeof text !== 'string') return text;
+    return text
+      .replace(/(sk-[a-zA-Z0-9_-]{16,})/g, 'sk-[REDACTED]')
+      .replace(/(bearer[ \\t]+)[a-zA-Z0-9_.-]{20,}/gi, '$1[REDACTED]')
+      .replace(/((?:api[_-]?key|password|token|secret)[ \\t]*[:=][ \\t]*["']?)[^ \\t\\r\\n"']+/gi, '$1[REDACTED]');
   }
 
   function appendToolEvent(tool) {
     var list = el('messagesList');
     if (!list) return;
-    var card = document.createElement('div');
-    card.className = 'tool-card';
-    var status = tool.status || 'running';
-    var head = '<div class="tool-card-head"><div class="tool-name">' +
-      escapeHtml(tool.name || 'tool') +
-      (tool.summary && tool.summary !== tool.name ? ' <span class="muted">(' + escapeHtml(tool.summary) + ')</span>' : '') +
-      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></div>';
-    var body = tool.output ? '<div class="tool-card-body">' + escapeHtml(tool.output) + '</div>' : '';
+    var card = document.createElement('details');
+    card.className = 'tool-card activity-timeline-node';
+    var status = tool.status || 'succeeded';
+    var name = escapeHtml(tool.name || 'tool');
+    var summary = escapeHtml(redactSecrets(tool.summary || ''));
+    var output = escapeHtml(redactSecrets(tool.output || ''));
+    var head = '<summary class="tool-card-head"><div class="tool-name">' +
+      name + (summary && summary !== name ? ' <span class="muted">(' + summary + ')</span>' : '') +
+      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></summary>';
+    var body = output ? '<div class="tool-card-body">' + output + '</div>' : '<div class="tool-card-body muted">[No output]</div>';
     card.innerHTML = head + body;
     list.appendChild(card);
+    trimMessagesList();
     maybeScroll(false);
+  }
+
+  /**
+   * Streaming renders coalesce to at most ONE markdown render + innerHTML swap
+   * per animation frame (fallback 33 ms timer) instead of one per token.
+   * Previously every token re-rendered the full accumulated turn through the
+   * markdown pipeline: O(n^2) bytes processed across a long stream plus a full
+   * DOM parse per token, which stuttered long streaming turns. Received text
+   * always accumulates in state.streamingText first, so a scheduled flush can
+   * never lose the tail — finalize flushes synchronously before the body is
+   * cleared. Time-to-first-output stays instant: the turn's first token flushes
+   * synchronously.
+   */
+  var streamFlushPending = false;
+
+  function flushStreamingToken() {
+    streamFlushPending = false;
+    var body = state.liveBody;
+    if (!body) return;
+    body.innerHTML = renderMarkdown(state.streamingText) + '<span class="caret-blink"></span>';
+    maybeScroll(false);
+  }
+
+  function scheduleStreamFlush() {
+    if (streamFlushPending) return;
+    streamFlushPending = true;
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(flushStreamingToken);
+    } else {
+      setTimeout(flushStreamingToken, 33);
+    }
   }
 
   function appendStreamingToken(text) {
@@ -2079,14 +2300,17 @@ select.mini-select {
       var node = buildMessage('assistant', '');
       list.appendChild(node);
       state.liveBody = node.querySelector('.msg-body');
-      state.streamingText = '';
+      state.streamingText = text;
+      flushStreamingToken();
+      trimMessagesList();
+      return;
     }
     state.streamingText += text;
-    state.liveBody.innerHTML = renderMarkdown(state.streamingText) + '<span class="caret-blink"></span>';
-    maybeScroll(false);
+    scheduleStreamFlush();
   }
 
   function finalizeStreamingTurn(interrupted, failed) {
+    streamFlushPending = false; // a stale scheduled frame must not render after finalize
     if (state.liveBody) {
       var note = failed
         ? '<div class="msg-error">[Turn failed]</div>'
@@ -2108,14 +2332,21 @@ select.mini-select {
     eventSource.onopen = function () {
       var conn = el('connectionStatus');
       if (conn) {
-        conn.classList.remove('is-offline');
-        conn.querySelector('.conn-label').textContent = 'Connected';
+        if (conn.classList.contains('is-offline')) {
+          conn.classList.remove('is-offline');
+          conn.classList.add('is-reconnected');
+          conn.querySelector('.conn-label').textContent = 'Connected';
+          setTimeout(function () {
+            conn.classList.remove('is-reconnected');
+          }, 2500);
+        }
       }
       reconstituteWorkerPartitions();
     };
     eventSource.onerror = function () {
       var conn = el('connectionStatus');
       if (conn) {
+        conn.classList.remove('is-reconnected');
         conn.classList.add('is-offline');
         conn.querySelector('.conn-label').textContent = 'Reconnecting\u2026';
       }
@@ -2158,7 +2389,7 @@ select.mini-select {
       loadApprovals();
     } else if (ev.type === 'run_state') {
       state.activeRunId = ev.runId;
-      applyRunState(ev.state, ev.goal);
+      applyRunState(ev.state, ev.goal, ev.error, ev.summary);
       refreshActiveRun();
     } else if (ev.type === 'task_state') {
       if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
@@ -2293,7 +2524,7 @@ select.mini-select {
         runtimeInfo.innerHTML =
           kvRow('Project', state.workspace.name) +
           kvRow('Root', state.workspace.rootDir) +
-          kvRow('Muses', String((state.workspace.muses || []).length)) +
+          kvRow('Agents', String((state.workspace.muses || []).length)) +
           kvRow('Default branch', state.workspace.defaultBranch) +
           kvRow('Pending approvals', String(state.workspace.approvalsPending || 0)) +
           kvRow('Active run', state.workspace.activeRun ? state.workspace.activeRun.state : 'none');
@@ -2309,15 +2540,39 @@ select.mini-select {
     }
   }
 
+  /**
+   * The server pins the workspace to its project directory at startup
+   * (GET /api/workspace is the only source of truth; there is no
+   * workspace-selection API). The chip and file header therefore EXPLAIN the
+   * pin instead of pretending a client-side folder choice changed the
+   * runtime workspace — the previous picker relabeled the UI to a folder the
+   * server never confirmed while still listing the real workspace's files.
+   */
+  function explainWorkspacePin() {
+    var ws = state.workspace || {};
+    toast('Workspace is pinned to the server project directory (' + (ws.rootDir || ws.name || 'server root') +
+      '). Switching workspaces at runtime is not supported; restart the server in the target project instead.');
+  }
+
   function kvRow(key, value) {
     return '<div class="kv-row"><span class="kv-key">' + escapeHtml(key) +
       '</span><span class="kv-val" title="' + escapeHtml(value) + '">' + escapeHtml(value) + '</span></div>';
   }
 
   // ----------------------------------------------------------------- MCP
+  var lastMcpSnapshot = null;
+
   async function loadMcp() {
+    // Background tabs skip the poll entirely: no fetch, no render churn; a
+    // visibilitychange listener re-runs one load the moment the tab returns.
+    if (document.hidden) return;
     try {
       var res = await apiFetch('/api/mcp');
+      // Unchanged registry → keep the previous render: the poll keeps the
+      // badge fresh without rebuilding popover DOM every interval.
+      var snapshot = JSON.stringify(res || null);
+      if (snapshot === lastMcpSnapshot) return;
+      lastMcpSnapshot = snapshot;
       state.mcp = res;
       renderMcp();
     } catch (err) {
@@ -2442,7 +2697,7 @@ select.mini-select {
 
   async function switchModel(modelId) {
     if (!state.muse) {
-      toast('No active Muse: open a session first.', true);
+      toast('No active agent: open a session first.', true);
       return;
     }
     if (state.muse.model === modelId) {
@@ -2472,16 +2727,70 @@ select.mini-select {
   }
 
   // ------------------------------------------------------ muse model cards
+  // Presentation order is computed by coworkerRank below (role/id/name based);
+  // the former flat ordering array here was defined but never read — a
+  // rebound empty table must not come back.
+  function coworkerRank(m) {
+    var role = String(m.role || '').toLowerCase();
+    var id = String(m.id || m.slug || '').toLowerCase();
+    var name = String(m.displayName || m.name || '').toLowerCase();
+    if (role === 'supervisor' || id === 'manager' || name.indexOf('manager') !== -1) return 1;
+    if (role === 'qa' || role === 'tester' || id === 'qa' || id === 'tester' || name.indexOf('qa') !== -1 || name.indexOf('tester') !== -1) return 2;
+    if (role === 'researcher' || id === 'researcher' || name.indexOf('research') !== -1) return 3;
+    if (role === 'coder' || role === 'worker' || id === 'coder' || name.indexOf('coder') !== -1 || role === 'developer') return 4;
+    if (role === 'reviewer' || role === 'verification' || id === 'reviewer' || name.indexOf('review') !== -1) return 5;
+    return 99;
+  }
+
+  /**
+   * ONE identity rule for the coder/worker group, used by BOTH the settings
+   * display and the model fan-out, so every visible worker row maps exactly
+   * to the fan-out target set and vice versa: the coder model is shared
+   * across the group. Defined as the rank-4 bucket of coworkerRank on
+   * purpose — the contracts can never drift apart.
+   */
+  function isWorkerAgent(m) {
+    return !!m && coworkerRank(m) === 4;
+  }
+
+  /**
+   * Fan-out targets for one changed worker agent: the whole worker group by
+   * stable identity (id first, then slug), skipping entries without a usable
+   * id — they cannot be addressed by the API and must not be "targeted" by
+   * empty strings. The changed agent is always first in the list.
+   */
+  function workerFanoutTargets(muses, changedId) {
+    var targets = [changedId];
+    (muses || []).forEach(function (m) {
+      var id = String((m && (m.id || m.slug)) || '');
+      if (id !== '' && id !== changedId && isWorkerAgent(m)) targets.push(id);
+    });
+    return targets;
+  }
+
   function renderMuseModels() {
     var node = el('museModelList');
     if (!node || !state.workspace) return;
     var muses = state.workspace.muses || [];
     if (muses.length === 0) {
-      node.innerHTML = '<div class="empty-hint">No Muse configured.</div>';
+      node.innerHTML = '<div class="empty-hint">No agents configured.</div>';
+      return;
+    }
+    // Rank ORDERS the list; it never hides an agent. Distinct agents sharing
+    // a role bucket (two researchers, several workers, unknown roles) all
+    // stay visible and individually addressable — the previous first-per-rank
+    // dedupe silently dropped every agent after the first in a bucket.
+    var sortedMuses = muses
+      .filter(function (m) { return m && String(m.id || m.slug || '') !== ''; })
+      .map(function (m) { return { m: m, rank: coworkerRank(m), id: String(m.id || m.slug).toLowerCase() }; })
+      .sort(function (a, b) { return (a.rank - b.rank) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+    if (sortedMuses.length === 0) {
+      node.innerHTML = '<div class="empty-hint">No addressable agents configured (entries without an id cannot be configured).</div>';
       return;
     }
     var engineModels = state.models || {};
-    node.innerHTML = muses.map(function (m) {
+    node.innerHTML = sortedMuses.map(function (entry) {
+      var m = entry.m;
       var options = engineModels[m.engine] || [];
       var opts = options.map(function (opt) {
         var id = opt.id;
@@ -2491,9 +2800,10 @@ select.mini-select {
       if (options.length === 0 || !options.some(function (o) { return o.id === m.model; })) {
         opts = '<option value="' + escapeHtml(m.model) + '" selected>' + escapeHtml(m.model) + '</option>' + opts;
       }
-      return '<div class="muse-row"><div class="muse-row-head"><span class="muse-name">' + escapeHtml(m.displayName) +
-        '</span><span class="muse-role">' + escapeHtml(m.role) + ' \\u00b7 ' + escapeHtml(m.engine) + '</span></div>' +
-        '<select class="mini-select" data-muse="' + escapeHtml(m.id) + '">' + opts + '</select></div>';
+      var groupTag = isWorkerAgent(m) ? ' <span class="muted">(workers share one model)</span>' : '';
+      return '<div class="muse-row"><div class="muse-row-head"><span class="muse-name">' + escapeHtml(m.displayName || m.id) +
+        '</span><span class="muse-role">' + escapeHtml(m.role || 'unknown role') + ' \\u00b7 ' + escapeHtml(m.engine || '') + groupTag + '</span></div>' +
+        '<select class="mini-select" data-muse="' + escapeHtml(String(m.id || m.slug)) + '">' + opts + '</select></div>';
     }).join('');
     Array.prototype.forEach.call(node.querySelectorAll('select'), function (sel) {
       sel.addEventListener('change', function () {
@@ -2502,35 +2812,70 @@ select.mini-select {
     });
   }
 
+  /**
+   * Generation counter for model fan-outs: a newer selection invalidates the
+   * in-flight one, so stale completions never overwrite newer UI state.
+   */
+  var modelSwitchSeq = 0;
+
   async function switchMuseModel(museId, modelId) {
+    if (!museId) return; // nothing addressable: the API itself 404s empty ids
+    var switchSeq = ++modelSwitchSeq;
     var previous = null;
     if (state.muse && state.muse.id === museId) previous = state.muse.model;
     else if (state.workspace) {
-      var prior = (state.workspace.muses || []).filter(function (m) { return m.id === museId; })[0];
+      var prior = (state.workspace.muses || []).filter(function (m) { return m && m.id === museId; })[0];
       if (prior) previous = prior.model;
     }
-    try {
-      await apiFetch('/api/muses/' + encodeURIComponent(museId) + '/model', {
-        method: 'POST',
-        body: JSON.stringify({ model: modelId })
-      });
-      if (state.muse && state.muse.id === museId) {
-        state.muse.model = modelId;
-        applyMuseModel();
-      }
-      if (state.workspace) {
-        state.workspace.muses = state.workspace.muses.map(function (m) {
-          return m.id === museId ? Object.assign({}, m, { model: modelId }) : m;
+    // Fan-out contract (display and targeting share isWorkerAgent): changing
+    // any coder/worker group member applies to the whole group; every other
+    // agent updates alone.
+    var muses = (state.workspace && state.workspace.muses) || [];
+    var targets = isWorkerAgent(prior || { id: museId }) ? workerFanoutTargets(muses, museId) : [museId];
+    var succeeded = [];
+    var failed = [];
+    for (var i = 0; i < targets.length; i++) {
+      var tid = targets[i];
+      try {
+        await apiFetch('/api/muses/' + encodeURIComponent(tid) + '/model', {
+          method: 'POST',
+          body: JSON.stringify({ model: modelId })
         });
-        renderMuseModels();
+        succeeded.push(tid);
+      } catch (subErr) {
+        var detail = subErr && subErr.message ? String(subErr.message) : String(subErr);
+        failed.push({ id: tid, message: detail.slice(0, 160) });
       }
-      toast('Model switched to ' + modelId, false, previous && previous !== modelId ? {
-        label: 'Undo',
-        run: function () { switchMuseModel(museId, previous); },
-      } : null);
-    } catch (err) {
-      toast('Model switch failed: ' + err.message, true);
-      await loadWorkspace();
+    }
+    if (switchSeq !== modelSwitchSeq) return; // a newer selection owns the UI state now
+    // State reflects ONLY server-confirmed updates: workers whose request
+    // failed keep their old model and stay visibly identifiable as unchanged.
+    var okSet = {};
+    succeeded.forEach(function (id) { okSet[id] = true; });
+    if (state.muse && okSet[state.muse.id]) {
+      state.muse.model = modelId;
+      applyMuseModel();
+    }
+    if (state.workspace && state.workspace.muses) {
+      state.workspace.muses = state.workspace.muses.map(function (m) {
+        return m && okSet[m.id] ? Object.assign({}, m, { model: modelId }) : m;
+      });
+      renderMuseModels();
+    }
+    if (failed.length === 0) {
+      toast('Model switched to ' + modelId + (succeeded.length > 1 ? ' (' + succeeded.length + ' agents updated)' : ''), false,
+        previous && previous !== modelId ? {
+          label: 'Undo',
+          run: function () { switchMuseModel(museId, previous); },
+        } : undefined);
+    } else if (succeeded.length === 0) {
+      toast('Model switch failed for ' + failed.map(function (f) { return f.id; }).join(', ') + ': ' + failed[0].message, true);
+    } else {
+      // Partial failure is stated as partial: no success claim, no rollback
+      // implication — succeeded workers keep the new model.
+      toast('Model switch partially failed: ' + succeeded.length + '/' + targets.length +
+        ' updated to ' + modelId + '. Failed (kept previous model): ' +
+        failed.map(function (f) { return f.id; }).join(', '), true);
     }
   }
 
@@ -2539,7 +2884,7 @@ select.mini-select {
     if (!node || !state.workspace) return;
     var muses = state.workspace.muses || [];
     if (muses.length === 0) {
-      node.innerHTML = '<div class="empty-hint">No Muse configured.</div>';
+      node.innerHTML = '<div class="empty-hint">No agents configured.</div>';
       return;
     }
     node.innerHTML = muses.map(function (m) {
@@ -3039,7 +3384,7 @@ select.mini-select {
     state.loadedRunId = runId;
     try {
       var res = await apiFetch('/api/runs/' + encodeURIComponent(runId));
-      renderOrchestra(res.run.run, res.run.tasks || [], res.run.edges || []);
+      renderOrchestra(res.run.run, res.run.tasks || [], res.run.edges || [], res.run.supervisorStale === true);
       if (res.run && res.run.tasks) {
         // Reload/reconnect path: the durable task states are the only source
         // after a refresh (no SSE replay), so seed the badge from them too.
@@ -3060,19 +3405,36 @@ select.mini-select {
     await loadRunDetail(state.activeRunId);
   }
 
-  function renderOrchestra(run, tasks, edges) {
+  function renderOrchestra(run, tasks, edges, supervisorStale) {
     var node = el('activeRunCard');
     if (node) {
       if (!run) {
         node.innerHTML = '<div class="empty-hint">No active run in this workspace.</div>';
       } else {
         var muses = (state.workspace && state.workspace.muses) || [];
+        // The run's own persisted answer: what a fresh read (and every later
+        // reload) returns for a terminal run - not just the state badge.
+        var finalRow = '';
+        if (TERMINAL_RUN_STATES[run.state] && typeof run.finalSummary === 'string' && run.finalSummary !== '') {
+          finalRow = '<div class="orchestra-row orchestra-result"><span>Result</span><span>' +
+            escapeHtml(redactSecrets(run.finalSummary)) + '</span></div>';
+        }
+        // Stranded-run hint: never a state change, just honest evidence the
+        // run row may have outlived its supervisor.
+        var staleRow = '';
+        if (supervisorStale) {
+          staleRow = '<div class="orchestra-row orchestra-stale"><span>Supervisor</span><span>' +
+            'heartbeat stale - the run may be stranded; use Resume to recover it' +
+            '</span></div>';
+        }
         node.innerHTML =
           '<div class="orchestra-row"><span>Run</span><span class="mono">' + escapeHtml(run.id) + '</span></div>' +
           '<div class="orchestra-row"><span>Goal</span><span>' + escapeHtml(run.goal) + '</span></div>' +
           '<div class="orchestra-row"><span>State</span><span class="badge ' + (run.state === 'completed' ? 'badge-ok' : run.state === 'failed' ? 'badge-off' : 'badge-warn') + '">' + escapeHtml(run.state) + '</span></div>' +
+          finalRow +
+          staleRow +
           '<div class="orchestra-row"><span>Tasks</span><span>' + tasks.length + ' (' + tasks.filter(function (t) { return t.state === 'completed'; }).length + ' done)</span></div>' +
-          '<div class="orchestra-row"><span>Team</span><span>' + muses.length + ' muses</span></div>';
+          '<div class="orchestra-row"><span>Team</span><span>' + muses.length + ' agents</span></div>';
       }
     }
     renderDag(tasks, edges);
@@ -3122,11 +3484,21 @@ select.mini-select {
     var stages = Object.keys(stageMap).map(Number).sort(function (a, b) { return a - b; });
     var renderCardHtml = function (t) {
       var pill = t.state === 'completed' ? 'succeeded' : (t.state === 'running' || t.state === 'active') ? 'running' : (t.state === 'failed' || t.state === 'cancelled') ? 'failed' : 'pending';
+      // The persisted worker result body (defect 2026-10-21): workers' actual
+      // answers are stored in result_json, so a finished card shows the
+      // content that task.get_result keeps returning - not just the state pill.
+      var resultBody = t && t.result && typeof t.result === 'object' && !Array.isArray(t.result)
+        && typeof t.result.text === 'string' && t.result.text !== '' ? t.result.text : '';
+      var resultRow = resultBody ? '<div class="dag-task-result" title="' +
+        escapeHtml(redactSecrets(resultBody)) + '">' +
+        escapeHtml(redactSecrets(resultBody.slice(0, 600))) + (resultBody.length > 600 ? '\u2026' : '') +
+        '</div>' : '';
       return '<div class="dag-task-card state-' + escapeHtml(t.state) + '"><div class="dag-card-header">' +
         '<div class="dag-task-title">' + escapeHtml(t.title) + '</div>' +
         '<span class="tool-status ' + pill + '">' + escapeHtml(t.state) + '</span></div>' +
         '<div class="dag-task-meta"><span>' + escapeHtml(t.assigneeMuseId || 'coordinator') + '</span>' +
         '<span>' + escapeHtml(t.id) + '</span></div>' +
+        resultRow +
         '<div class="dag-task-actions"><button class="btn-secondary" data-task-diff="' + escapeHtml(t.id) + '">View Diff</button>' +
         (t.state === 'verifying' ? '<button class="btn-secondary" data-task-verify="' + escapeHtml(t.id) + '">Verify Task</button>' : '') +
         '</div></div>';
@@ -3178,9 +3550,65 @@ select.mini-select {
   }
 
   // ---------------------------------------------------------------- files
-  var FILE_ICON = '<svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>';
-  var DIR_ICON = '<svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>';
   var CHEV_ICON = '<svg class="file-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>';
+
+  function getFileIconSvg(name, isDir, isOpen) {
+    if (isDir) {
+      if (isOpen) {
+        return '<svg class="file-icon file-icon-dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/><path d="M3 13h18"/></svg>';
+      }
+      return '<svg class="file-icon file-icon-dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>';
+    }
+
+    var lower = String(name || '').toLowerCase();
+    var ext = lower.split('.').pop();
+
+    if (lower === 'package.json' || lower === 'package-lock.json' || lower === 'yarn.lock' || lower === 'pnpm-lock.yaml') {
+      return '<svg class="file-icon icon-manifest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>';
+    }
+    if (lower.indexOf('tsconfig') !== -1 || lower.indexOf('.config.') !== -1 || lower.indexOf('.env') === 0) {
+      return '<svg class="file-icon icon-config" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
+    }
+
+    if (ext === 'ts') {
+      return '<svg class="file-icon icon-ts" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 9h4M10 9v7M15 11c-.5-.6-1-1-1.7-1-.9 0-1.3.5-1.3 1.1 0 1.5 2.5 1.3 2.5 2.9 0 .9-.7 1.6-1.8 1.6-.9 0-1.6-.5-2-1.2"/></svg>';
+    }
+    if (ext === 'tsx') {
+      return '<svg class="file-icon icon-tsx" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 9h3M8.5 9v6M12 11l3 4M15 11l-3 4M17 11c-.4-.6-.8-1-1.4-1-.8 0-1.1.5-1.1 1 0 1.4 2.1 1.2 2.1 2.6 0 .8-.6 1.4-1.5 1.4-.8 0-1.3-.4-1.7-1"/></svg>';
+    }
+    if (ext === 'js' || ext === 'mjs' || ext === 'cjs') {
+      return '<svg class="file-icon icon-js" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M10 9v5a2 2 0 01-2 2H7M16 11c-.5-.6-1-1-1.7-1-.9 0-1.3.5-1.3 1.1 0 1.5 2.5 1.3 2.5 2.9 0 .9-.7 1.6-1.8 1.6-.9 0-1.6-.5-2-1.2"/></svg>';
+    }
+    if (ext === 'jsx') {
+      return '<svg class="file-icon icon-jsx" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 9v5a2 2 0 01-2 2H6M13 11l3 4M16 11l-3 4"/></svg>';
+    }
+    if (ext === 'py') {
+      return '<svg class="file-icon icon-py" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9H7a3 3 0 00-3 3v2a3 3 0 003 3h1v-2a2 2 0 012-2h4a2 2 0 002-2V9a3 3 0 00-3-3h-2M12 15h5a3 3 0 003-3v-2a3 3 0 00-3-3h-1v2a2 2 0 01-2 2h-4a2 2 0 00-2 2v2a3 3 0 003 3h2"/><circle cx="8" cy="9" r="1" fill="currentColor"/><circle cx="16" cy="15" r="1" fill="currentColor"/></svg>';
+    }
+    if (ext === 'json') {
+      return '<svg class="file-icon icon-json" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 4c-1.5 0-2 1-2 2v4c0 1-.5 1.5-1.5 1.5C3.5 11.5 3 12 3 12s.5.5 1.5.5c1 0 1.5.5 1.5 1.5v4c0 1 .5 2 2 2M16 4c1.5 0 2 1 2 2v4c0 1 .5 1.5 1.5 1.5 1 0 1.5.5 1.5.5s-.5.5-1.5.5c-1 0-1.5.5-1.5 1.5v4c0 1-.5 2-2 2"/></svg>';
+    }
+    if (ext === 'yml' || ext === 'yaml') {
+      return '<svg class="file-icon icon-yaml" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l6 8v8M20 4l-6 8"/></svg>';
+    }
+    if (ext === 'md' || ext === 'markdown' || ext === 'txt') {
+      return '<svg class="file-icon icon-md" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8v8l3-3 3 3V8M17 11l-2 3h4z"/></svg>';
+    }
+    if (ext === 'html' || ext === 'htm') {
+      return '<svg class="file-icon icon-html" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6M14 4l-4 16"/></svg>';
+    }
+    if (ext === 'css' || ext === 'scss' || ext === 'less') {
+      return '<svg class="file-icon icon-css" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l1.5 15L12 21l4.5-3L18 3H6z"/><path d="M9 8h6M8.5 12h6M10 16l2 1 2-1"/></svg>';
+    }
+    if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'gif' || ext === 'svg' || ext === 'ico' || ext === 'webp') {
+      return '<svg class="file-icon icon-img" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+    }
+    if (ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'bat' || ext === 'cmd' || ext === 'ps1') {
+      return '<svg class="file-icon icon-sh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-5-6-5M12 19h8"/></svg>';
+    }
+
+    return '<svg class="file-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>';
+  }
 
   function buildFileTree(paths) {
     var root = { dirs: {}, files: [] };
@@ -3210,13 +3638,13 @@ select.mini-select {
     Object.keys(root.dirs).sort().forEach(function (name) {
       var dir = root.dirs[name];
       html += '<div class="file-row file-dir" role="treeitem" aria-expanded="true">' +
-        CHEV_ICON + DIR_ICON +
+        CHEV_ICON + getFileIconSvg(name, true, true) +
         '<span class="file-name">' + escapeHtml(name) + '</span>' +
         '<span class="file-count">' + countTreeFiles(dir) + '</span>' +
         '</div>';
       html += '<div class="file-children">' + renderFileTreeNode(dir) + '</div>';
     });
-    root.files.sort().forEach(function (f) { html += renderFileRow(f, 0); });
+    root.files.sort(function (a, b) { return a.name.localeCompare(b.name); }).forEach(function (f) { html += renderFileRow(f, 0); });
     return html;
   }
 
@@ -3225,7 +3653,7 @@ select.mini-select {
     Object.keys(node.dirs).sort().forEach(function (name) {
       var dir = node.dirs[name];
       html += '<div class="file-row file-dir" role="treeitem" aria-expanded="true">' +
-        CHEV_ICON + DIR_ICON +
+        CHEV_ICON + getFileIconSvg(name, true, true) +
         '<span class="file-name">' + escapeHtml(name) + '</span>' +
         '<span class="file-count">' + countTreeFiles(dir) + '</span>' +
         '</div>';
@@ -3239,7 +3667,7 @@ select.mini-select {
 
   function renderFileRow(f, depth) {
     return '<div class="file-row file-item" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(f.path) + '" role="treeitem">' +
-      FILE_ICON +
+      getFileIconSvg(f.name, false, false) +
       '<span class="file-name">' + escapeHtml(f.name) + '</span>' +
       '</div>';
   }
@@ -3385,17 +3813,59 @@ select.mini-select {
     var text = el('thinkingText');
     if (btn) btn.classList.toggle('is-busy', busy);
     if (label) label.textContent = busy ? 'Stop' : 'Send';
-    if (thinking) thinking.classList.toggle('is-busy', busy);
-    if (text) text.textContent = busy ? (busyLabel || 'Thinking\\u2026') : 'Ready';
+    if (thinking) {
+      thinking.classList.toggle('is-busy', busy);
+      thinking.classList.remove('mode-plan', 'mode-build', 'mode-chat');
+      thinking.classList.add('mode-' + state.mode);
+    }
+    if (text) {
+      text.textContent = busy
+        ? (busyLabel || (state.mode === 'plan' ? 'Planning\\u2026' : (state.mode === 'build' ? 'Building\\u2026' : 'Thinking\\u2026')))
+        : 'Ready';
+    }
     updateActivityBadge();
   }
 
   function setMode(mode) {
     state.mode = mode;
+    if (mode === 'plan' || mode === 'build') {
+      state.buildOrPlanMode = mode;
+    }
+    // Plan/Build live in the modeToggleBtn split control; the standalone
+    // plan/build buttons no longer exist in the markup.
     var chat = el('modeChatBtn');
-    var build = el('modeBuildBtn');
+    var toggle = el('modeToggleBtn');
+    var toggleLabel = el('modeToggleLabel');
     if (chat) chat.classList.toggle('is-active', mode === 'chat');
-    if (build) build.classList.toggle('is-active', mode === 'build');
+    if (toggle) {
+      toggle.classList.toggle('is-active', mode === 'plan' || mode === 'build');
+      toggle.classList.toggle('is-plan', mode === 'plan');
+      toggle.classList.toggle('is-build', mode === 'build');
+    }
+    if (toggleLabel) {
+      toggleLabel.textContent = (mode === 'build') ? 'Build' : (mode === 'plan' ? 'Plan' : (state.buildOrPlanMode === 'build' ? 'Build' : 'Plan'));
+    }
+
+    var composer = document.querySelector('.composer');
+    if (composer) {
+      composer.classList.remove('mode-plan', 'mode-build', 'mode-chat');
+      composer.classList.add('mode-' + mode);
+    }
+    var thinking = el('thinkingStatus');
+    if (thinking) {
+      thinking.classList.remove('mode-plan', 'mode-build', 'mode-chat');
+      thinking.classList.add('mode-' + mode);
+    }
+    var promptInput = el('promptInput');
+    if (promptInput) {
+      if (mode === 'plan') {
+        promptInput.placeholder = 'Plan mode: formulate architecture, task breakdowns and test criteria\\u2026 (Enter to submit, Shift+Enter for newline)';
+      } else if (mode === 'build') {
+        promptInput.placeholder = 'Build mode: run supervised multi-agent build with task delegation\\u2026 (Enter to submit, Shift+Enter for newline)';
+      } else {
+        promptInput.placeholder = 'Ask Pluton to plan, implement, investigate\\u2026 (Enter to submit, Shift+Enter for newline)';
+      }
+    }
   }
 
   /**
@@ -3409,7 +3879,7 @@ select.mini-select {
    * Reported once per run: the server may broadcast a terminal frame directly
    * AND the log-watcher may emit the same frame a moment later.
    */
-  function applyRunState(runState, goal) {
+  function applyRunState(runState, goal, error, summary) {
     var runId = state.activeRunId;
     if (!runId) return;
     if (TERMINAL_RUN_STATES[runState]) {
@@ -3424,7 +3894,16 @@ select.mini-select {
         uncertain: 'ended with an uncertain outcome'
       };
       var cls = runState === 'failed' || runState === 'uncertain' ? 'msg-error' : '';
-      appendPlain('system', 'Build ' + labels[runState] + ' - run ' + runId + (goal ? ': ' + goal : ''), cls);
+      var detail = (runState === 'failed' || runState === 'uncertain')
+        ? (error || summary || (goal ? 'Goal: ' + goal : ''))
+        : (summary || (goal ? 'Goal: ' + goal : ''));
+      // Same redaction gate as every other dynamic detail surface (tool cards,
+      // result cards, worker stream): terminal run text can quote a
+      // settlement or failure reason, so credential-shaped strings are
+      // masked before rendering. HTML escaping stays separate downstream.
+      detail = redactSecrets(String(detail));
+      var msg = 'Build ' + labels[runState] + ' - run ' + runId + (detail ? ': ' + detail : '');
+      appendPlain('system', msg, cls);
       return;
     }
     // The run is still live. Say what it is waiting for: a build parked at the
@@ -3470,7 +3949,7 @@ select.mini-select {
     try {
       await apiFetch('/api/sessions/' + encodeURIComponent(state.activeSessionId) + '/prompt', {
         method: 'POST',
-        body: JSON.stringify({ text: full })
+        body: JSON.stringify({ text: full, mode: state.mode })
       });
     } catch (err) {
       appendPlain('system', '[Error dispatching prompt: ' + err.message + ']', 'msg-error');
@@ -3528,7 +4007,7 @@ select.mini-select {
       var runId = res.run.id;
       state.activeRunId = runId;
       state.settledRunId = null;
-      appendPlain('system', 'Build started \\u2014 run ' + runId + ' (' + res.run.state + '). The manager Muse plans and delegates to the team.');
+      appendPlain('system', 'Build started \\u2014 run ' + runId + ' (' + res.run.state + '). The manager agent plans and delegates to the team.');
       await apiFetch('/api/runs/' + encodeURIComponent(runId) + '/start', {
         method: 'POST',
         body: '{}'
@@ -3819,6 +4298,13 @@ select.mini-select {
     entry.textContent = text;
     stream.appendChild(entry);
 
+    // Bounded live stream (mirrors the transcript trim): drop the oldest
+    // entries only while the operator watches live (atBottom before the append);
+    // scrolled-up reading pauses the trim instead of losing position.
+    while (stream.childElementCount > MAX_WORKER_STREAM_ENTRIES && atBottom) {
+      stream.removeChild(stream.firstElementChild);
+    }
+
     if (atBottom) {
       stream.scrollTop = stream.scrollHeight;
     }
@@ -3897,8 +4383,16 @@ select.mini-select {
     if (!entryText) {
       entryText = '[' + ev.type.replace('worker.', '') + ']';
     }
+    entryText = redactSecrets(entryText);
 
+    // Bounded retained log state: the per-task log keeps the newest entries
+    // only (the durable event log is the complete record). Without this a
+    // chatty long task grows the session's memory + every partition re-render
+    // without bound.
     worker.logs.push({ text: entryText, cls: entryClass, timestamp: ev.timestamp || Date.now() });
+    if (worker.logs.length > MAX_WORKER_STREAM_ENTRIES) {
+      worker.logs.shift();
+    }
     if (partition) {
       appendWorkerStreamEntry(partition, entryText, entryClass);
     }
@@ -3962,6 +4456,7 @@ select.mini-select {
   }
 
   // -------------------------------------------------------------- popovers
+  var MAX_WORKER_STREAM_ENTRIES = 200;
   function toggleModelPopover(force) {
     var pop = el('modelPopover');
     if (!pop) return;
@@ -4083,7 +4578,7 @@ select.mini-select {
       if (restore) restore.classList.remove('is-hidden');
     } else {
       sidebar.classList.remove('is-collapsed');
-      sidebar.style.width = state.sidebarTab === 'settings' ? '440px' : state.sidebarWidth;
+      sidebar.style.width = state.sidebarTab === 'settings' ? 'min(440px, 100vw)' : (state.sidebarWidth || '280px');
       if (restore) restore.classList.add('is-hidden');
     }
     var scrim = el('sidebarScrim');
@@ -4219,10 +4714,54 @@ select.mini-select {
       e.stopPropagation();
     });
 
+    // Standalone plan/build buttons were removed from the markup; the
+    // modeToggleBtn split control owns Plan/Build selection now.
     var chatMode = el('modeChatBtn');
     if (chatMode) chatMode.addEventListener('click', function () { setMode('chat'); });
-    var buildMode = el('modeBuildBtn');
-    if (buildMode) buildMode.addEventListener('click', function () { setMode('build'); });
+    var toggleMode = el('modeToggleBtn');
+    if (toggleMode) {
+      toggleMode.addEventListener('click', function () {
+        if (state.mode === 'chat') {
+          setMode(state.buildOrPlanMode || 'plan');
+        } else if (state.mode === 'plan') {
+          setMode('build');
+        } else {
+          setMode('plan');
+        }
+      });
+    }
+
+    var chatBox = el('chatScrollContainer');
+    if (chatBox) {
+      chatBox.addEventListener('scroll', function () {
+        var jumpBtn = el('btnJumpToLatest');
+        if (jumpBtn) {
+          jumpBtn.classList.toggle('is-hidden', isNearBottom());
+        }
+      });
+    }
+    var jumpBtn = el('btnJumpToLatest');
+    if (jumpBtn) {
+      jumpBtn.addEventListener('click', function () {
+        maybeScroll(true, true);
+        jumpBtn.classList.add('is-hidden');
+      });
+    }
+
+    var toggleSplitViewBtn = el('btnToggleSplitView');
+    if (toggleSplitViewBtn) {
+      toggleSplitViewBtn.addEventListener('click', function () {
+        toggleRightInspector();
+      });
+    }
+
+    // The workspace chip and the file-panel label are pinned to the server's
+    // project directory; clicking them explains the pin (no client-side
+    // selection exists, so no label may diverge from server-confirmed state).
+    var wsChip = el('workspaceChip');
+    if (wsChip) wsChip.addEventListener('click', explainWorkspacePin);
+    var filesWsLabel = el('filesWorkspaceLabel');
+    if (filesWsLabel) filesWsLabel.addEventListener('click', explainWorkspacePin);
 
     var attach = el('btnAttach');
     if (attach) attach.addEventListener('click', openAttachModal);
@@ -4414,6 +4953,9 @@ select.mini-select {
       toast('Initialization failed: ' + err.message, true);
     }
     setInterval(loadMcp, MCP_POLL_MS);
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) loadMcp();
+    });
   }
 
   init();

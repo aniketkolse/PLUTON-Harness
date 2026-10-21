@@ -80,6 +80,13 @@ export interface RunDetailView {
     totalCostUsd: number
     perMuse: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>
   }
+  /**
+   * True on a non-terminal run whose supervisor heartbeat is stale far beyond
+   * the ownership TTL (or absent): the run has no live driver. Observability
+   * only — clients recover via the existing manual resume path; nothing on
+   * the server fabricates a terminal state from this flag.
+   */
+  supervisorStale: boolean
 }
 
 export const WORKER_EVENT_TYPES = [
@@ -109,13 +116,13 @@ export interface WorkerSSEEvent {
 
 export type ServerSSEEvent =
   | { type: 'token'; sessionId: string; text: string }
-  | { type: 'turn_start'; sessionId: string; userText: string }
+  | { type: 'turn_start'; sessionId: string; userText: string; mode?: string }
   | { type: 'turn_end'; sessionId: string; interrupted: boolean; failed: boolean }
   | { type: 'tool'; sessionId: string; tool: ToolActivityState }
   | { type: 'usage'; sessionId: string; inputTokens: number; outputTokens: number; costUsd: number | null }
   | { type: 'approval_requested'; approval: ApprovalRecord }
   | { type: 'approval_decided'; approval: ApprovalRecord }
-  | { type: 'run_state'; runId: string; state: string; goal: string }
+  | { type: 'run_state'; runId: string; state: string; goal: string; error?: string; summary?: string }
   | { type: 'task_state'; taskId: string; runId: string; state: string; title: string }
   | { type: 'heartbeat'; timestamp: number }
   | WorkerSSEEvent

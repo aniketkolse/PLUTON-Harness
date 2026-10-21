@@ -22,13 +22,15 @@ import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath } from './security.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
-import { requestRunCancel, resumeRun, startRunInBackground } from '../cli/commands/run.ts'
+import { requestRunCancel, resumeRun, settleRunCrashed, startRunInBackground } from '../cli/commands/run.ts'
 import type { WorkerLifecycleEvent } from '../orchestrator/supervisor.ts'
 import type { ProjectContext } from '../cli/context.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
+import { redactProseSecrets } from '../util/redact.ts'
+import { stripControlChars } from '../util/sanitize.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../tools/bridge.ts'
 import { ToolHttpServer } from '../tools/http-transport.ts'
-import { wakeSupervisor } from '../orchestrator/supervisor.ts'
+import { isSupervisorStale, wakeSupervisor } from '../orchestrator/supervisor.ts'
 import type { TaskGraph } from '../orchestrator/task-graph.ts'
 import type {
   HealthResponse,
@@ -300,7 +302,7 @@ export class ApiRouter {
       const promptMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/prompt$/)
       if (promptMatch && method === 'POST') {
         const sessionId = promptMatch[1]!
-        const payload = await this.readJsonBody<{ text?: string }>(req)
+        const payload = await this.readJsonBody<{ text?: string; mode?: string }>(req)
         const userText = payload.text?.trim()
         if (!userText) {
           this.sendJson(res, 400, { ok: false, error: 'text is required' })
@@ -319,10 +321,10 @@ export class ApiRouter {
         }
 
         // Start processing asynchronously and return 202 Accepted
-        this.sendJson(res, 202, { ok: true, status: 'streaming', sessionId })
+        this.sendJson(res, 202, { ok: true, status: 'streaming', sessionId, mode: payload.mode ?? 'chat' })
 
         // Fire-and-forget prompt turn execution with real SSE streaming
-        void this.executePromptTurn(sessionId, session.museId, userText)
+        void this.executePromptTurn(sessionId, session.museId, userText, payload.mode)
         return true
       }
 
@@ -440,6 +442,11 @@ export class ApiRouter {
           edges,
           approvals,
           usage,
+          // Stranded-run observability (defect 2026-10-21): a non-terminal run
+          // whose supervisor heartbeat is far past the ownership TTL has no
+          // live driver — the SPA surfaces a "may be stranded" hint with the
+          // existing manual Resume path instead of ever fabricating a state.
+          supervisorStale: isSupervisorStale(run, Date.now()),
         }
         this.sendJson(res, 200, { ok: true, run: detail })
         return true
@@ -772,6 +779,15 @@ export class ApiRouter {
         // `/model` command performs) and applied to the live engine session.
         this.ctx.store.updateMuseModel(muse.id, requested)
         const restarted = await this.restartEngineSessionForMuse(muse.id, requested)
+        if (muse.id === 'coder' || muse.role === 'coder') {
+          const allMuses = this.ctx.store.listMuses()
+          for (const m of allMuses) {
+            if (m.id !== muse.id && (m.role === 'coder' || m.id.startsWith('worker-'))) {
+              this.ctx.store.updateMuseModel(m.id, requested)
+              await this.restartEngineSessionForMuse(m.id, requested)
+            }
+          }
+        }
         this.sendJson(res, 200, {
           ok: true,
           museId: muse.id,
@@ -951,21 +967,27 @@ export class ApiRouter {
   }
 
   /**
-   * Settle a supervised run whose start failed.
+   * Settle a supervised run whose start failed or whose background driver
+   * crashed. Both cases leave the run row durable but untouchable by its
+   * (dead or never-started) supervisor: the row MUST reach a terminal state or
+   * the client waits on a run that can never move.
    *
-   * `resumeRun` rejects before any task exists when the substrate is not
-   * usable: the Docker daemon is unreachable, the worker image is missing or
-   * drifted, the manager engine refuses to start. The run row is already
-   * durable at that point, so it MUST reach a terminal state: a run stuck in
-   * `created` has no task to time out and no `run.` event to emit, so the
-   * client would wait on a run that can never move.
+   * Start failures (`via='start_failure'`): `resumeRun` rejects before any
+   * task exists when the substrate is not usable — the Docker daemon is
+   * unreachable, the worker image is missing or drifted, the manager engine
+   * refuses to start. A run stuck in `created` has no task to time out and no
+   * `run.` event to emit.
+   *
+   * Background crashes (`via='background_crash'`): the in-process supervisor
+   * promise rejected after creation (defect 2026-10-21: the rejection was
+   * swallowed, leaving runs stranded `active` with a dead supervisor — live
+   * record `run_mvgh70nha675003a`).
    *
    * The run is failed, a `run.finished` event is appended (the event log is
    * what the SSE log-watcher derives `run_state` frames from), and the frame
    * is broadcast immediately so the client does not wait for the next poll.
    */
-  private failRun(runId: string, err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err)
+  private failRun(runId: string, err: unknown, via: 'start_failure' | 'background_crash' = 'start_failure'): void {
     const store = this.ctx.store
     let run: RunRecord
     try {
@@ -973,31 +995,19 @@ export class ApiRouter {
     } catch {
       return
     }
-    if (isTerminalRunState(run.state)) return
-    try {
-      store.setRunState(runId, 'failed', {
-        finalSummary: `supervised start failed: ${message}`,
-      })
-    } catch {
-      // A concurrent owner already moved the run to a terminal state; the
-      // durable state is the record and there is nothing left to settle.
-      return
-    }
-    try {
-      store.appendEvent({
-        projectId: this.ctx.projectId,
-        runId,
-        type: 'run.finished',
-        payload: { outcome: 'failure', via: 'start_failure', error: message },
-      })
-    } catch {
-      // The event log is best-effort here; the durable run state is the record.
-    }
+    const settled = run.state
+    // The durable settlement is shared with the CLI chat (same defect, same
+    // rule); the route layer only adds the immediate SSE frame below.
+    settleRunCrashed(store, this.ctx.projectId, runId, err, via)
+    if (settled === 'failed' || isTerminalRunState(settled)) return
+    const message = redactProseSecrets(stripControlChars((err instanceof Error ? err.message : String(err)).slice(0, 2_000)))
     this.ctx.broadcaster.broadcast({
       type: 'run_state',
       runId,
       state: 'failed',
-      goal: run.goal,
+      goal: stripControlChars(run.goal),
+      error: message,
+      summary: message,
     })
   }
 
@@ -1047,6 +1057,28 @@ export class ApiRouter {
   }
 
   /**
+   * Watch one background run start: while its driver's promise is alive the run
+   * belongs to the server's active-run map; when it settles the map entry goes
+   * away. A REJECTED promise used to be swallowed here — the run row never
+   * settled and the client waited on a run that could never move (defect
+   * 2026-10-21). The rejection is now durable evidence that this run has no
+   * live driver left, so it settles the row via `settleRunCrashed`
+   * (durable, terminal-safe, idempotent) in addition to the map cleanup.
+   */
+  private watchBackgroundRun(started: { runId: string; done: Promise<unknown> }): void {
+    this.activeRunTasks.set(started.runId, started.runId)
+    void started.done.then(
+      () => {
+        this.activeRunTasks.delete(started.runId)
+      },
+      (err: unknown) => {
+        this.activeRunTasks.delete(started.runId)
+        this.failRun(started.runId, err, 'background_crash')
+      },
+    )
+  }
+
+  /**
    * Build the MCP server specs handed to one engine session and register them
    * in the live registry.
    *
@@ -1087,15 +1119,7 @@ export class ApiRouter {
             { goal: input.goal, acceptance: input.acceptance },
             this.runDeps(),
           )
-          this.activeRunTasks.set(started.runId, started.runId)
-          void started.done.then(
-            () => {
-              this.activeRunTasks.delete(started.runId)
-            },
-            () => {
-              this.activeRunTasks.delete(started.runId)
-            },
-          )
+          this.watchBackgroundRun(started)
           return { runId: started.runId }
         },
       })
@@ -1241,7 +1265,12 @@ export class ApiRouter {
     this.toolHttp?.unregister(reg.token)
   }
 
-  private async executePromptTurn(sessionId: string, museId: string, userText: string): Promise<void> {
+  private async executePromptTurn(
+    sessionId: string,
+    museId: string,
+    userText: string,
+    mode?: string,
+  ): Promise<void> {
     const store = this.ctx.store
     const broadcaster = this.ctx.broadcaster
 
@@ -1251,7 +1280,7 @@ export class ApiRouter {
       role: 'user',
       text: userText,
     })
-    broadcaster.broadcast({ type: 'turn_start', sessionId, userText })
+    broadcaster.broadcast({ type: 'turn_start', sessionId, userText, mode: mode ?? 'chat' })
 
     const muse = store.getMuse(museId)
     if (!muse) {
@@ -1326,7 +1355,11 @@ export class ApiRouter {
     let failed = false
 
     try {
-      for await (const ev of entry.session.sendPrompt({ text: userText })) {
+      const promptPayload = mode === 'plan'
+        ? `[PLAN MODE] Please formulate a detailed architectural and implementation plan for the following goal without making workspace edits:\n\n${userText}`
+        : userText
+
+      for await (const ev of entry.session.sendPrompt({ text: promptPayload })) {
         if (!entry.busy) {
           interrupted = true
           break

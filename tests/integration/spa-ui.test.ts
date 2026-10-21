@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
+import { PROSE_SECRET_PATTERNS } from '../../src/util/redact.ts'
 
 /**
  * PLUTON SPA â€” reference UI replacement and functional integration.
@@ -216,6 +217,76 @@ describe('PLUTON SPA â€” model switch', () => {
 })
 
 describe('PLUTON SPA — supervised build control', () => {
+  it('surfaces a stranded run in run detail (supervisorStale) without fabricating any state', async () => {
+    // Defect 2026-10-21: a run whose supervisor died mid-run stayed `active`
+    // forever with no signal other than reading raw DB heartbeats. The run
+    // detail API now exposes the stranded condition; recovery stays the
+    // operator's explicit Resume decision — nothing on the server writes a
+    // terminal state from this flag.
+    const { rootDir, appServer } = await setupTestProject()
+    const server = await appServer
+    const loaded = loadConfig(rootDir)
+    const { store, projectId } = bootstrapStore(loaded)
+    try {
+      const run = store.createRun({
+        projectId,
+        goal: 'stranded-run observability test',
+        origin: 'api',
+        requestedBy: 'operator:ui',
+        managerMuseId: 'supervisor',
+        acceptanceCriteria: [],
+        budget: {
+          maxConcurrentWorkers: 2,
+          maxTasks: 10,
+          maxDelegationDepth: 2,
+          maxRunMinutes: 10,
+          defaultTaskMinutes: 5,
+        },
+      })
+
+      const readDetail = async (): Promise<{ state: string; supervisorStale: boolean }> => {
+        const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { run: { run: { state: string }; supervisorStale: boolean } }
+        return { state: body.run.run.state, supervisorStale: body.run.supervisorStale }
+      }
+
+      // A live claim with a fresh heartbeat is not stranded.
+      store.setRunState(run.id, 'active')
+      store.claimRunSupervisor(run.id, { pid: 4242, ttlMs: 90_000 })
+      let detail = await readDetail()
+      expect(detail.state).toBe('active')
+      expect(detail.supervisorStale).toBe(false)
+
+      // Age the heartbeat far beyond the ownership TTL: stranded.
+      store.db
+        .prepare('UPDATE runs SET supervisor_heartbeat_at = ? WHERE id = ?')
+        .run(Date.now() - 200_000, run.id)
+      detail = await readDetail()
+      expect(detail.state).toBe('active') // still honestly non-terminal
+      expect(detail.supervisorStale).toBe(true)
+
+      // A run claimed but still pre-heartbeat is not stranded; a STARTED run
+      // with no heartbeat at all means its owner died before renewing once.
+      store.db.prepare('UPDATE runs SET supervisor_heartbeat_at = NULL WHERE id = ?').run(run.id)
+      detail = await readDetail()
+      expect(detail.supervisorStale).toBe(true)
+
+      // A terminal run is never reported stranded, whatever its heartbeat was.
+      store.db
+        .prepare('UPDATE runs SET state = ?, supervisor_heartbeat_at = ? WHERE id = ?')
+        .run('cancelled', Date.now() - 900_000, run.id)
+      detail = await readDetail()
+      expect(detail.state).toBe('cancelled')
+      expect(detail.supervisorStale).toBe(false)
+    } finally {
+      store.close()
+      await server.close()
+    }
+  })
+
   it('settles a run whose supervised start failed, instead of leaving it pending forever', async () => {
     // A container-mode project whose worker image does not exist: the
     // supervised start cannot succeed, so the run MUST reach a terminal
@@ -437,6 +508,387 @@ describe('PLUTON SPA â€” replaced assets', () => {
       expect(js).not.toContain('const sessionsData')
       expect(js).not.toContain('const mcpServers = [')
       expect(js).not.toContain('let availableModels = [')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('supports Plan, Build, and Chat mode switching with proper payload propagation and indicator styles', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Two primary mode controls exist: Chat button followed by Plan/Build toggle button
+      expect(html).toContain('id="modeChatBtn"')
+      expect(html).toContain('id="modeToggleBtn"')
+      expect(html).toContain('id="modeToggleLabel"')
+      expect(html).not.toContain('id="modePlanBtn"')
+      expect(html).not.toContain('id="modeBuildBtn"')
+      // Dead JS wiring for the removed buttons is gone too (Low C)
+      expect(js).not.toContain('modePlanBtn')
+      expect(js).not.toContain('modeBuildBtn')
+
+      // Mode-aware thinking indicators
+      expect(css).toContain('.status-thinking.mode-plan')
+      expect(css).toContain('.status-thinking.mode-build')
+      expect(css).toContain('--accent-plan:')
+      expect(css).toContain('--accent-build:')
+
+      // Prompt dispatch sends mode in payload
+      expect(js).toContain('mode: state.mode')
+
+      // Mode switching updates UI state without losing draft
+      expect(js).toContain("setMode('plan')")
+      expect(js).toContain("setMode('build')")
+      expect(js).toContain("setMode('chat')")
+
+      // Jump to latest control and auto-scroll threshold
+      expect(html).toContain('id="btnJumpToLatest"')
+      expect(js).toContain('btnJumpToLatest')
+
+      // Connection status hidden during normal operation
+      expect(css).toMatch(/\.conn\s*\{[^}]*display:\s*none/)
+
+      // 100% width conversation area when sidebar is collapsed
+      expect(css).toContain('#leftSidebar.is-collapsed ~ .app-main .messages')
+
+      // Agent Model Configuration section in Settings
+      expect(html).toContain('Agent Model Configuration')
+
+      // Activity timeline with collapsible details and secret redaction
+      expect(js).toContain('activity-timeline-node')
+      expect(js).toContain('redactSecrets')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('enforces coworker presentation ranking in Settings (Manager, QA, Researcher, Coder, Reviewer)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Presentation order ranking exists. The former flat
+      // COWORKER_PRESENTATION_ORDER array was defined but never read —
+      // coworkerRank computes the order from role/id/name — and was removed;
+      // nothing may reintroduce an unused ordering table.
+      expect(js).not.toContain('COWORKER_PRESENTATION_ORDER')
+      expect(js).toContain('coworkerRank')
+      // One identity rule drives Settings display AND model fan-out: the
+      // coder/worker group is the rank-4 bucket; rank orders, never hides.
+      expect(js).toContain('function isWorkerAgent(m)')
+      expect(js).toContain('coworkerRank(m) === 4')
+      expect(js).toContain('(workers share one model)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('keeps long sessions responsive: streaming renders coalesce, histories stay bounded, background tabs skip the MCP poll', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Streaming coalesces to one markdown render per animation frame:
+      // appendStreamingToken accumulates and schedules, it no longer runs the
+      // full renderMarkdown(state.streamingText) per token (that was O(n^2)
+      // across a long stream).
+      expect(js).toContain('function flushStreamingToken')
+      expect(js).toContain('function scheduleStreamFlush')
+      expect(js).toContain('streamFlushPending')
+
+      // Bounded live histories: the transcript and each worker stream drop
+      // their oldest nodes (follow-guarded), and the retained worker log state
+      // is capped. Bulk session replays set a guard so full history renders.
+      expect(js).toContain('function trimMessagesList')
+      expect(js).toContain('MAX_MESSAGES_DOM')
+      expect(js).toContain('MAX_WORKER_STREAM_ENTRIES')
+      expect(js).toContain('state.bulkRendering')
+
+      // MCP poll does no work in background tabs and skips unchanged
+      // registries; returning to the tab re-runs one load immediately.
+      expect(js).toContain('lastMcpSnapshot')
+      expect(js).toContain("document.addEventListener('visibilitychange'")
+      expect(js).toContain('if (document.hidden) return')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('provides VS Code-inspired file explorer with SVG icons and error retry capabilities', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // The misleading workspace-picker input was removed: the server pins the
+      // workspace, so no client-side input may project a different folder.
+      expect(html).not.toContain('pcWorkspaceInput')
+
+      // SVG file icons mapping present in JS (no emoji as file icons)
+      expect(js).toContain('getFileIconSvg')
+      expect(js).toContain('loadFilesList')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('removes unwanted blue outline on composer-textarea while preserving accessible focus on container', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+
+      // Textarea has outline: none
+      expect(css).toMatch(/\.composer-textarea\s*\{[^}]*outline:\s*none/)
+      // Container has focus-within styling for accessible keyboard focus
+      expect(css).toMatch(/\.composer:focus-within\s*\{[^}]*border-color:/)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('explains the pinned workspace, supports split-view toggle, and keeps responsive viewport rules', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Split view toggle button in header
+      expect(html).toContain('id="btnToggleSplitView"')
+      expect(js).toContain('btnToggleSplitView')
+
+      // The workspace pin explainer replaced the directory picker: no client
+      // workspace-selection API exists, so the UI explains the limitation
+      // instead of pretending a folder choice changed the server workspace.
+      expect(js).toContain('explainWorkspacePin')
+      expect(js).not.toContain('showDirectoryPicker')
+
+      // Responsive media queries covering breakpoints for desktop, tablet, and mobile
+      expect(css).toContain('@media (max-width: 1000px)')
+      expect(css).toContain('@media (max-width: 720px)')
+      expect(css).toContain('@media (max-width: 480px)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('enforces neutral grey theme without visible purple accents or hardcoded purple hexes', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+
+      // Root token for verify-assets remains defined as neutral grey
+      expect(css).toContain('--accent-purple: #71717a;')
+      expect(css).toContain('--accent-purple-deep: #52525b;')
+      expect(css).toContain('--accent-purple-soft: #a1a1aa;')
+
+      // No lingering legacy purple hex codes in CSS
+      const forbiddenPurples = ['#7c3aed', '#6d28d9', '#8b5cf6', '#a855f7', '#3b2d63', '#2f2749', '#1b172a', '#14121f', '#31274f']
+      for (const hex of forbiddenPurples) {
+        expect(css.toLowerCase()).not.toContain(hex)
+      }
+
+      // ChatGPT-style charcoal/neutral background variables are used
+      expect(css).toContain('--bg-main: #111114;')
+      expect(css).toContain('--bg-sidebar: #17171a;')
+      expect(css).toContain('--bg-surface: #1e1e24;')
+      expect(css).toContain('--border: #2a2a30;')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('stabilizes scroll tracking and toggles jump-to-latest when new content arrives scrolled up', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Scroll threshold is between 60-90px
+      expect(js).toContain('box.clientHeight) <= 80')
+      // maybeScroll reveals or hides jumpBtn based on scroll position
+      expect(js).toContain('jumpBtn.classList.remove(\'is-hidden\')')
+      expect(js).toContain('jumpBtn.classList.add(\'is-hidden\')')
+      // Smooth scroll on jump to latest
+      expect(js).toContain("behavior: 'smooth'")
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('redacts sensitive API tokens, passwords, and secrets in activity details', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Function redactSecrets is defined and bound to tool card summary and output
+      expect(js).toContain('function redactSecrets(text)')
+      expect(js).toContain('redactSecrets(tool.summary')
+      expect(js).toContain('redactSecrets(tool.output')
+
+      // Verify regex patterns inside js
+      expect(js).toContain('sk-[REDACTED]')
+      expect(js).toContain('$1[REDACTED]')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('propagates real sanitized failure summaries in applyRunState instead of generic run goal text', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // applyRunState checks error before summary before goal
+      expect(js).toContain('error || summary || (goal ? \'Goal: \' + goal : \'\')')
+      expect(js).toContain('labels[runState]')
+      expect(js).toContain('TERMINAL_RUN_STATES[runState]')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('pins workspace labels to server-confirmed state and explains the pin on click (Medium A)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/workspace`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(res.status).toBe(200)
+      const data = (await res.json()) as { ok: boolean; workspace: { name: string; rootDir: string } }
+      expect(data.ok).toBe(true)
+      expect(data.workspace.rootDir.length).toBeGreaterThan(0)
+
+      // No client-side selection artifacts remain: nothing in the page may
+      // relabel the workspace to a folder the server never confirmed.
+      expect(html).not.toContain('webkitdirectory')
+      expect(js).not.toContain('showDirectoryPicker')
+      expect(js).not.toContain('openPcWorkspacePicker')
+
+      // Labels are written ONLY from /api/workspace state...
+      expect(js).toContain('state.workspace.rootDir')
+      // ...and the pin explainer states the real contract (restart to switch).
+      expect(js).toContain('Workspace is pinned to the server project directory')
+      expect(js).toContain('restart the server in the target project instead')
+      expect(html).toContain('Workspace (pinned by the server)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('tracks per-agent model fan-out outcomes and surfaces partial failures (Medium B)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Per-target outcome tracking exists and the swallow-and-warn catch is gone
+      expect(js).toContain('var succeeded = []')
+      expect(js).toContain('var failed = []')
+      expect(js).not.toContain("console.warn('Failed syncing model to '")
+
+      // State updates only for confirmed targets: a failed worker keeps the
+      // previous model and stays visibly identifiable on re-render.
+      expect(js).toContain('okSet[m.id]')
+
+      // Out-of-order or stale fan-out completions cannot clobber a newer selection.
+      expect(js).toContain('switchSeq !== modelSwitchSeq')
+
+      // Every target is addressed by stable id, URL-encoded.
+      expect(js).toContain("'/api/muses/' + encodeURIComponent(tid) + '/model'")
+
+      // Full success, total failure, and partial failure each have an honest
+      // toast; partial failure never claims success or a rollback.
+      expect(js).toContain('agents updated')
+      expect(js).toContain('Model switch failed for ')
+      expect(js).toContain('Model switch partially failed: ')
+      expect(js).toContain('Failed (kept previous model): ')
+
+      // Non-worker agents never fan out: their target list is exactly [museId].
+      expect(js).toContain('? workerFanoutTargets(muses, museId) : [museId]')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('renders every addressable agent and guards unaddressable entries (Medium C + Low D)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // The rank-bucket dedupe that silently hid distinct agents is gone.
+      expect(js).not.toContain('seenRanks')
+      expect(js).not.toContain('distinctMuses')
+
+      // Rank orders the list; id-less entries are filtered out because they
+      // cannot be addressed by the API. Every surviving agent stays visible,
+      // with a stable secondary sort by identity.
+      expect(js).toContain("String(m.id || m.slug || '') !== ''")
+      expect(js).toContain('.sort(function (a, b) { return (a.rank - b.rank) ||')
+      expect(js).toContain('No addressable agents configured')
+
+      // Fan-out skips empty ids instead of targeting them.
+      expect(js).toContain("String((m && (m.id || m.slug)) || '')")
+      expect(js).toContain("id !== '' && id !== changedId && isWorkerAgent(m)")
+
+      // Unknown/missing roles and missing display names render safely instead
+      // of collapsing unrelated agents together.
+      expect(js).toContain("m.role || 'unknown role'")
+      expect(js).toContain('escapeHtml(m.displayName || m.id)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('redacts credential-shaped terminal run-state text while escaping stays separate (Low B)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // applyRunState redacts the composed detail BEFORE rendering; the
+      // markdown pipeline still HTML-escapes afterwards (independent layers).
+      expect(js).toContain('detail = redactSecrets(String(detail))')
+      // The markdown renderer escapes as its first step.
+      const inlineIdx = js.indexOf('function inlineMarkdown(src)')
+      expect(inlineIdx).toBeGreaterThan(-1)
+      expect(js.indexOf('var out = escapeHtml(src);', inlineIdx)).toBeGreaterThan(inlineIdx)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('mirrors the server prose-secret redaction patterns in the SPA (documented duplication, Low E)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // The server redacts at-rest surfaces and the SPA redacts at display.
+      // Both copies must keep the same three patterns in lockstep — changing
+      // one side fails this test until the other side is updated (the sync
+      // requirement is documented in both files).
+      expect(PROSE_SECRET_PATTERNS).toHaveLength(3)
+      for (const re of PROSE_SECRET_PATTERNS) {
+        expect(js).toContain(re.source)
+      }
+      expect(js).toContain('PROSE_SECRET_PATTERNS')
     } finally {
       await server.close()
     }

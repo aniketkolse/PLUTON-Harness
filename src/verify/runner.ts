@@ -441,8 +441,11 @@ export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | nu
   const allCompleted = tasks.every((t) => t.state === 'completed')
   const state: RunState = allCompleted ? 'completed' : 'failed'
   store.setRunState(runId, state, {
+    // The manager's answer (persisted when the run entered `verifying`) is the
+    // run's final summary — the verification label only fills in when no
+    // answer was ever produced.
     finalSummary: allCompleted
-      ? `${String(tasks.length)}/${String(tasks.length)} tasks verified`
+      ? (run.finalSummary ?? `${String(tasks.length)}/${String(tasks.length)} tasks verified`)
       : 'verification failed',
   })
   store.appendEvent({

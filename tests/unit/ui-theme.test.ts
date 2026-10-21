@@ -4,26 +4,26 @@ import { stripAnsi } from '../../src/tui/width.ts'
 
 describe('UITheme system (Phase 1)', () => {
   it('defines exact hex color palette tokens', () => {
-    expect(PALETTE.bg).toBe('#0B0C10')
-    expect(PALETTE.primaryAccent).toBe('#8B5CF6')
-    expect(PALETTE.accentLight).toBe('#A78BFA')
+    expect(PALETTE.bg).toBe('#111114')
+    expect(PALETTE.primaryAccent).toBe('#71717A')
+    expect(PALETTE.accentLight).toBe('#A1A1AA')
     expect(PALETTE.cyan).toBe('#38BDF8')
-    expect(PALETTE.info).toBe('#7C8CFF')
+    expect(PALETTE.info).toBe('#94A3B8')
     expect(PALETTE.link).toBe('#60A5FA')
     expect(PALETTE.success).toBe('#34D399')
     expect(PALETTE.error).toBe('#F87171')
     expect(PALETTE.warning).toBe('#FBBF24')
-    expect(PALETTE.textPrimary).toBe('#F3F0FA')
-    expect(PALETTE.textSecondary).toBe('#E2E0EC')
-    expect(PALETTE.textMuted).toBe('#A49FB4')
-    expect(PALETTE.textDim).toBe('#8E8A9F')
-    expect(PALETTE.border).toBe('#2A2F45')
+    expect(PALETTE.textPrimary).toBe('#F4F4F5')
+    expect(PALETTE.textSecondary).toBe('#E4E4E7')
+    expect(PALETTE.textMuted).toBe('#A1A1AA')
+    expect(PALETTE.textDim).toBe('#71717A')
+    expect(PALETTE.border).toBe('#27272A')
   })
 
   it('generates 24-bit truecolor escape sequences when colorLevel is truecolor', () => {
     const theme = getUITheme({ colorLevel: 'truecolor', unicode: true })
     const painted = theme.paint('accent', 'Pluton')
-    expect(painted).toContain('\x1b[38;2;139;92;246m')
+    expect(painted).toContain('\x1b[38;2;113;113;122m')
     expect(painted).toContain('\x1b[39m')
     expect(stripAnsi(painted)).toBe('Pluton')
   })
@@ -71,5 +71,22 @@ describe('UITheme system (Phase 1)', () => {
     expect(stripAnsi(theme.paint('link', 'src/cli/main.ts'))).toBe('src/cli/main.ts')
     expect(stripAnsi(theme.paint('info', 'important info'))).toBe('important info')
     expect(stripAnsi(theme.paint('textMuted', 'secondary text'))).toBe('secondary text')
+  })
+
+  it('resolves textMuted and textDim through the truecolor HEX_RGB table', () => {
+    // Mechanism pin: color lookup is HEX-keyed (role -> ROLE_HEX hex ->
+    // HEX_RGB rgb). #A1A1AA / #71717A are already keyed under accentLight /
+    // primaryAccent, so textMuted/textDim resolve through those shared
+    // entries — adding per-name keys would be duplicate properties on the
+    // same hex (TS1117). This test pins the truecolor path for these roles:
+    // textMuted #A1A1AA -> rgb(161,161,170), textDim #71717A -> rgb(113,113,122).
+    const theme = getUITheme({ colorLevel: 'truecolor', unicode: true })
+    const muted = theme.paint('textMuted', 'muted agent note')
+    expect(muted).toContain('\x1b[38;2;161;161;170m')
+    const dim = theme.paint('textDim', 'dimmed label')
+    expect(dim).toContain('\x1b[38;2;113;113;122m')
+    const dimRole = theme.paint('dim', 'alias')
+    expect(dimRole).toContain('\x1b[38;2;113;113;122m')
+    expect(stripAnsi(muted + dim + dimRole)).toBe('muted agent notedimmed labelalias')
   })
 })
