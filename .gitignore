@@ -12,6 +12,7 @@ coverage/
 # Local scratch (agent session artifacts)
 .pluton-tmp/
 graphify-out/
+/.superpowers/
 
 # Reference checkouts for reverse engineering (reproducible via documented SHAs)
 references/
