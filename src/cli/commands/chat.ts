@@ -20,6 +20,13 @@ import type { SandboxManager } from '../../sandbox/types.ts'
 import { sandboxContainerName } from '../../sandbox/types.ts'
 import { bootstrapStore } from '../../bootstrap.ts'
 import type { Store } from '../../store/store.ts'
+import { nativeAdapterFor } from '../../execution/adapter.ts'
+import {
+  appendExecutionEvent,
+  createNativeExecutionProvider,
+  nativeSpecForMuse,
+} from '../../execution/factory.ts'
+import type { NativeExecutionProvider } from '../../execution/native.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
 import type { OperatorToolEnv } from '../../tools/operator-catalog.ts'
@@ -52,6 +59,8 @@ export interface ChatDeps {
   sandboxManager?: SandboxManager
   workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
   dockerSpawn?: AcpSpawnFn
+  /** Test seam: provider injected instead of constructing one from config. */
+  nativeProvider?: NativeExecutionProvider
   io?: ChatIo
   startRun?: OperatorToolEnv['startRun']
   poll?: ChatSessionDeps['poll']
@@ -62,7 +71,7 @@ export interface ChatPlan {
   museSlug: string
   engineKind: string
   model: string
-  mode: 'docker' | 'local-process'
+  mode: 'docker' | 'local-process' | 'native'
   containerName: string | null
   sessionId: string
   resumed: boolean
@@ -124,6 +133,7 @@ export async function chatRun(
   deps: ChatDeps = {},
 ): Promise<{ exitCode: number; plan: ChatPlan }> {
   const { store, projectId } = bootstrapStore(ctx.loaded)
+  let nativeProvider: NativeExecutionProvider | null = deps.nativeProvider ?? null
 
   try {
     const muse = resolveChatMuse(ctx, store, opts.museRef, projectId)
@@ -131,8 +141,10 @@ export async function chatRun(
     const storedMessages = store.listChatMessages(session.id)
     const messageCount = storedMessages.length
 
-    const isDocker = ctx.loaded.config.sandbox.kind === 'docker'
-    const mode: 'docker' | 'local-process' = isDocker ? 'docker' : 'local-process'
+    const sandboxKind = ctx.loaded.config.sandbox.kind
+    const isDocker = sandboxKind === 'docker'
+    const mode: 'docker' | 'local-process' | 'native' =
+      sandboxKind === 'docker' ? 'docker' : sandboxKind === 'native' ? 'native' : 'local-process'
     const containerName = isDocker ? sandboxContainerName(projectId, muse.id) : null
 
     const basePlan: ChatPlan = {
@@ -183,6 +195,36 @@ export async function chatRun(
         { museIds: [muse.id] },
       )
       adapter = deps.adapterFor?.(muse) ?? containerAdapterFor(muse, contexts, deps.dockerSpawn)
+    } else if (sandboxKind === 'native') {
+      if (deps.adapterFor !== undefined) {
+        adapter = deps.adapterFor(muse)
+      } else {
+        nativeProvider =
+          deps.nativeProvider ??
+          createNativeExecutionProvider({
+            config: ctx.loaded.config,
+            rootDir: ctx.rootDir,
+            onEvent: (event) => {
+              appendExecutionEvent(store, projectId, null, event)
+            },
+          })
+        const provider = nativeProvider
+        adapter = nativeAdapterFor(muse, {
+          provider,
+          isolatedCheckout: false,
+          specFor: (req) =>
+            nativeSpecForMuse({
+              config: ctx.loaded.config,
+              rootDir: ctx.rootDir,
+              projectId,
+              muse,
+              workdir: req.workdir,
+              engineHome: req.configDir,
+              isolatedCheckout: false,
+              sessionKind: 'chat',
+            }),
+        })
+      }
     } else {
       createSandboxManager(ctx.loaded.config)
       adapter = deps.adapterFor?.(muse) ?? engineAdapterForMuse(muse)
@@ -868,6 +910,7 @@ export async function chatRun(
 
     return { exitCode, plan }
   } finally {
+    await nativeProvider?.close()
     store.close()
   }
 }

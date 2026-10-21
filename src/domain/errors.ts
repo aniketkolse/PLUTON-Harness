@@ -17,6 +17,7 @@ export type ErrorCode =
   | 'engine_auth_missing'
   | 'engine_protocol_error'
   | 'sandbox_unavailable'
+  | 'execution_failed'
   | 'terminal_unavailable'
   | 'workspace_error'
   | 'verification_failed'
@@ -172,6 +173,34 @@ export class SandboxUnavailableError extends PlutonError {
   constructor(message: string, options: FixableErrorOptions = {}) {
     super('sandbox_unavailable', options.fix ? `${message} Fix: ${options.fix}` : message, options)
     this.name = 'SandboxUnavailableError'
+  }
+}
+
+/** The execution provider failed, closed, or timed out without a safe retry. */
+export class ExecutionError extends PlutonError {
+  constructor(message: string, options: PlutonErrorOptions = {}) {
+    super('execution_failed', message, options)
+    this.name = 'ExecutionError'
+  }
+}
+
+/** The execution session was closed and refuses to spawn more processes. */
+export class ExecutionClosedError extends ExecutionError {
+  constructor(sessionId: string) {
+    super(`native execution session '${sessionId}' is closed; no further processes may be spawned`, {
+      details: { sessionId },
+    })
+    this.name = 'ExecutionClosedError'
+  }
+}
+
+/** The execution session exceeded its configured wall-clock bound. */
+export class ExecutionTimeoutError extends ExecutionError {
+  constructor(sessionId: string, timeoutMs: number) {
+    super(`native execution session '${sessionId}' timed out after ${String(timeoutMs)}ms`, {
+      details: { sessionId, timeoutMs },
+    })
+    this.name = 'ExecutionTimeoutError'
   }
 }
 

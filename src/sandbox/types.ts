@@ -44,7 +44,8 @@ export interface SandboxSpec {
 
 export interface SandboxProbe {
   available: boolean
-  kind: SandboxManager['kind']
+  /** 'native' is reported by the host execution provider (no container exists). */
+  kind: SandboxManager['kind'] | 'native'
   /** Human detail (server version, or why it is unavailable). */
   detail: string
   /** Exact remediation when unavailable. */

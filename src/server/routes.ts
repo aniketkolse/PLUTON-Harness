@@ -15,7 +15,14 @@ import { engineAdapterForMuse } from '../engines/approval.ts'
 import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
 import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
-import type { EngineSession, McpServerSpec } from '../engines/contract/types.ts'
+import type { EngineAdapter, EngineSession, McpServerSpec } from '../engines/contract/types.ts'
+import { nativeAdapterFor } from '../execution/adapter.ts'
+import {
+  appendExecutionEvent,
+  createNativeExecutionProvider,
+  nativeSpecForMuse,
+} from '../execution/factory.ts'
+import type { NativeExecutionProvider } from '../execution/native.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { run as execRun } from '../util/exec.ts'
 import { PLUTON_VERSION } from '../version.ts'
@@ -104,6 +111,8 @@ export class ApiRouter {
   private readonly mcpRegistrations = new Map<string, McpRegistration>()
   /** Runs started from the SPA's Build mode, so Stop can cancel the right one. */
   private readonly activeRunTasks = new Map<string, string>()
+  /** Lazily created host execution provider for native-mode chat (never Docker). */
+  private nativeProvider: NativeExecutionProvider | null = null
 
   /** Runtime settings and account state for SPA configuration (ADR-0014). */
   private accountSettings = {
@@ -762,7 +771,7 @@ export class ApiRouter {
           return true
         }
         const isCustom = this.customModels.some((m) => m.id === requested)
-        const adapter = engineAdapterForMuse(muse)
+        const adapter = this.adapterForMuse(muse)
         if (!isCustom && adapter.capabilities().modelList) {
           const available = await adapter.listModels()
           const known = available.some((m) => m.id === requested || m.label === requested)
@@ -1193,6 +1202,43 @@ export class ApiRouter {
   }
 
   /**
+   * Build the engine adapter for the configured execution provider. Docker and
+   * acknowledged local-process keep their existing host/container adapters;
+   * native wraps real engine spawns in the native provider so SPA chat cannot
+   * bypass the execution policy through a host adapter.
+   */
+  private adapterForMuse(muse: MuseRecord): EngineAdapter {
+    if (this.ctx.loaded.config.sandbox.kind !== 'native') {
+      return engineAdapterForMuse(muse)
+    }
+    if (this.nativeProvider === null) {
+      this.nativeProvider = createNativeExecutionProvider({
+        config: this.ctx.loaded.config,
+        rootDir: this.ctx.loaded.rootDir,
+        onEvent: (event) => {
+          appendExecutionEvent(this.ctx.store, this.ctx.projectId, null, event)
+        },
+      })
+    }
+    const provider = this.nativeProvider
+    return nativeAdapterFor(muse, {
+      provider,
+      isolatedCheckout: false,
+      specFor: (req) =>
+        nativeSpecForMuse({
+          config: this.ctx.loaded.config,
+          rootDir: this.ctx.loaded.rootDir,
+          projectId: this.ctx.projectId,
+          muse,
+          workdir: req.workdir,
+          engineHome: req.configDir,
+          isolatedCheckout: false,
+          sessionKind: 'chat',
+        }),
+    })
+  }
+
+  /**
    * Apply a new model to a Muse's live engine session.
    *
    * Mirrors `ChatSession.switchModel` (`src/chat/session.ts:232-259`): the old
@@ -1212,7 +1258,7 @@ export class ApiRouter {
       this.dropMcpRegistration(sessionId)
       const muse = this.ctx.store.getMuse(museId)
       if (muse === null) continue
-      const adapter = engineAdapterForMuse(muse)
+      const adapter = this.adapterForMuse(muse)
       const approvals = createEngineApprovalChannel({
         store: this.ctx.store,
         projectId: this.ctx.projectId,
@@ -1235,7 +1281,7 @@ export class ApiRouter {
           muse: { id: muse.id, slug: muse.slug, role: muse.role, model },
           workdir: this.ctx.loaded.rootDir,
           env: {},
-          configDir: join(this.ctx.loaded.rootDir, '.pluton', 'engine-homes', muse.slug),
+          configDir: muse.engineHome,
           instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
@@ -1289,7 +1335,7 @@ export class ApiRouter {
       return
     }
 
-    const adapter = engineAdapterForMuse(muse)
+    const adapter = this.adapterForMuse(muse)
 
     let entry = this.activeEngineSessions.get(sessionId)
     if (!entry) {
@@ -1326,7 +1372,7 @@ export class ApiRouter {
           },
           workdir: this.ctx.loaded.rootDir,
           env: {},
-          configDir: join(this.ctx.loaded.rootDir, '.pluton', 'engine-homes', muse.slug),
+          configDir: muse.engineHome,
           instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
@@ -1522,6 +1568,11 @@ export class ApiRouter {
       }
     }
     this.activeEngineSessions.clear()
+    if (this.nativeProvider !== null) {
+      const provider = this.nativeProvider
+      this.nativeProvider = null
+      await provider.close()
+    }
     for (const sessionId of [...this.mcpRegistrations.keys()]) {
       this.dropMcpRegistration(sessionId)
     }

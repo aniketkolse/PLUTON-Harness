@@ -73,6 +73,11 @@ export async function attachMuse(
         `muse '${muse.id}' is disabled (it is no longer in pluton.yaml) — add it back with \`pluton muse create\` or attach to an enabled muse`,
       )
     }
+    if (ctx.loaded.config.sandbox.kind !== 'docker') {
+      throw new ValidationError(
+        `pluton attach requires container-mode Muses (sandbox.kind: docker): ${ctx.loaded.config.sandbox.kind} sessions have no Muse container or tmux session`,
+      )
+    }
     const target: AttachTarget = {
       containerName: sandboxContainerName(projectId, muse.id),
       sessionName: tmuxSessionName(ctx.loaded.config.project.name, muse.id),

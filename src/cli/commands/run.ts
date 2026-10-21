@@ -16,6 +16,13 @@ import type { AcpSpawnFn } from '../../engines/acp/client.ts'
 import { engineAdapterForMuse, type EngineIsolationFacts } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
+import { nativeAdapterFor } from '../../execution/adapter.ts'
+import {
+  appendExecutionEvent,
+  createNativeExecutionProvider,
+  nativeSpecForMuse,
+} from '../../execution/factory.ts'
+import type { NativeExecutionProvider } from '../../execution/native.ts'
 import {
   runBudgetFromRuntime,
   supervisorSettingsFromRuntime,
@@ -323,6 +330,39 @@ export function containerAdapterFor(
   })
 }
 
+/**
+ * Create the per-run native provider before any run row exists. Config gates
+ * (acknowledgements, network policy) throw here, so a rejected native config
+ * never leaves a started run behind. The event sink is bound to the run id once
+ * the row is created; session preparation happens later.
+ */
+interface RunNativeProvider {
+  provider: NativeExecutionProvider
+  setRunId: (runId: string) => void
+}
+
+function createRunNativeProvider(
+  ctx: ProjectContext,
+  store: Store,
+  projectId: string,
+): RunNativeProvider | null {
+  if (ctx.loaded.config.sandbox.kind !== 'native') return null
+  let runId: string | null = null
+  const provider = createNativeExecutionProvider({
+    config: ctx.loaded.config,
+    rootDir: ctx.rootDir,
+    onEvent: (event) => {
+      appendExecutionEvent(store, projectId, runId, event)
+    },
+  })
+  return {
+    provider,
+    setRunId: (id) => {
+      runId = id
+    },
+  }
+}
+
 export function createRunSupervisor(args: {
   ctx: ProjectContext
   store: Store
@@ -333,6 +373,7 @@ export function createRunSupervisor(args: {
   http: ToolHttpServer
   bridgeUrl: string
   containerContexts: Map<string, DockerExecContext> | null
+  nativeProvider?: NativeExecutionProvider | null
   deps: RunDeps
   diagnostic: (line: string) => void
   skipManager?: boolean
@@ -344,6 +385,24 @@ export function createRunSupervisor(args: {
   if (supervisorAdapterFor === undefined && containerContexts !== null) {
     const contexts = containerContexts
     supervisorAdapterFor = (muse, session) => containerAdapterFor(muse, contexts, deps.dockerSpawn, session)
+  } else if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
+    const nativeProvider = args.nativeProvider
+    supervisorAdapterFor = (muse, session) =>
+      nativeAdapterFor(muse, {
+        provider: nativeProvider,
+        isolatedCheckout: session.isolatedCheckout,
+        specFor: (req) =>
+          nativeSpecForMuse({
+            config: ctx.loaded.config,
+            rootDir: ctx.rootDir,
+            projectId,
+            muse,
+            workdir: req.workdir,
+            engineHome: req.configDir,
+            isolatedCheckout: session.isolatedCheckout,
+            sessionKind: 'run',
+          }),
+      })
   }
   // One manager instance for both the supervisor's checkout provisioning and
   // the per-task bridges' result reads (changed files from real checkouts).
@@ -426,7 +485,11 @@ export function startRunInBackground(
   const runtime = ctx.loaded.config.runtime
   const budget = runBudgetFromRuntime(runtime)
 
-  if (ctx.loaded.config.sandbox.kind !== 'docker') {
+  let native: RunNativeProvider | null = null
+  if (ctx.loaded.config.sandbox.kind === 'native') {
+    native = createRunNativeProvider(ctx, store, projectId)
+  } else if (ctx.loaded.config.sandbox.kind === 'local-process') {
+    // Gate only: throws unless local_process_acknowledged is set.
     createSandboxManager(ctx.loaded.config)
   }
 
@@ -449,26 +512,32 @@ export function startRunInBackground(
 
   let run: RunRecord
   let duplicate = false
-  if (opts.requestId !== undefined) {
-    const admitted = store.admitRequest({
-      requestId: opts.requestId,
-      projectId,
-      targetKind: 'run.create',
-      payload,
-      create: () => {
-        const created = createRun()
-        return { targetId: created.id, result: { runId: created.id } }
-      },
-    })
-    duplicate = admitted.duplicate
-    const targetId = admitted.receipt.targetId
-    if (targetId === null) throw new InternalError('run.create receipt has no target id')
-    run = store.getRun(targetId)
-  } else {
-    run = createRun()
+  try {
+    if (opts.requestId !== undefined) {
+      const admitted = store.admitRequest({
+        requestId: opts.requestId,
+        projectId,
+        targetKind: 'run.create',
+        payload,
+        create: () => {
+          const created = createRun()
+          return { targetId: created.id, result: { runId: created.id } }
+        },
+      })
+      duplicate = admitted.duplicate
+      const targetId = admitted.receipt.targetId
+      if (targetId === null) throw new InternalError('run.create receipt has no target id')
+      run = store.getRun(targetId)
+    } else {
+      run = createRun()
+    }
+  } catch (error) {
+    if (native !== null) void native.provider.close()
+    throw error
   }
 
   if (duplicate) {
+    if (native !== null) void native.provider.close()
     store.appendEvent({
       projectId,
       runId: run.id,
@@ -480,8 +549,10 @@ export function startRunInBackground(
       done: Promise.resolve(summaryFromRecords(store, run)),
     }
   }
+  native?.setRunId(run.id)
 
   const done = (async (): Promise<RunSummary> => {
+    try {
     let containerContexts: Map<string, DockerExecContext> | null = null
     if (ctx.loaded.config.sandbox.kind === 'docker') {
       const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
@@ -512,6 +583,7 @@ export function startRunInBackground(
         http,
         bridgeUrl,
         containerContexts,
+        nativeProvider: native?.provider ?? null,
         deps,
         diagnostic: hooks?.diagnostic ?? ((line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
@@ -530,6 +602,9 @@ export function startRunInBackground(
       }
     } finally {
       await http.stop()
+    }
+    } finally {
+      await native?.provider.close()
     }
   })()
 
@@ -600,20 +675,23 @@ export async function runRun(
     throw new ConfigError('--goal is required: describe what the run must achieve')
   }
   const { store, projectId } = bootstrapStore(ctx.loaded)
+  let native: RunNativeProvider | null = null
   try {
     const manager = resolveManager(ctx, store, opts.managerRef)
     const runtime = ctx.loaded.config.runtime
     const budget = runBudgetFromRuntime(runtime)
     const settings = supervisorSettingsFromRuntime(runtime)
 
-    // Container mode (sandbox.kind: docker — the default) provisions the
-    // per-Muse containers before the run row exists, so a daemon or image
-    // failure never leaves a started run behind. Unacknowledged
-    // local-process configs are refused the same way every sandbox consumer
-    // refuses them; only the acknowledged dev-only mode runs engines on the
-    // host.
+    // Container mode (sandbox.kind: docker — the legacy container provider)
+    // provisions the per-Muse containers before the run row exists, so a daemon
+    // or image failure never leaves a started run behind. Native creates its
+    // provider and validates acknowledgements/network policy here too; an
+    // unacknowledged local-process config is refused the same way every sandbox
+    // consumer refuses it.
     let containerContexts: Map<string, DockerExecContext> | null = null
-    if (ctx.loaded.config.sandbox.kind === 'docker') {
+    if (ctx.loaded.config.sandbox.kind === 'native') {
+      native = createRunNativeProvider(ctx, store, projectId)
+    } else if (ctx.loaded.config.sandbox.kind === 'docker') {
       const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
       containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
     } else {
@@ -668,6 +746,7 @@ export async function runRun(
       })
       return summaryFromRecords(store, run)
     }
+    native?.setRunId(run.id)
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
@@ -695,6 +774,7 @@ export async function runRun(
         http,
         bridgeUrl,
         containerContexts,
+        nativeProvider: native?.provider ?? null,
         deps,
         diagnostic: (line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
@@ -725,6 +805,7 @@ export async function runRun(
       await http.stop()
     }
   } finally {
+    await native?.provider.close()
     store.close()
   }
 }
@@ -740,6 +821,7 @@ export async function resumeRun(
   deps: RunDeps = {},
 ): Promise<RunSummary> {
   const { store, projectId } = bootstrapStore(ctx.loaded)
+  let native: RunNativeProvider | null = null
   try {
     const run = store.getRun(runId)
     if (isTerminalRunState(run.state)) {
@@ -748,9 +830,14 @@ export async function resumeRun(
 
     const runtime = ctx.loaded.config.runtime
     let containerContexts: Map<string, DockerExecContext> | null = null
-    if (ctx.loaded.config.sandbox.kind === 'docker') {
+    if (ctx.loaded.config.sandbox.kind === 'native') {
+      native = createRunNativeProvider(ctx, store, projectId)
+      native?.setRunId(run.id)
+    } else if (ctx.loaded.config.sandbox.kind === 'docker') {
       const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
       containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
+    } else {
+      createSandboxManager(ctx.loaded.config)
     }
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
@@ -777,6 +864,7 @@ export async function resumeRun(
         http,
         bridgeUrl,
         containerContexts,
+        nativeProvider: native?.provider ?? null,
         deps,
         skipManager: opts.skipManager ?? true,
         diagnostic: (line) => {
@@ -798,6 +886,7 @@ export async function resumeRun(
       await http.stop()
     }
   } finally {
+    await native?.provider.close()
     store.close()
   }
 }

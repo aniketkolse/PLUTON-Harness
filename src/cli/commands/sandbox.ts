@@ -1,5 +1,6 @@
-import { SandboxUnavailableError } from '../../domain/errors.ts'
+import { SandboxUnavailableError, ValidationError } from '../../domain/errors.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
+import { createNativeExecutionProvider } from '../../execution/factory.ts'
 import {
   DEFAULT_WORKER_IMAGE_TAG,
   dispatchReadiness,
@@ -29,6 +30,26 @@ export interface SandboxProbeReport {
 
 export async function sandboxProbe(ctx: ProjectContext): Promise<SandboxProbeReport> {
   const config = ctx.loaded.config
+  if (config.sandbox.kind === 'native') {
+    const provider = createNativeExecutionProvider({ config, rootDir: ctx.rootDir })
+    const probe = await provider.probe()
+    await provider.close()
+    return {
+      sandbox: {
+        available: probe.available,
+        kind: 'native',
+        detail: probe.detail,
+        ...(probe.fix !== undefined ? { fix: probe.fix } : {}),
+      },
+      image: null,
+      warnings: [
+        probe.detail,
+        'native execution runs engine processes directly on the host (partial enforcement); no worker image or container is used',
+      ],
+      dispatchReady: probe.available,
+    }
+  }
+
   const sandbox = createSandboxManager(config)
   const probe = await sandbox.probe()
   const warnings: string[] = []
@@ -78,6 +99,11 @@ export async function sandboxBuildImage(ctx: ProjectContext, req: BuildImageRequ
   /** True when the config pins a different tag than the one just built. */
   configTagMismatch: boolean
 }> {
+  if (ctx.loaded.config.sandbox.kind === 'native') {
+    throw new ValidationError(
+      'sandbox.kind native runs host engine processes and does not use a container image; use sandbox.kind: docker to build and run worker images',
+    )
+  }
   const tag = req.tag ?? ctx.loaded.config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
   const record = await new WorkerImageManager().build(ctx.rootDir, {
     tag,

@@ -60,7 +60,19 @@ function makeProject(): { ctx: ProjectContext; store: Store; projectId: string }
         heartbeat_seconds: 5,
         approval_timeout_minutes: 10,
       },
-      sandbox: { kind: 'local-process', local_process_acknowledged: true },
+      sandbox: {
+        kind: 'local-process',
+        local_process_acknowledged: true,
+        native: {
+          mode: 'workspace-write',
+          acknowledge_partial_enforcement: false,
+          acknowledge_host_network: false,
+          env_allowlist: [],
+          terminate_grace_seconds: 2,
+          session_timeout_minutes: 0,
+          max_output_bytes: 1_048_576,
+        },
+      },
       git: { protected_paths: [], require_approval_for_main_branch_integration: false },
       muses: {
         worker: {

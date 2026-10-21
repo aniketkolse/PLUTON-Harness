@@ -10,6 +10,12 @@ import type { SandboxManager, SandboxManagerOptions } from './types.ts'
  * Docker is unavailable — dispatch fails closed instead.
  */
 export function createSandboxManager(config: PlutonConfig, opts: SandboxManagerOptions = {}): SandboxManager {
+  if (config.sandbox.kind === 'native') {
+    throw new ValidationError(
+      'sandbox.kind native is a host execution provider, not a container SandboxManager — use ' +
+        'createNativeExecutionProvider from src/execution/factory.ts; Docker remains the container backend',
+    )
+  }
   if (config.sandbox.kind === 'local-process') {
     if (!config.sandbox.local_process_acknowledged) {
       throw new ValidationError(

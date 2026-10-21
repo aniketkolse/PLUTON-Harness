@@ -71,7 +71,7 @@ export interface AttachOutcome {
 }
 
 export interface AttachDeps {
-  sandboxKind: 'docker' | 'local-process'
+  sandboxKind: 'docker' | 'local-process' | 'native'
   manager: TerminalManager
   target: AttachTarget
   /** Absent = plan mode: ensure the session, build the argv, do not spawn. */
@@ -80,7 +80,7 @@ export interface AttachDeps {
 
 export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutcome> {
   const { sandboxKind, manager, target } = deps
-  if (sandboxKind === 'local-process') {
+  if (sandboxKind !== 'docker') {
     throw new ValidationError(
       'pluton attach requires container-mode Muses (sandbox.kind: docker): tmux sessions live inside the Muse container, not on the host',
     )
