@@ -1,10 +1,9 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { attachMuse } from '../../src/cli/commands/attach.ts'
 import { runDoctor } from '../../src/cli/commands/doctor.ts'
@@ -19,103 +18,106 @@ import { attachToMuseTerminal } from '../../src/terminal/attach.ts'
 import { NativeTerminalManager } from '../../src/terminal/native.ts'
 import { run } from '../../src/util/exec.ts'
 
-const require = createRequire(import.meta.url)
-const cp = require('node:child_process')
-
-const FAKE_QWEN_BIN = fileURLToPath(new URL('../helpers/fake-qwen-cli.mjs', import.meta.url))
-
 interface DockerCallRecord {
   method: string
   command: string
   args: unknown[]
 }
 
-const dockerCalls: DockerCallRecord[] = []
+const { dockerCalls, guardCheck } = vi.hoisted(() => {
+  const dockerCalls: DockerCallRecord[] = []
 
-const origSpawn = cp.spawn
-const origSpawnSync = cp.spawnSync
-const origExecFile = cp.execFile
-const origExecFileSync = cp.execFileSync
-const origExec = cp.exec
-const origExecSync = cp.execSync
-
-function isDockerInvocation(command: unknown, args?: unknown): boolean {
-  const isDockerBin = (val: unknown): boolean => {
-    if (typeof val !== 'string') return false
-    const base = basename(val).toLowerCase().replace(/\.exe$/, '')
-    return base === 'docker'
+  function isDockerInvocation(command: unknown, args?: unknown): boolean {
+    const isDockerBin = (val: unknown): boolean => {
+      if (typeof val !== 'string') return false
+      const base = val.split(/[/\\]/).pop()?.toLowerCase().replace(/\.exe$/, '')
+      return base === 'docker'
+    }
+    if (isDockerBin(command)) return true
+    if (Array.isArray(args)) {
+      for (const a of args) {
+        if (isDockerBin(a)) return true
+      }
+    }
+    return false
   }
-  if (isDockerBin(command)) return true
-  if (Array.isArray(args)) {
-    for (const a of args) {
-      if (isDockerBin(a)) return true
+
+  function guardCheck(method: string, command: unknown, args?: unknown): void {
+    if (isDockerInvocation(command, args)) {
+      const record: DockerCallRecord = {
+        method,
+        command: String(command),
+        args: Array.isArray(args) ? [...args] : [],
+      }
+      dockerCalls.push(record)
+      throw new Error(
+        `[DockerGuard] Forbidden Docker invocation detected in native runtime: ${method}('${String(command)}')`,
+      )
     }
   }
-  return false
-}
 
-function guardCheck(method: string, command: unknown, args?: unknown): void {
-  if (isDockerInvocation(command, args)) {
-    const record: DockerCallRecord = {
-      method,
-      command: String(command),
-      args: Array.isArray(args) ? [...args] : [],
-    }
-    dockerCalls.push(record)
-    throw new Error(
-      `[DockerGuard] Forbidden Docker invocation detected in native runtime: ${method}('${String(command)}')`,
-    )
-  }
-}
+  return { dockerCalls, guardCheck }
+})
 
-function installDockerGuard(): void {
-  cp.spawn = function (command: string, ...rest: unknown[]) {
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+
+  const spawnWrapper = ((command: any, ...rest: any[]) => {
     guardCheck('spawn', command, rest[0])
-    return origSpawn.apply(this, [command, ...rest])
-  }
-  cp.spawnSync = function (command: string, ...rest: unknown[]) {
-    guardCheck('spawnSync', command, rest[0])
-    return origSpawnSync.apply(this, [command, ...rest])
-  }
-  cp.execFile = function (file: string, ...rest: unknown[]) {
-    guardCheck('execFile', file, rest[0])
-    return origExecFile.apply(this, [file, ...rest])
-  }
-  cp.execFileSync = function (file: string, ...rest: unknown[]) {
-    guardCheck('execFileSync', file, rest[0])
-    return origExecFileSync.apply(this, [file, ...rest])
-  }
-  cp.exec = function (command: string, ...rest: unknown[]) {
-    const firstWord = command.trim().split(/\s+/)[0]
-    guardCheck('exec', firstWord)
-    return origExec.apply(this, [command, ...rest])
-  }
-  cp.execSync = function (command: string, ...rest: unknown[]) {
-    const firstWord = command.trim().split(/\s+/)[0]
-    guardCheck('execSync', firstWord)
-    return origExecSync.apply(this, [command, ...rest])
-  }
-}
+    return actual.spawn(command, ...rest)
+  }) as typeof actual.spawn
 
-function restoreDockerGuard(): void {
-  cp.spawn = origSpawn
-  cp.spawnSync = origSpawnSync
-  cp.execFile = origExecFile
-  cp.execFileSync = origExecFileSync
-  cp.exec = origExec
-  cp.execSync = origExecSync
-}
+  const spawnSyncWrapper = ((command: any, ...rest: any[]) => {
+    guardCheck('spawnSync', command, rest[0])
+    return actual.spawnSync(command, ...rest)
+  }) as typeof actual.spawnSync
+
+  const execFileWrapper = ((file: any, ...rest: any[]) => {
+    guardCheck('execFile', file, rest[0])
+    return (actual.execFile as any)(file, ...rest)
+  }) as typeof actual.execFile
+
+  const execFileSyncWrapper = ((file: any, ...rest: any[]) => {
+    guardCheck('execFileSync', file, rest[0])
+    return (actual.execFileSync as any)(file, ...rest)
+  }) as typeof actual.execFileSync
+
+  const execWrapper = ((command: any, ...rest: any[]) => {
+    const firstWord = typeof command === 'string' ? command.trim().split(/\s+/)[0] : command
+    guardCheck('exec', firstWord)
+    return (actual.exec as any)(command, ...rest)
+  }) as typeof actual.exec
+
+  const execSyncWrapper = ((command: any, ...rest: any[]) => {
+    const firstWord = typeof command === 'string' ? command.trim().split(/\s+/)[0] : command
+    guardCheck('execSync', firstWord)
+    return (actual.execSync as any)(command, ...rest)
+  }) as typeof actual.execSync
+
+  return {
+    ...actual,
+    spawn: spawnWrapper,
+    spawnSync: spawnSyncWrapper,
+    execFile: execFileWrapper,
+    execFileSync: execFileSyncWrapper,
+    exec: execWrapper,
+    execSync: execSyncWrapper,
+    default: {
+      ...(((actual as Record<string, unknown>).default as object | undefined) ?? actual),
+      spawn: spawnWrapper,
+      spawnSync: spawnSyncWrapper,
+      execFile: execFileWrapper,
+      execFileSync: execFileSyncWrapper,
+      exec: execWrapper,
+      execSync: execSyncWrapper,
+    },
+  }
+})
+
+const FAKE_QWEN_BIN = fileURLToPath(new URL('../helpers/fake-qwen-cli.mjs', import.meta.url))
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
-
-beforeAll(() => {
-  installDockerGuard()
-})
-
-afterAll(() => {
-  restoreDockerGuard()
-})
 
 beforeEach(() => {
   dockerCalls.length = 0
@@ -218,10 +220,17 @@ function makeProject(yaml: string): { dir: string; ctx: ProjectContext; store: S
 }
 
 describe('Runtime Guard: Zero Docker Invocations across Native Runtime Lifecycle', () => {
-  it('guard interceptor correctly detects and blocks docker invocations', () => {
-    expect(() => cp.spawn('docker', ['ps'])).toThrow(/Forbidden Docker invocation detected in native runtime/)
+  it('guard interceptor correctly detects and blocks docker invocations', async () => {
+    expect(() => spawn('docker', ['ps'])).toThrow(/Forbidden Docker invocation detected in native runtime/)
     expect(dockerCalls).toHaveLength(1)
     expect(dockerCalls[0]?.command).toBe('docker')
+    expect(dockerCalls[0]?.method).toBe('spawn')
+    dockerCalls.length = 0
+
+    await expect(run(['docker', 'ps'])).rejects.toThrow(/Forbidden Docker invocation/)
+    expect(dockerCalls).toHaveLength(1)
+    expect(dockerCalls[0]?.command).toBe('docker')
+    expect(dockerCalls[0]?.method).toBe('spawn')
     dockerCalls.length = 0
   })
 
