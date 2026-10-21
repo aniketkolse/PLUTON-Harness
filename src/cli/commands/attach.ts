@@ -10,6 +10,7 @@ import {
   type AttachTarget,
 } from '../../terminal/attach.ts'
 import { TmuxTerminalManager } from '../../terminal/manager.ts'
+import { NativeTerminalManager } from '../../terminal/native.ts'
 import { tmuxSessionName } from '../../terminal/names.ts'
 import type { TerminalManager } from '../../terminal/types.ts'
 import type { ProjectContext } from '../context.ts'
@@ -73,23 +74,29 @@ export async function attachMuse(
         `muse '${muse.id}' is disabled (it is no longer in pluton.yaml) — add it back with \`pluton muse create\` or attach to an enabled muse`,
       )
     }
-    if (ctx.loaded.config.sandbox.kind !== 'docker') {
+    const sandboxKind = ctx.loaded.config.sandbox.kind
+    if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
       throw new ValidationError(
-        `pluton attach requires container-mode Muses (sandbox.kind: docker): ${ctx.loaded.config.sandbox.kind} sessions have no Muse container or tmux session`,
+        `pluton attach requires container-mode Muses (sandbox.kind: docker): ${sandboxKind} sessions have no Muse container or tmux session`,
       )
     }
+    const isNative = sandboxKind === 'native'
+    const containerName = isNative ? 'host' : sandboxContainerName(projectId, muse.id)
     const target: AttachTarget = {
-      containerName: sandboxContainerName(projectId, muse.id),
+      containerName,
       sessionName: tmuxSessionName(ctx.loaded.config.project.name, muse.id),
       ...(opts.windowName !== undefined ? { windowName: opts.windowName } : {}),
     }
     const manager =
-      deps.terminalManager ?? new TmuxTerminalManager(deps.sandboxManager ?? createSandboxManager(ctx.loaded.config))
+      deps.terminalManager ??
+      (isNative
+        ? new NativeTerminalManager()
+        : new TmuxTerminalManager(deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)))
 
     let outcome: AttachOutcome
     try {
       outcome = await attachToMuseTerminal({
-        sandboxKind: ctx.loaded.config.sandbox.kind,
+        sandboxKind,
         manager,
         target,
         ...(deps.spawnAttach !== undefined ? { spawnAttach: deps.spawnAttach } : {}),
@@ -109,17 +116,17 @@ export async function attachMuse(
     store.upsertTerminal({
       projectId,
       museId: muse.id,
-      sandboxId: store.getSandboxForMuse(projectId, muse.id)?.id ?? null,
+      sandboxId: isNative ? null : (store.getSandboxForMuse(projectId, muse.id)?.id ?? null),
       tmuxSessionName: target.sessionName,
       state: 'present',
     })
     return {
       museId: muse.id,
-      containerName: target.containerName,
+      containerName,
       sessionName: target.sessionName,
       windowName: outcome.windowName,
       sessionCreated: outcome.sessionCreated,
-      argv: buildAttachArgv(target),
+      argv: buildAttachArgv(target, sandboxKind),
       attached: outcome.exitCode !== null,
       exitCode: outcome.exitCode,
     }

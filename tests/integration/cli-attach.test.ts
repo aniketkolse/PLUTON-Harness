@@ -12,6 +12,7 @@ import type { SandboxExecOptions } from '../../src/sandbox/types.ts'
 import { sandboxContainerName } from '../../src/sandbox/types.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
+import { NativeTerminalManager } from '../../src/terminal/native.ts'
 import { tmuxSessionName } from '../../src/terminal/names.ts'
 import type { RunResult } from '../../src/util/exec.ts'
 import { failResult, FakeSandbox, okResult } from '../helpers/fake-sandbox.ts'
@@ -73,6 +74,41 @@ muses:
 const CONFIG_DOCKER_WITHOUT_MANAGER = CONFIG_DOCKER.replace('  manager:\n', '  overseer:\n')
 
 const CONFIG_LOCAL_PROCESS = CONFIG_DOCKER.replace('kind: docker', 'kind: local-process\n  local_process_acknowledged: true')
+
+const CONFIG_NATIVE = CONFIG_DOCKER.replace(
+  'kind: docker',
+  `kind: native\n  native:\n    acknowledge_partial_enforcement: true\n    acknowledge_host_network: true`,
+)
+
+class TmuxScriptedHostRunner {
+  executed: string[][] = []
+  private windows: string[] = ['shell']
+
+  run(argv: string[]): Promise<RunResult> {
+    this.executed.push(argv)
+    const sub = argv[1]
+    if (sub === 'has-session') return Promise.resolve(failResult(argv, 'no server running'))
+    if (sub === 'new-session') {
+      this.windows = ['shell']
+      return Promise.resolve(okResult(argv))
+    }
+    if (sub === 'new-window') {
+      const nameIndex = argv.indexOf('-n')
+      const name = nameIndex >= 0 ? (argv[nameIndex + 1] ?? '') : ''
+      this.windows = [...this.windows, name]
+      return Promise.resolve(okResult(argv, `@${String(this.windows.length)}`))
+    }
+    if (sub === 'list-windows') {
+      const format = argv.at(-1)
+      if (format === '#{window_id}:#{window_name}') {
+        const lines = this.windows.map((w, i) => `@${String(i + 1)}:${w}`).join('\n')
+        return Promise.resolve(okResult(argv, `${lines}\n`))
+      }
+      return Promise.resolve(okResult(argv, `${this.windows.join('\n')}\n`))
+    }
+    return Promise.resolve(okResult(argv))
+  }
+}
 
 /**
  * Answers tmux argv like a live container: no server at first (`has-session`
@@ -190,6 +226,36 @@ describe('attachMuse — plan mode (--json)', () => {
     expect(result.exitCode).toBeNull()
     expect(sandbox.execCalls.some((c) => c.argv[1] === 'new-window' && c.argv.includes('ui'))).toBe(true)
   })
+
+  it('supports native sandbox plan mode: ensures session on host without docker', async () => {
+    const { dir, ctx } = makeProject(CONFIG_NATIVE)
+    const runner = new TmuxScriptedHostRunner()
+    const terminalManager = new NativeTerminalManager({ runFn: (argv) => runner.run(argv) })
+
+    const result = await attachMuse(ctx, { museRef: 'manager' }, { terminalManager })
+
+    const store = openSecondStore(dir)
+    const project = store.getProjectByRoot(ctx.rootDir)
+    expect(project).not.toBeNull()
+    const projectId = (project as { id: string }).id
+    const sessionName = tmuxSessionName('cli-attach-it', 'manager')
+
+    expect(result).toEqual({
+      museId: 'manager',
+      containerName: 'host',
+      sessionName,
+      windowName: null,
+      sessionCreated: true,
+      argv: ['tmux', 'attach-session', '-t', `=${sessionName}`],
+      attached: false,
+      exitCode: null,
+    })
+    expect(runner.executed.some((c) => c[1] === 'new-session')).toBe(true)
+    const terminal = store.getTerminalForMuse(projectId, 'manager')
+    expect(terminal?.tmuxSessionName).toBe(sessionName)
+    expect(terminal?.sandboxId).toBeNull()
+    expect(terminal?.state).toBe('present')
+  })
 })
 
 describe('attachMuse — interactive spawn mode', () => {
@@ -222,6 +288,35 @@ describe('attachMuse — interactive spawn mode', () => {
       'attach-session',
       '-t',
       `=${result.sessionName}`,
+    ])
+  })
+
+  it('spawns the direct tmux attach argv for native sandbox and returns exit code', async () => {
+    const { ctx } = makeProject(CONFIG_NATIVE)
+    const runner = new TmuxScriptedHostRunner()
+    const terminalManager = new NativeTerminalManager({ runFn: (argv) => runner.run(argv) })
+    const spawned: string[][] = []
+
+    const result = await attachMuse(
+      ctx,
+      { museRef: 'manager', windowName: 'worker' },
+      {
+        terminalManager,
+        spawnAttach: (argv) => {
+          spawned.push(argv)
+          return Promise.resolve(0)
+        },
+      },
+    )
+
+    expect(result.attached).toBe(true)
+    expect(result.exitCode).toBe(0)
+    expect(spawned).toEqual([result.argv])
+    expect(result.argv).toEqual([
+      'tmux',
+      'attach-session',
+      '-t',
+      `=${result.sessionName}:=worker`,
     ])
   })
 })

@@ -30,6 +30,7 @@ export type TerminalKillOutcome = 'killed' | 'absent' | 'ambiguous'
 /** Machine-readable reasons carried in TerminalUnavailableError.details. */
 export type TerminalFailureReason =
   | 'tmux_missing'
+  | 'tmux_not_installed'
   | 'container_missing'
   | 'session_missing'
   | 'window_missing'

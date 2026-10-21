@@ -15,7 +15,7 @@ import type { TerminalManager } from './types.ts'
  */
 
 export interface AttachTarget {
-  containerName: string
+  containerName?: string
   sessionName: string
   windowName?: string
 }
@@ -27,19 +27,29 @@ const SAFE_CONTAINER_RE = /^[a-z0-9][a-z0-9_-]*$/
  * Exact-match tmux targets (`=name`, `=name:=window`), validated names.
  * `=` forces exact session matching so a prefix-named session can never alias.
  */
-export function buildAttachArgv(target: AttachTarget): string[] {
+export function buildAttachArgv(
+  target: AttachTarget,
+  sandboxKind?: 'docker' | 'native' | 'local-process',
+): string[] {
   assertSafeTmuxName('session', target.sessionName)
-  if (!SAFE_CONTAINER_RE.test(target.containerName)) {
-    throw new ValidationError(
-      `unsafe container name '${target.containerName}': expected ${String(SAFE_CONTAINER_RE)}`,
-    )
-  }
   let tmuxTarget = `=${target.sessionName}`
   if (target.windowName !== undefined) {
     assertSafeTmuxName('window', target.windowName)
     tmuxTarget += `:=${target.windowName}`
   }
-  return ['docker', 'exec', '-it', target.containerName, 'tmux', 'attach-session', '-t', tmuxTarget]
+  const isNative =
+    sandboxKind === 'native' ||
+    (sandboxKind === undefined && (target.containerName === 'host' || target.containerName === undefined))
+  if (isNative) {
+    return ['tmux', 'attach-session', '-t', tmuxTarget]
+  }
+  const containerName = target.containerName ?? ''
+  if (!SAFE_CONTAINER_RE.test(containerName)) {
+    throw new ValidationError(
+      `unsafe container name '${containerName}': expected ${String(SAFE_CONTAINER_RE)}`,
+    )
+  }
+  return ['docker', 'exec', '-it', containerName, 'tmux', 'attach-session', '-t', tmuxTarget]
 }
 
 /** Resolves the child exit code; throws when it cannot spawn. */
@@ -80,19 +90,20 @@ export interface AttachDeps {
 
 export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutcome> {
   const { sandboxKind, manager, target } = deps
-  if (sandboxKind !== 'docker') {
+  if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
     throw new ValidationError(
-      'pluton attach requires container-mode Muses (sandbox.kind: docker): tmux sessions live inside the Muse container, not on the host',
+      'pluton attach requires container-mode Muses (sandbox.kind: docker) or native host mode (sandbox.kind: native): tmux sessions live inside the Muse container or on the host',
     )
   }
   // Validate the target (and have the exact argv ready) even in plan mode.
-  const argv = buildAttachArgv(target)
-  const session = await manager.ensureSession(target.containerName, target.sessionName)
+  const argv = buildAttachArgv(target, sandboxKind)
+  const containerName = target.containerName ?? (sandboxKind === 'native' ? 'host' : '')
+  const session = await manager.ensureSession(containerName, target.sessionName)
   if (target.windowName !== undefined) {
-    await manager.ensureWindow(target.containerName, target.sessionName, target.windowName)
+    await manager.ensureWindow(containerName, target.sessionName, target.windowName)
   }
   const base: Omit<AttachOutcome, 'exitCode'> = {
-    containerName: target.containerName,
+    containerName,
     sessionName: target.sessionName,
     windowName: target.windowName ?? null,
     sessionCreated: session.created,
@@ -102,12 +113,29 @@ export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutc
   try {
     exitCode = await deps.spawnAttach(argv)
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (sandboxKind === 'native') {
+      const isMissing = /ENOENT|not found/i.test(msg)
+      throw new TerminalUnavailableError(
+        `could not attach to host tmux session: ${msg}`,
+        {
+          details: {
+            reason: isMissing ? 'tmux_not_installed' : 'exec_failed',
+            containerName,
+            sessionName: target.sessionName,
+          },
+          fix: isMissing
+            ? 'install tmux (e.g. apt install tmux, brew install tmux, or choco install tmux)'
+            : 'check host tmux configuration and permissions',
+        },
+      )
+    }
     throw new TerminalUnavailableError(
-      `could not start docker exec for attach: ${e instanceof Error ? e.message : String(e)}`,
+      `could not start docker exec for attach: ${msg}`,
       {
         details: {
           reason: 'exec_failed',
-          containerName: target.containerName,
+          containerName,
           sessionName: target.sessionName,
         },
         fix: 'is Docker Desktop running and `docker` on PATH? (`docker version`)',
