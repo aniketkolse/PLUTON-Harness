@@ -6,6 +6,7 @@ import { registerBuiltinEngines, listEngineKinds, getEngineAdapter } from '../..
 import { firstLine, run } from '../../util/exec.ts'
 import { engineHomesDir } from '../../config/load.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
+import { createNativeExecutionProvider } from '../../execution/factory.ts'
 import {
   DEFAULT_WORKER_IMAGE_TAG,
   WORKER_IMAGE_DRIFT_FIX,
@@ -21,11 +22,27 @@ const MIN_NODE_MAJOR = 24
 
 export interface DoctorOptions {
   cwd: string
+  runFn?: typeof run
+  findProjectRoot?: typeof findProjectRoot
 }
 
 export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckResult[]> {
+  const exec = opts.runFn ?? run
+  const findRoot = opts.findProjectRoot ?? findProjectRoot
   const checks: CheckResult[] = []
   registerBuiltinEngines()
+
+  const root = findRoot(opts.cwd)
+  let loadedConfig: LoadedConfig | null = null
+  let configError: Error | null = null
+  if (root) {
+    try {
+      loadedConfig = loadConfig(root)
+    } catch (e) {
+      configError = e as Error
+    }
+  }
+  const isDockerMode = loadedConfig?.config.sandbox.kind === 'docker'
 
   // 1. Node runtime
   const major = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10)
@@ -43,22 +60,33 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
 
   // 2. Platform + WSL2 (Windows)
   if (process.platform === 'win32') {
-    const r = await run(['wsl', '--status'], { timeoutMs: 15_000 })
+    const r = await exec(['wsl', '--status'], { timeoutMs: 15_000 })
     if (r.exitCode === 0) {
       checks.push({
         id: 'wsl2',
         title: 'WSL2',
         status: 'pass',
-        message: 'WSL is present (used by Docker Desktop for Linux worker containers)',
+        message: isDockerMode
+          ? 'WSL is present (used by Docker Desktop for Linux worker containers)'
+          : 'WSL is present (optional for native mode; used for Linux container workers)',
       })
     } else {
-      checks.push({
-        id: 'wsl2',
-        title: 'WSL2',
-        status: 'warn',
-        message: 'WSL not detected — the supported Windows setup uses WSL2 + Docker Desktop',
-        fix: 'install WSL2 (wsl --install) and Docker Desktop with the WSL2 backend',
-      })
+      checks.push(
+        isDockerMode
+          ? {
+              id: 'wsl2',
+              title: 'WSL2',
+              status: 'warn',
+              message: 'WSL not detected — the supported Windows setup uses WSL2 + Docker Desktop',
+              fix: 'install WSL2 (wsl --install) and Docker Desktop with the WSL2 backend',
+            }
+          : {
+              id: 'wsl2',
+              title: 'WSL2',
+              status: 'info',
+              message: 'WSL not detected — optional for native mode; only used when running Linux container workers',
+            },
+      )
     }
   } else {
     checks.push({
@@ -70,18 +98,23 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
   }
 
   // 3. Docker CLI + daemon
-  const dockerCli = await run(['docker', '--version'], { timeoutMs: 15_000 })
+  const dockerCli = await exec(['docker', '--version'], { timeoutMs: 15_000 })
   if (dockerCli.exitCode === 0) {
-    checks.push({ id: 'docker-cli', title: 'Docker CLI', status: 'pass', message: firstLine(dockerCli.stdout) })
-    const info = await run(['docker', 'info', '--format', '{{.ServerVersion}}'], { timeoutMs: 20_000 })
+    checks.push({
+      id: 'docker-cli',
+      title: 'Docker CLI',
+      status: 'pass',
+      message: isDockerMode ? firstLine(dockerCli.stdout) : `${firstLine(dockerCli.stdout)} (optional)`,
+    })
+    const info = await exec(['docker', 'info', '--format', '{{.ServerVersion}}'], { timeoutMs: 20_000 })
     if (info.exitCode === 0 && info.stdout.trim().length > 0) {
       checks.push({
         id: 'docker-daemon',
         title: 'Docker daemon',
         status: 'pass',
-        message: `server ${info.stdout.trim()}`,
+        message: isDockerMode ? `server ${info.stdout.trim()}` : `server ${info.stdout.trim()} (optional)`,
       })
-    } else {
+    } else if (isDockerMode) {
       checks.push({
         id: 'docker-daemon',
         title: 'Docker daemon',
@@ -89,8 +122,15 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         message: 'daemon not reachable — worker containers cannot start',
         fix: 'start Docker Desktop (or the docker engine) and re-run `pluton doctor`',
       })
+    } else {
+      checks.push({
+        id: 'docker-daemon',
+        title: 'Docker daemon',
+        status: 'info',
+        message: 'daemon not running — optional (not required for native host execution)',
+      })
     }
-  } else {
+  } else if (isDockerMode) {
     checks.push({
       id: 'docker-cli',
       title: 'Docker CLI',
@@ -98,10 +138,17 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       message: 'docker not found on PATH',
       fix: 'install Docker Desktop (Windows) or docker engine (Linux)',
     })
+  } else {
+    checks.push({
+      id: 'docker-cli',
+      title: 'Docker CLI',
+      status: 'info',
+      message: 'not installed — optional (not required for native host execution)',
+    })
   }
 
   // 4. Git
-  const git = await run(['git', '--version'], { timeoutMs: 15_000 })
+  const git = await exec(['git', '--version'], { timeoutMs: 15_000 })
   checks.push(
     git.exitCode === 0
       ? { id: 'git', title: 'Git', status: 'pass', message: firstLine(git.stdout) }
@@ -109,8 +156,6 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
   )
 
   // 5. Project config + storage
-  const root = findProjectRoot(opts.cwd)
-  let loadedConfig: LoadedConfig | null = null
   if (!root) {
     checks.push({
       id: 'config',
@@ -119,89 +164,85 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       message: 'no pluton.yaml found from this directory upward',
       fix: 'run `pluton init` in the project you want to orchestrate',
     })
+  } else if (configError !== null || loadedConfig === null) {
+    checks.push({
+      id: 'config',
+      title: 'Project config',
+      status: 'fail',
+      message: configError?.message ?? 'could not load pluton.yaml',
+      fix: 'fix pluton.yaml (see docs/MUSE_CONFIGURATION.md)',
+    })
   } else {
+    checks.push({
+      id: 'config',
+      title: 'Project config',
+      status: 'pass',
+      message: `${root} (project '${loadedConfig.config.project.name}', ${Object.keys(loadedConfig.config.muses).length} muse(s))`,
+    })
     try {
-      const loaded = loadConfig(root)
-      loadedConfig = loaded
+      const sd = stateDir(root)
+      mkdirSync(sd, { recursive: true })
+      const probe = join(sd, `.write-test-${process.pid}`)
+      writeFileSync(probe, 'ok')
+      rmSync(probe)
+      checks.push({ id: 'storage', title: 'State storage', status: 'pass', message: sd })
+    } catch (e) {
       checks.push({
-        id: 'config',
-        title: 'Project config',
-        status: 'pass',
-        message: `${root} (project '${loaded.config.project.name}', ${Object.keys(loaded.config.muses).length} muse(s))`,
+        id: 'storage',
+        title: 'State storage',
+        status: 'fail',
+        message: `cannot write ${stateDir(root)}: ${(e as Error).message}`,
+        fix: 'fix directory permissions on .pluton/state',
       })
-      try {
-        const sd = stateDir(root)
-        mkdirSync(sd, { recursive: true })
-        const probe = join(sd, `.write-test-${process.pid}`)
-        writeFileSync(probe, 'ok')
-        rmSync(probe)
-        checks.push({ id: 'storage', title: 'State storage', status: 'pass', message: sd })
-      } catch (e) {
+    }
+    // Engine checks per configured Muse
+    const seen = new Set<string>()
+    for (const [id, muse] of Object.entries(loadedConfig.config.muses)) {
+      const key = `${muse.engine}` // one discovery per engine kind is enough for install state
+      const adapter = safeAdapter(muse.engine)
+      if (!adapter) {
         checks.push({
-          id: 'storage',
-          title: 'State storage',
+          id: `engine:${muse.engine}`,
+          title: `Engine '${muse.engine}' (muse ${id})`,
           status: 'fail',
-          message: `cannot write ${stateDir(root)}: ${(e as Error).message}`,
-          fix: 'fix directory permissions on .pluton/state',
+          message: 'unknown engine kind — not in the engine registry',
+          fix: `choose one of: ${listEngineKinds().map((k) => k.kind).join(', ')}`,
         })
+        continue
       }
-      // Engine checks per configured Muse
-      const seen = new Set<string>()
-      for (const [id, muse] of Object.entries(loaded.config.muses)) {
-        const key = `${muse.engine}` // one discovery per engine kind is enough for install state
-        const adapter = safeAdapter(muse.engine)
-        if (!adapter) {
-          checks.push({
-            id: `engine:${muse.engine}`,
-            title: `Engine '${muse.engine}' (muse ${id})`,
-            status: 'fail',
-            message: 'unknown engine kind — not in the engine registry',
-            fix: `choose one of: ${listEngineKinds().map((k) => k.kind).join(', ')}`,
-          })
-          continue
-        }
-        const home = join(engineHomesDir(root), id)
-        if (!seen.has(key)) {
-          seen.add(key)
-          const disc = await adapter.discover()
-          checks.push(
-            disc.installed
-              ? {
-                  id: `engine:${muse.engine}`,
-                  title: `Engine '${muse.engine}'`,
-                  status: 'pass',
-                  message: `${disc.version ?? 'version unknown'} ${disc.binaryPath ? `(${disc.binaryPath})` : ''}`.trim(),
-                }
-              : {
-                  id: `engine:${muse.engine}`,
-                  title: `Engine '${muse.engine}'`,
-                  status: 'fail',
-                  message: 'not installed / not on PATH',
-                  fix: disc.fix,
-                },
-          )
-        }
-        const auth = await adapter.authStatus(home)
+      const home = join(engineHomesDir(root), id)
+      if (!seen.has(key)) {
+        seen.add(key)
+        const disc = await adapter.discover()
         checks.push(
-          auth.configured
-            ? { id: `auth:${id}`, title: `Auth for muse '${id}'`, status: 'pass', message: 'configured' }
+          disc.installed
+            ? {
+                id: `engine:${muse.engine}`,
+                title: `Engine '${muse.engine}'`,
+                status: 'pass',
+                message: `${disc.version ?? 'version unknown'} ${disc.binaryPath ? `(${disc.binaryPath})` : ''}`.trim(),
+              }
             : {
-                id: `auth:${id}`,
-                title: `Auth for muse '${id}'`,
-                status: 'warn',
-                message: 'not configured — engine runs will fail until this is set up',
-                fix: auth.hint,
+                id: `engine:${muse.engine}`,
+                title: `Engine '${muse.engine}'`,
+                status: 'fail',
+                message: 'not installed / not on PATH',
+                fix: disc.fix,
               },
         )
       }
-    } catch (e) {
-      checks.push({
-        id: 'config',
-        title: 'Project config',
-        status: 'fail',
-        message: (e as Error).message,
-        fix: 'fix pluton.yaml (see docs/MUSE_CONFIGURATION.md)',
-      })
+      const auth = await adapter.authStatus(home)
+      checks.push(
+        auth.configured
+          ? { id: `auth:${id}`, title: `Auth for muse '${id}'`, status: 'pass', message: 'configured' }
+          : {
+              id: `auth:${id}`,
+              title: `Auth for muse '${id}'`,
+              status: 'warn',
+              message: 'not configured — engine runs will fail until this is set up',
+              fix: auth.hint,
+            },
+      )
     }
   }
 
@@ -216,7 +257,41 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         'Container-side verification runs when the worker image is built.',
     })
   }
-  if (loadedConfig) {
+  if (loadedConfig && loadedConfig.config.sandbox.kind === 'native') {
+    // Native mode has no container, no worker image and no tmux: it runs
+    // engine processes directly on the host with partial enforcement.
+    try {
+      const provider = createNativeExecutionProvider({
+        config: loadedConfig.config,
+        rootDir: loadedConfig.rootDir,
+      })
+      const probe = await provider.probe()
+      await provider.close()
+      checks.push({
+        id: 'sandbox',
+        title: 'Sandbox (native)',
+        status: probe.available ? 'pass' : 'fail',
+        message: probe.detail,
+        ...(probe.fix !== undefined ? { fix: probe.fix } : {}),
+      })
+      checks.push({
+        id: 'native-enforcement',
+        title: 'Native enforcement',
+        status: 'info',
+        message:
+          'native execution is process-policy only: cwd and env boundaries are enforced, but filesystem, ' +
+          'network and CPU/memory confinement are not. Host tmux attach is available when tmux is installed on the host.',
+      })
+    } catch (e) {
+      checks.push({
+        id: 'sandbox',
+        title: 'Sandbox (native)',
+        status: 'fail',
+        message: (e as Error).message,
+        fix: 'fix the sandbox section of pluton.yaml (native requires acknowledge_partial_enforcement, acknowledge_host_network and network_policy: open)',
+      })
+    }
+  } else if (loadedConfig) {
     try {
       const sandbox = createSandboxManager(loadedConfig.config)
       const probe = await sandbox.probe()
@@ -253,7 +328,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
             })
             // Real verification, not a claim: run tmux inside the built image
             // (no network — the image may be operator-supplied).
-            const tmux = await run(
+            const tmux = await exec(
               ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'tmux', tag, '-V'],
               { timeoutMs: 30_000 },
             )
@@ -328,13 +403,23 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
   //    worker image is available; anything left here is only reached when the
   //    sandbox itself could not be assessed.
   if (!checks.some((c) => c.id === 'tmux')) {
-    checks.push({
-      id: 'tmux',
-      title: 'tmux',
-      status: 'info',
-      message:
-        'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010).',
-    })
+    if (loadedConfig?.config.sandbox.kind === 'native') {
+      checks.push({
+        id: 'tmux',
+        title: 'tmux',
+        status: 'info',
+        message:
+          'host tmux is used for `pluton attach` when available; optional for headless native execution.',
+      })
+    } else {
+      checks.push({
+        id: 'tmux',
+        title: 'tmux',
+        status: 'info',
+        message:
+          'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010).',
+      })
+    }
   }
 
   return checks

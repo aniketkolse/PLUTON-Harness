@@ -77,7 +77,7 @@ export async function attachMuse(
     const sandboxKind = ctx.loaded.config.sandbox.kind
     if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
       throw new ValidationError(
-        `pluton attach requires container-mode Muses (sandbox.kind: docker): ${sandboxKind} sessions have no Muse container or tmux session`,
+        `pluton attach requires container-mode Muses (sandbox.kind: docker) or native host mode (sandbox.kind: native): ${sandboxKind} sessions have no Muse container or host tmux session`,
       )
     }
     const isNative = sandboxKind === 'native'

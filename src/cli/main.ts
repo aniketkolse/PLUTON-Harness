@@ -527,7 +527,7 @@ const sandboxCmd = program
 
 sandboxCmd
   .command('probe')
-  .description('report whether Muse containers can start here, and the worker image state')
+  .description('report execution sandbox state and host engine provider capabilities')
   .action(async (_opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
@@ -1029,7 +1029,7 @@ program
 program
   .command('attach')
   .description(
-    "attach this terminal to a Muse's tmux session inside its container (interactive; --json resolves the target without attaching)",
+    "attach this terminal to a Muse's tmux session (host session in native mode, or container in docker mode; interactive; --json resolves the target without attaching)",
   )
   .argument('<muse>', 'muse id, slug or unique id suffix')
   .option('--window <name>', 'attach to (or create) a named tmux window')

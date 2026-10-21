@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { TerminalUnavailableError, ValidationError } from '../domain/errors.ts'
 import { assertSafeTmuxName } from './names.ts'
+import { TMUX_NOT_INSTALLED_FIX } from './native.ts'
 import type { TerminalManager } from './types.ts'
 
 /**
@@ -125,7 +126,7 @@ export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutc
             sessionName: target.sessionName,
           },
           fix: isMissing
-            ? 'install tmux (e.g. apt install tmux, brew install tmux, or choco install tmux)'
+            ? TMUX_NOT_INSTALLED_FIX
             : 'check host tmux configuration and permissions',
         },
       )
