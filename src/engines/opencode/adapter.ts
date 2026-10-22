@@ -364,7 +364,10 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
   async listModels(): Promise<EngineModel[]> {
     const resolved = this.resolveBinary()
     if (!resolved.ok) throw new EngineMissingError(this.kind, resolved.fix)
-    const out = await this.runFn([resolved.binary.path, 'models'], {
+    // `--standalone` keeps this one-shot query off OpenCode's shared managed
+    // service. Without it, concurrent doctor/model probes collide on the
+    // service port and can leave a detached `opencode serve --service` behind.
+    const out = await this.runFn([resolved.binary.path, 'models', '--standalone'], {
       timeoutMs: 30_000,
       maxOutputBytes: 512 * 1024,
     })
@@ -437,7 +440,10 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     if ((this.opts.platform ?? process.platform) === 'win32' && process.env['USERPROFILE']) {
       env['USERPROFILE'] = process.env['USERPROFILE']
     }
-    const out = await this.runFn([resolved.binary.path, 'auth', 'list'], {
+    // `--standalone` avoids the shared managed service: doctor checks one
+    // engine home per Muse, and the service is global to the OpenCode process,
+    // so non-standalone checks collide and time out on a single port.
+    const out = await this.runFn([resolved.binary.path, 'auth', 'list', '--standalone'], {
       timeoutMs: 5_000,
       env,
       envMode: 'explicit',

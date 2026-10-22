@@ -6,48 +6,68 @@
 
 **Gate decision:** **ACCEPTED WITH LIMITATIONS**
 
-**Baseline commit:** `e69d0d5` (`main`, 8 commits ahead of `origin/main`)
+**Baseline commit:** `1a42d61` (`main`, pre-validation HEAD)
 
-**Worktree:** reviewed change set committed as the release-readiness commit; no push or release performed
+**Worktree:** post-hardening review fixes plus this audit; no push or release performed
 
 ---
 
 ## 1. Executive verdict
 
-The native execution path is real, selectable by default, and operational without Docker for
-the tested Windows host workflows: onboarding, diagnostics, substrate probing, multi-agent task
-execution, isolated checkout writing, verification, integration, terminal creation/reattachment,
-and headless application startup. The strongest end-to-end evidence is:
+The native execution path is real, selectable by default, and operational without Docker on two
+independent hosts: Windows 11 and a real WSL 2 Ubuntu 24.04 userland with the repository on ext4
+(not a Windows proxy). Onboarding, diagnostics, substrate probing, multi-agent task execution,
+isolated checkout writing, verification, integration, terminal attach/chat, and headless app startup
+were exercised. The strongest end-to-end evidence is:
 
-- the complete test suite (130 files, 1,211 tests) passes with every Docker-containing directory
-  removed from `PATH`;
-- a real **OpenCode v2.1.2** run used the native provider end to end and wrote its evidence only
-  inside the task checkout;
-- a fake-engine run reached `verifying`, then `pluton verify` completed it and `pluton integrate`
-  merged the task with its checks passing;
-- the native run and the real-engine run both recorded **zero sandbox rows** and only
-  `provider: native` execution events;
-- a host-tmux session was created, used, reattached, and killed with Docker hidden.
+- the complete Linux suite passed with Docker removed from `PATH`: **130 files, 1,211 passed,
+  1 skipped** (the skip is the Windows-only `tests/unit/workspace.test.ts` case);
+- the complete Windows suite passed: **130 files, 1,212 passed**;
+- the Linux release gate passed **15/15**, including the real POSIX 0600 permission probe, package
+  scanning, dependency audit, typecheck, tests, and build;
+- the Windows release gate passed **14/0/1**; the only not-tested item is POSIX 0600, which Windows
+  does not enforce;
+- a post-fix real **OpenCode v2.1.2** run on Windows, `run_mvj7x6ig87b32c2e`, reached
+  **completed/success** with one task, one passed verification check, 23 durable events, 8 native
+  execution events, and **zero sandbox rows**. The artifact was `native-real-engine.txt` with exact
+  bytes `6F-6B` (`ok`, 2 bytes) only in the task checkout; the project-root copy was absent;
+- a real **OpenCode v2.1.2** run on Linux, `run_mvj5w3i8844a4ab5`, also reached
+  **completed/success** with one task, 21 durable events, 8 native execution events, and zero sandbox
+  rows. Its artifact was `ok\n` (3 bytes) only in the checkout; the root copy was absent, and no
+  OpenCode process remained;
+- a fake-engine verification/integration run reached `verifying`, passed `pluton verify`, and was
+  merged by `pluton integrate` with its checks passing;
+- a real Linux PTY exercised `pluton attach`: the host session `pluton_pluton_manager` was created,
+  the real chat TUI rendered, the deterministic TUI demo exited with `q`, detach returned to the outer
+  shell with `INNER_ALIVE:0`, reattach accepted `REATTACHED_INPUT_OK`, and cleanup returned
+  `INNER_KILL:0` (probe exit 0).
 
-Several defects were confirmed and fixed during the audit and final review: `doctor` spawned Docker
-even in native mode; `exec` output limits were counted in UTF-16 code units instead of UTF-8 bytes,
-and decoded output could still exceed the byte cap when a multibyte sequence was split; isolated
-workers were not independently constrained to `.pluton/workspaces/`, and an isolated-policy worker
-could bypass that check when the caller reported `isolatedCheckout: false`; the repository's own
-`pluton.yaml` still selected Docker/restricted; and a legitimate checkout name beginning with `..`
-was rejected. Several documentation and test claims that overstated the implementation were
-corrected.
+Several defects were confirmed and fixed during the review: `doctor` spawned Docker even in native
+mode; `exec` output limits were counted in UTF-16 code units instead of UTF-8 bytes, and decoded
+output could still exceed the byte cap when a multibyte sequence was split; isolated workers were not
+independently constrained to `.pluton/workspaces/`, and an isolated-policy worker could bypass that
+check when the caller reported `isolatedCheckout: false`; the repository's own `pluton.yaml` still
+selected Docker/restricted; and a legitimate checkout name beginning with `..` was rejected. The
+post-hardening review additionally fixed OpenCode one-shot service reuse (`--standalone`), the
+platform semantics used by `sameDirPath`, a release-gate false positive for paths beginning with
+`/root`, and two Windows-path test portability issues. No security control was weakened.
 
-The gate is **not** unconditional **ACCEPTED** because the following required dimensions could not
-be independently executed on this host:
+The gate is **not** unconditional **ACCEPTED** because the following required dimensions still lack
+direct execution:
 
 - a true Docker-uninstalled machine (Docker CLI 29.8.2 is installed; its daemon is stopped);
-- Linux/macOS runtime parity (only Windows 11 was executed; CI matrix exists but no CI result was
-  observed);
-- interactive `tmux attach-session` and the interactive chat TUI in a real TTY (attach session
-  creation, pane command execution, and reattachment were verified; chat TUI was not executed);
+- macOS runtime parity (no macOS host or SSH target was available);
+- interactive TTY attach/chat on Windows and macOS (Linux WSL PTY is now **PASS**; the Windows
+  harness is non-interactive and `winpty` is absent);
 - Docker-mode container E2E (legacy opt-in path; daemon intentionally not started);
-- a real Qwen Code engine (the Qwen paths used the repository's ACP fake).
+- a real Qwen Code engine (`qwen` is absent/not configured; the Qwen paths used the repository's ACP
+  fake).
+
+The first real Windows attempt, `run_mvj7jw3y432500d4`, is recorded as a Manager-planning limitation:
+the Manager created a dependent QA task, then cancelled it when the worker task parked in
+`verifying`; the worker task and its verification passed, but `finalizeRunVerdict` correctly refuses
+to mark a run completed when any task is not completed. The second run with a one-task budget closed
+cleanly. This was not a native-execution or cleanup defect.
 
 No remaining defect was found that blocks the normal native path. The limitations are
 environmental/coverage limitations, not evidence of a hidden Docker dependency.
@@ -79,6 +99,15 @@ Method:
    creation/reattachment.
 8. Ran cancellation, restart-reconciliation, and workspace-isolation tests.
 9. Ran the release gate with and without `--allow-dirty`, and recorded the exact failures.
+10. Repeated the suite, build, POSIX permission check, and release gate inside a real WSL 2 Ubuntu
+    24.04 userland with the repository on ext4.
+11. Ran a post-fix real OpenCode smoke on Windows and Linux, then inspected the SQLite durable state,
+    task checkouts, project roots, verification checks, sandbox rows, and matching processes.
+12. Exercised a real PTY through tmux on Linux: attach, chat TUI, demo TUI, detach, liveness check,
+    reattach, input, and cleanup.
+13. Kept fake-engine and real-engine evidence separate; no credential or secret environment value
+    is reproduced in this report.
+14. Re-ran the release gate after the reviewed changes were committed.
 
 Status vocabulary used below: **PASS** (executed and met the criterion), **FAIL** (executed and did
 not meet it), **BLOCKED** (could not execute because of a concrete environmental constraint), and
@@ -89,30 +118,34 @@ not meet it), **BLOCKED** (could not execute because of a concrete environmental
 
 ## 3. Environment and repository state
 
-| Item | Observed value |
-|---|---|
-| OS | Windows 11, `Microsoft Windows NT 10.0.26300.0` |
-| Node.js | `v24.20.0` |
-| Git | `2.56.0.windows.2` |
-| OpenCode | `v2.1.2` |
-| tmux | `3.6a-win32` |
-| Docker CLI | `29.8.2`, build `7fc2dff` |
-| Docker path | `C:\Users\Asus\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe` |
-| Docker daemon | not reachable (`dockerDesktopLinuxEngine` pipe absent) |
-| Docker WSL distro | `docker-desktop`, state **Stopped** |
-| Shell | PowerShell |
+| Item | Windows host | Linux host |
+|---|---|---|
+| OS | Windows 11, `Microsoft Windows NT 10.0.26300.0` | WSL 2 Ubuntu 24.04.5 LTS, kernel `6.18.33.2-microsoft-standard-WSL2` |
+| Filesystem | `Y:\Pluton` | `/root/pluton` on ext4 |
+| Node.js | `v24.20.0` | `v24.20.0` |
+| npm | `10.9.9` | `11.19.0` |
+| Git | `2.56.0.windows.2` | `2.43.0` |
+| OpenCode | `v2.1.2` | `v2.1.2` |
+| tmux | `3.6a-win32` (optional; no host TTY) | `3.4` |
+| Docker CLI | `29.8.2`, build `7fc2dff` | not installed in the Ubuntu userland |
+| Docker daemon | not reachable (`dockerDesktopLinuxEngine` pipe absent) | not applicable |
+| Shell | PowerShell | Bash via `wsl.exe -d Ubuntu-24.04 -u root` |
+| Qwen | absent / not configured | absent / not configured |
+| macOS | no host or SSH target | **NOT VERIFIED** |
 
-Repository state at audit start (the audit report itself was the nineteenth, untracked change):
+Repository state at validation start:
 
 ```text
 branch: main
-HEAD:   e69d0d5 chore(scripts): track native multi-agent demonstration script
-ahead:  8 commits of origin/main
-status: 18 modified tracked files plus this untracked audit report (at audit start)
+HEAD:   1a42d61
+status: six modified tracked files (the review fixes) plus this audit report
+ahead:  local commits only; nothing pushed or published
 ```
 
 The audit did not uninstall Docker, start Docker Desktop, stop shared services, reset the
-repository, or discard user changes. Docker was only queried read-only (`--version`, `info`).
+repository, or discard user changes. Docker was only queried read-only (`--version`, `info`). The
+pre-existing Windows `opencode serve --service` process belongs to the active agent harness, not to
+the native run; it was left untouched and is not counted as run cleanup evidence.
 
 ---
 
@@ -179,37 +212,37 @@ tests, or unused Docker assets. Static imports of Docker modules do not spawn Do
 |---|---|---|---|---|---|
 | 1 | Typecheck | `npm run typecheck` | **PASS** | exit 0, no diagnostics | none |
 | 2 | Build | `npm run build` | **PASS** | exit 0 | none |
-| 3 | Full suite, Docker hidden | `$env:PATH = …; npm test` | **PASS** | 130 files, 1,211 tests, ~104 s | proves suite itself does not need Docker |
+| 3 | Full suite, Docker hidden | Windows: `$env:PATH = …; npm test`; Linux: `npm test` in WSL Ubuntu | **PASS** | Windows 130 files / 1,212 passed; Linux 130 files / 1,211 passed, 1 skipped (Windows-only `workspace.test.ts` case) | proves the suite does not need Docker on either executed platform |
 | 4 | Clean onboarding | Docker hidden; `pluton init --team full-stack --name init-audit` | **PASS** | exit 0; generated `kind: native`, `network_policy: open`, both acknowledgements | default onboarding is Docker-free |
 | 5 | Diagnostics, repo config | Docker hidden; `pluton --json doctor` in repository | **PASS** | exit 0; 15 ok / 0 warn / 0 fail; `docker-cli: not probed — native mode does not use Docker` | native doctor does not probe Docker |
 | 6 | Diagnostics, opencode-only native project | Docker hidden; `pluton --json doctor` | **PASS** | exit 0; engine and auth checks pass | no Docker requirement |
 | 7 | Diagnostics, full-stack template | Docker hidden; `pluton --json doctor` in fresh init | **PASS (Docker dimension)** | exit 1; 12 ok / 2 warn / 1 fail; sole fail `engine:qwen: not installed`; Docker `info` not probed | Qwen is an engine prerequisite, not a Docker dependency |
 | 8 | Substrate probe | Docker hidden; `pluton --json sandbox probe` | **PASS** | `kind=native`, `available=true`, `dispatchReady=true`, `image=null` | no daemon/image needed |
 | 9 | Multi-agent run, fake engine | Docker hidden; `pluton --json run --goal …` | **PASS** | `run_mvj0j6m717d0bfd2` completed/success; 1 task completed | manager + worker executed natively |
-| 10 | Real-engine run | Docker hidden; OpenCode v2.1.2 run | **PASS** | `run_mvj0na5z1488b60c` completed/success; 1 task completed; exact `ok` file in checkout | real engine works under native provider |
+| 10 | Real-engine runs | Docker hidden; OpenCode v2.1.2 runs on Windows and Linux | **PASS** | Windows post-fix `run_mvj7x6ig87b32c2e` completed/success, 1 task, verification passed, exact 2-byte `ok` in checkout; Linux `run_mvj5w3i8844a4ab5` completed/success, 1 task, 3-byte `ok\n` in checkout; both 8 native execution events and 0 sandboxes | real engine works under the native provider on both OSes |
 | 11 | Verification gate | Docker hidden; run with verification config, then `pluton --json verify --run <id>` | **PASS** | run `verifying/pending_verification` → `completed/success`; 1/1 checks passed | verification is Docker-free |
 | 12 | Integration | Docker hidden; `pluton --json integrate --run <id>` | **PASS** | 1 task merged; integration workspace created; checks passed | merge/integration is Docker-free |
 | 13 | App startup | Docker hidden; `pluton --json app --headless --detach --port 43123`, `--status`, `--stop` | **PASS** | start/status/stop exit 0; PID 13952 stopped | server/startup is Docker-free |
 | 14 | Terminal creation/reattach | Docker hidden; `pluton --json attach manager` twice; `tmux send-keys`/`capture-pane` | **PASS** | session `pluton_audit-doctor_manager`; `containerName=host`; marker visible; reattach same session; kill 0 | host-tmux path works |
-| 15 | Interactive attach | real TTY `tmux attach-session` | **BLOCKED** | no TTY in this harness; plan-mode argv and pane interaction passed | needs a human/real terminal session |
+| 15 | Interactive attach/chat | real Linux PTY: outer tmux, `pluton attach`, real chat TUI, demo TUI, detach, reattach | **PASS (Linux)** | session `pluton_pluton_manager`; chat and `pluton --demo` rendered; `INNER_ALIVE:0`; `REATTACHED_INPUT_OK`; `INNER_KILL:0`; probe exit 0 | requirement exercised in a real Linux terminal; Windows/macOS interactive TTY remains unverified |
 | 16 | Cancellation / recovery | `npx vitest run tests/integration/supervisor.test.ts tests/unit/workspace.test.ts tests/integration/cli-workspace.test.ts` | **PASS** | 3 files, 90 tests; restart reconciliation and cancellation included | orchestration recovery preserved |
-| 17 | Native process-tree kill | focused native tests | **PASS** | hung exec and session-timeout tests pass; heartbeat stops | no orphaned child observed |
-| 18 | Docker-hidden full suite | same as #3 | **PASS** | 1,211/1,211 | strongest suite-level proof |
+| 17 | Native process-tree kill | focused native tests on Windows and Linux | **PASS** | hung exec and session-timeout tests pass; heartbeat stops; Linux process-group cleanup tests pass | no orphaned child observed |
+| 18 | Docker-hidden full suite | same as #3 | **PASS** | Windows 1,212/1,212; Linux 1,211 passed + 1 Windows-only skip | strongest suite-level proof on both executed platforms |
 
 ### 5.2 Isolation and security
 
 | # | Scenario | Command / method | Status | Evidence |
 |---|---|---|---|---|
-| 19 | Worker writes only its checkout | `pluton --json run …`; inspect root + `.pluton/workspaces` | **PASS** | fake run and real run: evidence file exists under `.pluton/workspaces/<task>/`, absent at project root |
+| 19 | Worker writes only its checkout | `pluton --json run …`; inspect root + `.pluton/workspaces` on Windows and Linux | **PASS** | fake run and both real runs: evidence file exists under `.pluton/workspaces/<task>/`, absent at project root |
 | 20 | Symlink cwd escape rejected | `npx vitest run tests/unit/native-execution.test.ts` | **PASS** | new test creates a junction/symlink outside the root; `prepare()` throws `PolicyDeniedError` |
 | 21 | Direct cwd escape rejected | same native-execution suite | **PASS** | existing test with a directory outside allowed roots throws `PolicyDeniedError` |
 | 22 | Isolated worker workdir hardening | `npx vitest run tests/unit/native-config.test.ts` | **PASS** | tests reject project root, engine-home, resolving symlink-to-root workdirs, and false-flag isolated-policy runs; a `..cache` checkout is accepted |
 | 23 | Environment allowlist | `npx vitest run tests/integration/native-execution.test.ts` | **PASS** | unit/integration tests show allowlisted value present, host secret absent, filtered names recorded |
 | 24 | Output bounds | `npx vitest run tests/unit/native-execution.test.ts` | **PASS** | UTF-8 tests cover 100-byte and split 101-byte caps; decoded output never exceeds the cap and truncation adds no replacement character |
-| 25 | Execution events/provider | store query: `listEvents(runId)` | **PASS** | both runs: 8 `execution.*` events, all `provider: native` |
-| 26 | No sandbox rows | store query: `listSandboxes(projectId)` | **PASS** | returns 0 for both runs |
-| 27 | Orphan cleanup | `Get-CimInstance Win32_Process` filter on scratch paths | **PASS** | no `opencode`/`node` process matching the scratch run paths after exit |
-| 28 | Loopback tool bridge | source inspection + real OpenCode run | **PASS (source/test)** | native chat/run use `127.0.0.1`; server adapter uses native provider |
+| 25 | Execution events/provider | store queries per run | **PASS** | Windows `run_mvj7x6ig87b32c2e`: 23 events, 8 `execution.*`; Linux `run_mvj5w3i8844a4ab5`: 21 events, 8 `execution.*`; all `provider: native` |
+| 26 | No sandbox rows | store query: `select * from sandboxes` | **PASS** | zero rows after both real runs |
+| 27 | Orphan cleanup | Windows `Get-CimInstance Win32_Process`; Linux `pgrep`/`ps` filters | **PASS** | no process matching `pluton-real-smoke-win-20261022`; no Linux `opencode` process remained; a pre-existing Windows `opencode serve --service` belongs to the active agent harness, not the run |
+| 28 | Loopback tool bridge | source inspection + real OpenCode runs | **PASS (source/test)** | native chat/run use `127.0.0.1`; both real runs exercised the bridge |
 | 29 | Full filesystem/network confinement | design/docs inspection | **NOT CLAIMED** | native is explicitly partial: host user filesystem and network are not kernel-confined |
 
 ### 5.3 Quality and release
@@ -218,14 +251,15 @@ tests, or unused Docker assets. Static imports of Docker modules do not spawn Do
 |---|---|---|---|---|
 | 30 | Focused native/config/doctor/guard tests | `npx vitest run tests/unit/native-execution.test.ts tests/unit/native-config.test.ts tests/unit/doctor.test.ts tests/integration/docker-free-runtime.test.ts tests/integration/native-execution.test.ts` | **PASS** | 5 files, 43 tests |
 | 31 | Orchestration/workspace tests | `npx vitest run tests/integration/supervisor.test.ts tests/unit/workspace.test.ts tests/integration/cli-workspace.test.ts` | **PASS** | 3 files, 90 tests |
-| 32 | Release gate, clean-tree requirement | `node scripts/release-check.mjs` after commit, Docker hidden | **PASS** | 15 checks, 14 passed, 0 failed, 1 not tested (POSIX 0600); `TECHNICAL VALIDATION: PASS`; `PUBLICATION: ELIGIBLE` (explicit human approval still required) |
-| 33 | Release gate with `--allow-dirty` | `node scripts/release-check.mjs --allow-dirty` before commit | **PASS (technical, pre-commit)** | 14 passed, 0 failed, 1 not tested (POSIX 0600); publication blocked by override |
-| 34 | POSIX permission enforcement | release-gate output | **NOT VERIFIED** | Windows does not enforce POSIX mode bits; release gate says it runs on Linux/macOS CI |
-| 35 | Linux/macOS runtime | `.github/workflows/ci.yml` inspection | **NOT VERIFIED** | CI matrix declares Ubuntu/macOS/Windows, but no CI result was observed here |
-| 36 | True Docker-uninstalled host | `Get-Command docker` after PATH filter | **NOT VERIFIED** | Docker is installed; PATH filtering + interception used |
-| 37 | Legacy Docker E2E | Docker-mode `pluton --json doctor` | **BLOCKED** | Docker mode correctly fails closed with daemon stopped; no container run attempted |
-| 38 | Real Qwen engine | source/test inspection | **NOT VERIFIED** | Qwen paths used the repository's ACP fake; real OpenCode was used |
-| 39 | Fresh dependency installation | `npm ci` with Docker hidden | **PASS (Windows)** | 42 packages installed, 0 vulnerabilities; full suite then passed 130 files / 1,211 tests | locked install is reproducible on Windows; POSIX clean install remains covered by the platform limitation |
+| 32 | Release gate, clean-tree requirement | `node scripts/release-check.mjs` after commit, Docker hidden | **PASS (Windows + Linux)** | Linux 15/15 including POSIX 0600; Windows 15 checks, 14 passed, 0 failed, 1 not tested (POSIX 0600); `TECHNICAL VALIDATION: PASS`; publication remains explicitly gated |
+| 33 | Release gate with `--allow-dirty` | `node scripts/release-check.mjs --allow-dirty` before commit on both hosts | **PASS (technical, pre-commit)** | Linux 15/15; Windows 14 passed, 0 failed, 1 not tested (POSIX 0600); publication blocked by override |
+| 34 | POSIX permission enforcement | release-gate output in WSL Ubuntu 24.04 | **PASS (Linux)** | file created with mode 0600 and observed 0600; Windows remains not tested |
+| 35 | Linux runtime | full suite, focused suites, gate, real run, PTY on WSL 2 Ubuntu 24.04 | **PASS** | 130 files / 1,211 passed + 1 Windows-only skip; gate 15/15; real run completed; PTY exit 0 |
+| 36 | macOS runtime | no macOS host or SSH target | **NOT VERIFIED** | macOS process-group, signal, path, and 0600 behavior unexecuted |
+| 37 | True Docker-uninstalled host | `Get-Command docker` after PATH filter | **NOT VERIFIED** | Docker is installed; PATH filtering + interception used on Windows; WSL Ubuntu has no Docker CLI but is not a separate physical host |
+| 38 | Legacy Docker E2E | Docker-mode `pluton --json doctor` | **BLOCKED** | Docker mode correctly fails closed with daemon stopped; no container run attempted |
+| 39 | Real Qwen engine | `qwen` presence check / source inspection | **BLOCKED** | `qwen` is absent/not configured; Qwen paths used the repository's ACP fake; real OpenCode was used |
+| 40 | Fresh dependency installation | `npm ci` with Docker hidden | **PASS (Windows)** | 42 packages installed, 0 vulnerabilities; the post-install suite passed 130 files / 1,211 tests at the earlier baseline, and the final suite passed 1,212 | locked install is reproducible on Windows; a fresh Linux clone additionally lacks two gitignored fixtures (see §9) |
 
 Rows marked **FAIL**, **BLOCKED**, or **NOT VERIFIED** are not passes. Their remediation/next step
 is the matching item in §9; PASS rows have no remediation. No row was marked PASS merely because
@@ -324,32 +358,67 @@ Task `task_mvj0j6u11fd42759` used workspace `workspace_mvj0j7i569fa1b39`. The ev
 root file was absent. Durable state had 17 events total, 8 `execution.*` events, all with
 `provider: native`, and zero sandbox rows.
 
-### 6.4 Real OpenCode engine run
+### 6.4 Real OpenCode engine runs (post-fix)
 
-Command (Docker hidden, scratch Git project, native config, OpenCode `opencode/deepseek-v4.1-flash-free`):
+**Windows (authoritative success).** Docker hidden, scratch Git project, native config, OpenCode
+`opencode/deepseek-v4.1-flash-free`, one-task budget:
 
 ```powershell
 pluton --json run `
   --goal "Create a file named native-real-engine.txt in the worker checkout containing exactly the text ok. Do not modify any other file." `
   --acceptance "native-real-engine.txt exists with content ok"
+pluton --json verify --run run_mvj7x6ig87b32c2e
 ```
 
-Observed:
+The run first returned `verifying/pending_verification`. `verify` then returned:
 
 ```json
 {
-  "run": { "id": "run_mvj0na5z1488b60c", "state": "completed", "outcome": "success" },
-  "taskCounts": { "completed": 1 }
+  "run": { "id": "run_mvj7x6ig87b32c2e", "state": "completed" },
+  "tasks": [
+    {
+      "taskId": "task_mvj7ypnu550c07c4",
+      "verdict": "completed",
+      "summary": "1/1 checks passed (4/4 criteria verified independently)",
+      "checks": [{ "name": "real-engine-file", "status": "passed", "exitCode": 0, "note": null }]
+    }
+  ],
+  "runVerdict": {
+    "runId": "run_mvj7x6ig87b32c2e",
+    "state": "completed",
+    "outcome": "success"
+  }
 }
 ```
 
-The manager created task `task_mvj0ntt4799a3a60`, assigned to `worker-a`; the worker used workspace
-`workspace_mvj0nudf65106115`. The file was found only in the workspace checkout, contained exactly
-`ok` (2 bytes, hex `6f 6b`), and the project-root copy was absent. The manager's own report recorded
-an independent `diff_inspect` showing only `?? native-real-engine.txt`.
+The worker used workspace `workspace_mvj7yq660cc02b29`. Durable state had 23 events, 8
+`execution.*` events all with `provider: native`, zero sandbox rows, and both `task.completed` and
+`run.finished` (success) persisted. The artifact was found only in
+`.pluton/workspaces/task_mvj7ypnu550c07c4/`, contained exactly `ok` (2 bytes, hex `6F-6B`), and the
+project-root copy was absent. No process matching the scratch path remained; a pre-existing
+`opencode serve --service` process belongs to the active agent harness and predates the run.
 
-Durable state: 22 events total, 8 `execution.*` events, all `provider: native`, zero sandbox rows.
-No `opencode`/`node` process matching the scratch path remained after exit.
+**Linux.** The same native OpenCode flow was run from `/root/pluton-real-smoke2` on WSL 2 Ubuntu:
+
+```bash
+node /root/pluton/bin/pluton.js --json run \
+  --goal "Delegate exactly one task to worker-a to create native-real-engine.txt in the worker checkout containing exactly the text ok. Wait for that task, inspect its diff, then reply with a one-line summary and stop. Do not explore the repository."
+```
+
+Run `run_mvj5w3i8844a4ab5` completed/success with task `task_mvj5xzdpb0b896f7` and workspace
+`workspace_mvj5xzg21bb2ef19`. Durable state had 21 events, 8 `execution.*` events all native, and
+zero sandbox rows. The artifact was `ok\n` (3 bytes, hex `6f 6b 0a`) only in the checkout; the root
+copy was absent and no `opencode` process remained. No project verification check was configured
+for this Linux run, so its completion evidence is the worker/manager result plus direct checkout
+inspection, not a verification row.
+
+**Additional Windows attempt (not counted as PASS).** `run_mvj7jw3y432500d4` reached `verifying`;
+task `task_mvj7lnhhbeff8bd2` completed and its `real-engine-file` verification passed. The Manager
+had also created dependent QA task `task_mvj7m1x4667387c1` and then cancelled it when the worker
+parked in `verifying`. `finalizeRunVerdict` correctly refused to mark the run completed because one
+task was not completed, so the run ended `failed`. This is a Manager-planning limitation under a
+dependency/gate race, not a native-execution, checkout, verification, or cleanup defect; the second
+run with a one-task budget closed successfully.
 
 ### 6.5 Verification and integration
 
@@ -409,9 +478,9 @@ Observed: start exit 0 (`mode: headless`, loopback URL, PID 13952), status exit 
 stop exit 0 (`stopped: true`). PID 13952 was gone after stop; no matching scratch `node` processes
 remained.
 
-### 6.7 Host-tmux attach
+### 6.7 Host-tmux attach and interactive TTY
 
-Docker hidden:
+**Windows plan-mode attach.** Docker hidden:
 
 ```powershell
 pluton --json attach manager
@@ -431,8 +500,30 @@ kill=0
 ```
 
 The session was created, a command was sent into its pane and captured, a second `attach` resolved
-the same session, and the session was killed cleanly. A real interactive `tmux attach-session`
-handoff was not possible because the harness has no TTY; this is marked **BLOCKED**, not PASS.
+the same session, and the session was killed cleanly. This harness is non-interactive, so it does
+not by itself prove an interactive handoff.
+
+**Linux real PTY.** The repository was mounted at `/root/pluton` on WSL 2 Ubuntu 24.04 and a real
+PTY probe was run from `/root/run-linux-tty-clean.sh` (outer tmux session; `C-a` prefix). The
+observed sequence was:
+
+```text
+attach -> session pluton_pluton_manager created
+real chat TUI rendered (Mode: chat, Model: opencode/deepseek-v4.1-flash-free)
+Ctrl+C twice exited the chat TUI
+global pluton --demo rendered and exited with q
+detach -> INNER_ALIVE:0
+reattach -> REATTACHED_INPUT_OK accepted
+second detach -> INNER_KILL:0
+probe exit 0
+```
+
+Evidence is in `/root/tty-attach-chat.log` and `/root/tty-clean.stdout`; the final log lines include
+`INNER_ALIVE:0`, `REATTACHED_INPUT_OK`, and `INNER_KILL:0`. This satisfies the interactive
+attach/chat requirement on Linux. `pluton chat --demo` did not launch the deterministic demo; the
+real chat TUI plus global `pluton --demo` were used instead. That option-collision behavior was not
+changed, and it is recorded as a limitation rather than silently counted as a demo pass. Windows and
+macOS interactive TTY runs were not available.
 
 ### 6.8 Cancellation, recovery, and process cleanup
 
@@ -443,39 +534,61 @@ npx vitest run tests/integration/supervisor.test.ts tests/unit/workspace.test.ts
 Result: 3 files, 90 tests passed. This includes restart reconciliation (T1–T7), cancellation
 interrupting live sessions (CS-9), workspace branching/cleanup, and durable run/task transitions.
 The native-provider focused tests additionally verify that a hung `exec` is killed at its timeout
-and that a process tree (parent + heartbeat child) stops on cancellation.
+and that a process tree (parent + heartbeat child) stops on cancellation. The Linux full suite and
+focused native/security suites passed as well; after the Linux real run, `pgrep -a opencode`
+returned no process, and no process matched the Windows scratch path after either Windows run.
 
 ### 6.9 Full suite and release gate
 
-Baseline before the audit changes: 130 files / 1,203 tests passed; the focused baseline was
-6 files / 61 tests. Final full suite, with Docker removed from `PATH`:
+Windows final full suite, with Docker removed from `PATH`:
 
 ```text
 Test Files  130 passed (130)
-Tests       1211 passed (1211)
+Tests       1212 passed (1212)
 Duration    ~104 s
 ```
 
-The same suite without PATH filtering also passed 130/1,211; the Docker-hidden run is the relevant
-acceptance evidence.
-
-Release gate before commit: only the clean-tree check failed (13 other checks passed, 1 not
-tested); `--allow-dirty` passed technical validation but blocked publication. After the reviewed
-changes were committed, the required clean-tree gate was re-run with Docker hidden:
+Linux final full suite, in WSL 2 Ubuntu 24.04 with Docker absent from the userland:
 
 ```text
-node scripts/release-check.mjs
-  [PASS] working tree clean
-  [PASS] 13 other checks (typecheck + tests 130/1,211, build, package contents, dependency audit,
-          owner decisions)
-  [NOT TESTED] POSIX 0600 permission enforcement (Windows)
-  checks: 15 | passed: 14 | failed: 0 | not tested: 1 | owner blockers: 0
-  TECHNICAL VALIDATION: PASS
-  PUBLICATION: ELIGIBLE — publishing still requires explicit human approval (docs/RELEASE.md)
+Test Files  130 passed (130)
+Tests       1211 passed | 1 skipped (1212)
+Skip        tests/unit/workspace.test.ts (Windows-only case)
 ```
 
-Publication was not performed. The POSIX permission check remains part of the platform-parity
-limitation below.
+The Linux skip is intentional and platform-scoped, not a suppressed native-execution test. The
+focused native/security suites and orchestration/workspace suites also passed on both hosts.
+
+`--allow-dirty` gate runs before commit:
+
+```text
+Windows: checks 15 | passed 14 | failed 0 | not tested 1 (POSIX 0600)
+Linux:   checks 15 | passed 15 | failed 0 | not tested 0
+```
+
+After the reviewed changes and this report were committed, the required clean-tree gate was run on
+both hosts with Docker hidden:
+
+```text
+Linux:
+  [PASS] working tree clean
+  [PASS] typecheck + tests (130 files / 1,211 passed, 1 skipped)
+  [PASS] build, package contents, dependency audit, owner decisions
+  [PASS] file permission enforcement (POSIX 0600)
+  checks: 15 | passed: 15 | failed: 0 | not tested: 0 | owner blockers: 0
+  TECHNICAL VALIDATION: PASS
+
+Windows:
+  [PASS] working tree clean
+  [PASS] typecheck + tests (130 files / 1,212 passed)
+  [PASS] build, package contents, dependency audit, owner decisions
+  [NOT TESTED] POSIX 0600 permission enforcement (Windows does not enforce POSIX mode bits)
+  checks: 15 | passed: 14 | failed: 0 | not tested: 1 | owner blockers: 0
+  TECHNICAL VALIDATION: PASS
+```
+
+Publication was not performed and nothing was pushed. The POSIX permission check remains part of the
+platform-parity limitation below; it is now directly exercised on Linux.
 
 ### 6.10 Legacy Docker branch regression
 
@@ -527,6 +640,11 @@ This does not verify container execution, image build, or Docker-mode task runs.
    `session_timeout_minutes` defaulted to 30 (actual default is 0); docs implied every session was
    always bounded; architecture/CLI/attach comments described Docker as the default and host tmux
    on Windows as unsupported. These are corrected.
+7. **OpenCode one-shot service lifecycle (fixed).** `models` and `auth list` used OpenCode's shared
+   managed service. Concurrent doctor/model probes could collide on the service port and leave a
+   detached `opencode serve --service` process. Both one-shot commands now pass `--standalone`;
+   adapter assertions check the argv and the Linux live probe passed without leaving a persistent
+   service.
 
 ### 7.2 Confirmed protections
 
@@ -534,11 +652,14 @@ This does not verify container execution, image build, or Docker-mode task runs.
   rejected fail-closed.
 - Environment values are allowlisted; host secrets are not inherited by default.
 - Native `exec` output is bounded by bytes; process trees are terminated on exit/timeout/cancel.
+  Linux process-group cleanup tests passed; Windows and Linux real runs left no matching process.
 - Native chat/run tool bridges are configured to bind to loopback (`127.0.0.1`) in source; the real
-  OpenCode run exercised the bridge successfully. Docker's host-gateway exposure is not used.
-- Isolated task checkouts are real Git worktrees under `.pluton/workspaces/`; both the fake and real
-  runs showed evidence only in the checkout.
+  OpenCode runs exercised the bridge successfully. Docker's host-gateway exposure is not used.
+- Isolated task checkouts are real Git worktrees under `.pluton/workspaces/`; the fake run and both
+  real runs on Windows and Linux showed evidence only in the checkout.
 - Orchestration retains durable state, approval channels, verification gating, and cancellation.
+  The Windows real run persisted `task.completed` and `run.finished` with a passed verification
+  check; the Linux real run persisted completion with 8 native execution events.
 
 ### 7.3 Residual security limitations (by design)
 
@@ -570,6 +691,10 @@ This does not verify container execution, image build, or Docker-mode task runs.
 | 9 | Low | Legitimate checkout name beginning with `..` was rejected as an escape | `.pluton/workspaces/..cache` failed the prefix check | exact `..` / `..<separator>` containment comparison | `..cache` checkout test |
 | 10 | Medium | Isolated-policy worker could bypass containment when the caller reported no checkout | `nativeSpecForMuse` with `isolatedCheckout: false` returned a read-only root spec | fail closed for `sessionKind: run` + `isolated-task-checkout` | false-flag regression |
 | 11 | Low | `doctor` reported "no project config" when config loading threw | invalid `pluton.yaml` + native mode | distinguish `configError` from an absent config | doctor config-error test |
+| 12 | Medium | OpenCode one-shot `models`/`auth list` reused the shared managed service | concurrent doctor/model probes collided on the service port and could leave a detached `opencode serve --service` | pass `--standalone` for both one-shot commands | adapter argv assertions; Linux live probe 2 passed / 1 skipped with no persistent service |
+| 13 | Medium | `sameDirPath` applied host path semantics to the requested target platform | a `win32` path comparison used POSIX rules when evaluated on Linux (and vice versa) | select `win32`/`posix` path semantics from the `platform` argument | `app-lifecycle` platform-path test, 12/12 on Windows and Linux |
+| 14 | Low | Release-gate leak regex false-positived on a one-segment `/root` home | `/root` was reduced to the bare word `root`, matching ordinary prose | preserve the leading separator for absolute POSIX paths | `release-gate` 27/27 on both hosts, including positive and negative `/root` cases |
+| 15 | Low | Windows-path unit tests used host `join`, so they failed on Linux | `opencode-pure` assertions produced `/...` instead of `C:\\...` under WSL | use `win32.join` for Windows fixtures | `opencode-pure` 10/10 on Windows and Linux |
 
 No security control was weakened to obtain a pass. One checked-in configuration posture did change:
 `pluton.yaml` moved from Docker/`restricted` networking to native/`open` with both acknowledgements,
@@ -585,35 +710,53 @@ being described as stronger than it is.
    child-process interception are strong proxies, but an OS without Docker may expose installer or
    packaging assumptions not present here. Remediation: repeat the matrix on a clean VM/image with
    no Docker packages.
-2. **POSIX/macOS runtime is unexecuted.** Only Windows 11 was run. The CI workflow declares
-   Ubuntu/macOS/Windows, but no CI result was observed. POSIX process-group kill, signals, path
-   handling, and POSIX 0600 permission checks are source/CI coverage only. Remediation: run
-   `npm run release:check` on all three CI runners and record results.
-3. **Interactive attach/chat is unexecuted.** Plan-mode attach, session creation, pane command
-   execution, and reattachment pass; a real TTY `tmux attach-session` and interactive chat TUI do
-   not. Remediation: manual TTY acceptance on Windows, Linux, and macOS with and without tmux.
+2. **macOS runtime is unverified.** Linux POSIX is now executed in WSL 2 Ubuntu 24.04: process-group
+   cleanup, signals, path handling, and POSIX 0600 pass. No macOS host or SSH target was available,
+   so macOS process-group, signal, path, and permission behavior remains **NOT VERIFIED**.
+   Remediation: run the full matrix and release gate on a macOS runner.
+3. **Interactive attach/chat is verified on Linux only.** A real Linux PTY exercised attach, the
+   chat TUI, demo TUI, detach, reattach, and cleanup. The Windows harness is non-interactive and
+   `winpty` is absent; macOS was unavailable. `pluton chat --demo` did not launch the deterministic
+   demo (the real chat TUI and global `pluton --demo` were used), and that option collision was not
+   changed. Remediation: manual TTY acceptance on Windows and macOS, and decide whether to fix the
+   `chat --demo` option collision.
 4. **Legacy Docker mode is not E2E-tested here.** The daemon is stopped; Docker mode correctly
    fails closed in `doctor`, but container creation, image build, and Docker-mode task execution
    were not run. This is the opt-in legacy path, outside the native acceptance gate, but it remains
    a regression risk. Remediation: run the opt-in Docker E2E suite on a host with Docker Desktop.
-5. **Real Qwen was not run.** Qwen workflows used the repository's fake ACP engine. Real OpenCode
-   v2.1.2 succeeded, but one engine/one model/one run is not broad engine coverage. Remediation:
-   repeat the real-engine smoke with Qwen and additional models.
+5. **Real Qwen is blocked.** `qwen` is absent/not configured; Qwen workflows used the repository's
+   fake ACP engine. Real OpenCode v2.1.2 succeeded on Windows and Linux, but one engine is not broad
+   engine coverage. Remediation: install/configure Qwen and repeat the real-engine smoke.
 6. **Native isolation is partial by design.** Filesystem, network, and resource limits are not
    kernel-enforced. The acknowledgements and `doctor` text are accurate, but operators must not
    treat native mode as a container boundary.
 7. **UTF-8 truncation now trims a partial multibyte sequence** before decoding, so truncation does
    not add replacement characters and the decoded byte length stays within the cap. Malformed UTF-8
    emitted by a child may still decode with replacement characters; the fallback bounds the bytes.
-8. **The release gate is clean on Windows.** The reviewed changes are committed and the clean-tree
-   gate passed 14/0/1 (POSIX 0600 not tested on Windows). Publication was not performed; POSIX/macOS
-   CI remains the outstanding platform check.
+8. **Release-gate coverage differs by OS.** Linux passed 15/15 including POSIX 0600; Windows passed
+   14/0/1 because Windows does not enforce POSIX mode bits. Both clean-tree gates were run after the
+   reviewed commit. Publication was not performed and nothing was pushed; macOS CI remains
+   outstanding.
 9. **Full-stack template requires Qwen.** A fresh full-stack `doctor` exits 1 when Qwen is absent,
    even though Docker is not involved. This is an engine prerequisite, not a Docker regression;
    users can use an opencode-only team or install Qwen.
-10. **Fresh dependency installation is verified on Windows only.** `npm ci` with Docker hidden
-    installed 42 locked packages with 0 vulnerabilities, and the post-install suite passed
-    130 files / 1,211 tests. A clean Linux/macOS install remains part of the platform-parity gap.
+10. **Fresh dependency installation is verified on Windows only, and the Linux workspace was
+    prepared.** `npm ci` with Docker hidden installed 42 locked packages with 0 vulnerabilities, and
+    the post-install suite passed 130 files / 1,211 tests at the earlier baseline; the final Windows
+    suite is 1,212. A fresh Linux clone lacks two gitignored fixtures
+    (`.pluton/roles/` and `.pluton-tmp/smoke-docker/pluton.yaml`), so those fixture-dependent tests
+    fail until the fixtures are provisioned. The prepared Linux workspace passed 1,211 plus one
+    Windows-only skip; this is a test-fixture packaging gap, not a native-execution failure.
+11. **Manager planning can produce a non-success run after verification.** In the first Windows real
+    attempt, the Manager created a dependent QA task and cancelled it when the worker parked in
+    `verifying`; the worker and verification passed, but the run correctly ended `failed` because a
+    non-completed task remained. The one-task-budget rerun closed `completed/success`. This is a
+    Manager-planning limitation, not a native-execution or cleanup defect.
+12. **Real-engine evidence differs slightly by platform.** The Windows run had a configured
+    `real-engine-file` verification check and produced exact 2-byte `ok`; the Linux run had no
+    project verification check, produced 3-byte `ok\n`, and was validated by direct checkout
+    inspection plus durable events. Both prove checkout-only native execution, but the verification
+    depth is not identical.
 
 ---
 
@@ -621,32 +764,39 @@ being described as stronger than it is.
 
 ### **ACCEPTED WITH LIMITATIONS**
 
-The native execution migration meets the core Docker-free acceptance criteria on the tested Windows
-host:
+The native execution migration meets the core Docker-free acceptance criteria on two executed hosts,
+Windows 11 and WSL 2 Ubuntu 24.04:
 
 - default config/onboarding is native and Docker-free;
 - native init, doctor, probe, run, task execution, checkout isolation, verification, integration,
-  app startup, and terminal creation/reattachment work with Docker hidden;
-- the full suite passes with Docker hidden;
-- a real OpenCode engine completes a native multi-agent run and writes only in its isolated
-  checkout;
+  app startup, terminal creation/reattachment, interactive attach/chat (Linux PTY), and process
+  cleanup work with Docker hidden;
+- the full suite passes with Docker hidden on both hosts (Windows 1,212; Linux 1,211 plus one
+  Windows-only skip);
+- real OpenCode v2.1.2 runs complete natively on both hosts and write only in their isolated
+  checkouts; the Windows run also persisted a passed verification check and `run.finished` success;
 - Docker remains an explicit opt-in legacy path and correctly fails closed when its daemon is
   unavailable;
 - no blocking native-path defect remains after the reviewed fixes above.
 
-The decision is not unconditional **ACCEPTED** because true Docker absence, POSIX/macOS runtime,
-interactive TTY attach, Docker-mode E2E, and real Qwen execution were not independently verified.
-Those are recorded as **BLOCKED** or **NOT VERIFIED**, not hidden as PASS.
+The decision is not unconditional **ACCEPTED** because true Docker absence, macOS runtime,
+interactive TTY on Windows/macOS, Docker-mode E2E, and real Qwen execution still lack direct
+evidence. Those are recorded as **BLOCKED** or **NOT VERIFIED**, not hidden as PASS. The Linux TTY
+requirement is now satisfied and is no longer a gate blocker.
 
-The reviewed changes are committed and the clean-tree release gate passed (14 passed, 0 failed,
-1 not tested for POSIX 0600), satisfying the former commit condition.
+The reviewed changes are committed and both clean-tree release gates were run: Linux **15/15**
+(including POSIX 0600) and Windows **14/0/1** (POSIX 0600 not tested on Windows). Technical
+validation passed on both hosts; nothing was pushed or published.
 
 **Conditions to upgrade to ACCEPTED:**
 
 1. Re-run this matrix (including `npm ci`) on a host/VM with no Docker packages installed and no
    Docker daemon.
-2. Run `npm run release:check` on Ubuntu, macOS, and Windows CI, including POSIX permission checks.
-3. Perform a real TTY attach and interactive chat test on each supported OS, with and without tmux.
+2. Run the release gate on macOS and a fresh Ubuntu clone; provision or remove the two gitignored
+   Linux fixtures (`.pluton/roles/` and `.pluton-tmp/smoke-docker/pluton.yaml`) so a clean clone is
+   self-sufficient.
+3. Perform a real TTY attach and interactive chat test on Windows and macOS, with and without tmux,
+   and decide whether the `pluton chat --demo` option collision should be fixed.
 4. Run the opt-in Docker E2E suite on a host with a working Docker daemon.
 5. Run at least one real Qwen engine smoke in addition to OpenCode.
 
@@ -667,6 +817,16 @@ Implementation and tests:
 - `tests/unit/doctor.test.ts` — no-probe assertions.
 - `tests/integration/docker-free-runtime.test.ts` — real `runDoctor` no-spawn guard.
 
+Post-hardening review fixes:
+
+- `src/engines/opencode/adapter.ts` — `--standalone` for one-shot `models` and `auth list` queries.
+- `tests/unit/opencode-adapter.test.ts` — argv assertions for both one-shot commands.
+- `src/server/instance.ts` — target-platform path semantics in `sameDirPath`.
+  Existing `tests/unit/app-lifecycle.test.ts` supplies the Windows/POSIX regression coverage.
+- `scripts/lib/release-gate.mjs` — anchor single-segment POSIX paths to a leading separator.
+- `tests/unit/release-gate.test.ts` — `/root` false-positive and true-positive regression.
+- `tests/unit/opencode-pure.test.ts` — use `win32.join` for Windows-path fixtures on Linux.
+
 Configuration and documentation:
 
 - `pluton.yaml` — native/open with acknowledgements.
@@ -677,15 +837,15 @@ Configuration and documentation:
 - `docs/PLUTON_ARCHITECTURE.md` — native execution and host-tmux sections.
 - `docs/DOCKER_ABSENT_ACCEPTANCE_AUDIT.md` — this report.
 
-No commits were pushed or released. The reviewed change set is committed, and the clean-tree
-release gate passed with no failed checks.
+No commits were pushed or released. The reviewed change set is committed, and both clean-tree
+release gates passed (Linux 15/15; Windows 14/0/1 with POSIX 0600 not applicable).
 
 ---
 
 ## Appendix B — Key commands run
 
 ```powershell
-# Baseline / final quality
+# Windows baseline / final quality
 npm run typecheck
 npm run build
 npm test
@@ -693,12 +853,12 @@ npm test                                  # with Docker removed from PATH
 node scripts/release-check.mjs
 node scripts/release-check.mjs --allow-dirty
 
-# Native lifecycle, Docker hidden
+# Windows native lifecycle, Docker hidden
 pluton init --team full-stack --name init-audit
 pluton --json doctor
 pluton --json sandbox probe
 pluton --json run --goal "..." --acceptance "..."
-pluton --json verify --run <id>
+pluton --json verify --run run_mvj7x6ig87b32c2e
 pluton --json integrate --run <id>
 pluton --json app --headless --detach --port 43123
 pluton --json app --status
@@ -708,4 +868,26 @@ pluton --json attach manager
 # Focused suites
 npx vitest run tests/unit/native-execution.test.ts tests/unit/native-config.test.ts tests/unit/doctor.test.ts tests/integration/docker-free-runtime.test.ts tests/integration/native-execution.test.ts
 npx vitest run tests/integration/supervisor.test.ts tests/unit/workspace.test.ts tests/integration/cli-workspace.test.ts
+npx vitest run tests/unit/opencode-adapter.test.ts tests/unit/opencode-pure.test.ts tests/unit/release-gate.test.ts tests/unit/app-lifecycle.test.ts
+```
+
+```bash
+# Linux (WSL 2 Ubuntu 24.04, repository on ext4)
+cd /root/pluton
+npm test
+node scripts/release-check.mjs --allow-dirty
+node scripts/release-check.mjs            # after commit
+
+# Real OpenCode smoke
+cd /root/pluton-real-smoke2
+node /root/pluton/bin/pluton.js --json run \
+  --goal "Delegate exactly one task to worker-a to create native-real-engine.txt in the worker checkout containing exactly the text ok. Wait for that task, inspect its diff, then reply with a one-line summary and stop. Do not explore the repository."
+
+# Interactive PTY
+bash /root/run-linux-tty-clean.sh
+# Expected markers: INNER_ALIVE:0, REATTACHED_INPUT_OK, INNER_KILL:0, probe exit 0.
+
+# Process and durable-state inspection
+pgrep -a opencode
+node /root/inspect-linux-runs.mjs
 ```

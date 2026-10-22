@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { win32 } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseCmdShim, resolveOpenCodeBinary } from '../../src/engines/opencode/discover.ts'
 import { normalizeSessionUpdate, summarizePromptResult } from '../../src/engines/opencode/normalize.ts'
@@ -18,8 +18,8 @@ const NPM_SHIM = [
 
 describe('opencode binary resolution', () => {
   it('parses the real npm .cmd shim for its .exe target', () => {
-    const shimPath = join('C:', 'npm', 'opencode.cmd')
-    const exePath = join('C:', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe')
+    const shimPath = win32.join('C:', 'npm', 'opencode.cmd')
+    const exePath = win32.join('C:', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe')
     const found = parseCmdShim(
       shimPath,
       () => NPM_SHIM,
@@ -29,10 +29,10 @@ describe('opencode binary resolution', () => {
   })
 
   it('handles %~dp0 variants and refuses when no target exists', () => {
-    const shimPath = join('C:', 'n', 'x.cmd')
+    const shimPath = win32.join('C:', 'n', 'x.cmd')
     const text = '"%~dp0\\bin\\tool.exe" %*'
-    expect(parseCmdShim(shimPath, () => text, (p) => p === join('C:', 'n', 'bin', 'tool.exe'))).toBe(
-      join('C:', 'n', 'bin', 'tool.exe'),
+    expect(parseCmdShim(shimPath, () => text, (p) => p === win32.join('C:', 'n', 'bin', 'tool.exe'))).toBe(
+      win32.join('C:', 'n', 'bin', 'tool.exe'),
     )
     expect(parseCmdShim(shimPath, () => text, () => false)).toBeNull()
   })
@@ -54,27 +54,27 @@ describe('opencode binary resolution', () => {
   })
 
   it('scans PATH on win32 for opencode.exe, then .cmd shims', () => {
-    const pathA = join('C:', 'a')
-    const pathB = join('C:', 'b')
+    const pathA = win32.join('C:', 'a')
+    const pathB = win32.join('C:', 'b')
     const direct = resolveOpenCodeBinary({
       env: { PATH: `${pathA};${pathB}` },
       platform: 'win32',
-      isFile: (p) => p === join(pathB, 'opencode.exe'),
+      isFile: (p) => p === win32.join(pathB, 'opencode.exe'),
     })
-    expect(direct).toMatchObject({ ok: true, binary: { path: join(pathB, 'opencode.exe'), via: 'path' } })
+    expect(direct).toMatchObject({ ok: true, binary: { path: win32.join(pathB, 'opencode.exe'), via: 'path' } })
 
-    const shimDir = join('C:', 'npm')
+    const shimDir = win32.join('C:', 'npm')
     const shim = resolveOpenCodeBinary({
       env: { PATH: shimDir },
       platform: 'win32',
       isFile: (p) =>
-        p === join(shimDir, 'opencode.cmd') ||
-        p === join(shimDir, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'),
+        p === win32.join(shimDir, 'opencode.cmd') ||
+        p === win32.join(shimDir, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'),
       readTextFile: () => NPM_SHIM,
     })
     expect(shim).toMatchObject({
       ok: true,
-      binary: { path: join(shimDir, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'), via: 'cmd-shim' },
+      binary: { path: win32.join(shimDir, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'), via: 'cmd-shim' },
     })
   })
 

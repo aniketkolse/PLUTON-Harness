@@ -106,7 +106,11 @@ function escapeRegExp(s) {
  */
 function pathToFlexibleRegex(p) {
   const segments = p.split(/[\\/]+/).filter((s) => s !== '')
-  return segments.map(escapeRegExp).join('[\\\\/]{1,2}')
+  const body = segments.map(escapeRegExp).join('[\\\\/]{1,2}')
+  // Keep the leading separator for absolute POSIX paths. Without it, a
+  // single-segment home such as `/root` becomes the bare word `root` and
+  // false-positives on ordinary prose (`the root directory`) and identifiers.
+  return /^[\\/]/.test(p) ? `[\\\\/]${body}` : body
 }
 
 /**

@@ -4,7 +4,7 @@
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join, normalize, resolve } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { request } from 'node:http'
 import type { HealthResponse, ServerInstanceInfo } from './types.ts'
 
@@ -131,8 +131,9 @@ export function isPidAlive(pid: number): boolean {
  * server as an unintended service and spawn a duplicate instance (release-gate fix).
  */
 export function sameDirPath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
-  const na = normalize(resolve(a))
-  const nb = normalize(resolve(b))
+  const path = platform === 'win32' ? win32 : posix
+  const na = path.normalize(path.resolve(a))
+  const nb = path.normalize(path.resolve(b))
   if (platform === 'win32' || platform === 'darwin') {
     return na.toLowerCase() === nb.toLowerCase()
   }

@@ -157,6 +157,18 @@ describe('leak scanning', () => {
     expect(scanTextForLeaks('C:\\Users\\Public\\Desktop', patterns)).toEqual([])
   })
 
+  it('anchors single-segment POSIX home and checkout paths to a separator', () => {
+    const posixPatterns = buildLeakPatterns({
+      homeDir: '/root',
+      repoRoot: '/root/pluton',
+      platform: 'linux',
+    })
+    expect(scanTextForLeaks('See LICENSE in the root directory.', posixPatterns)).toEqual([])
+    expect(scanTextForLeaks('const rootDir = resolve(cwd)', posixPatterns)).toEqual([])
+    expect(scanTextForLeaks('config at /root/.config/pluton', posixPatterns)).toContain('local home directory')
+    expect(scanTextForLeaks('built in /root/pluton/dist', posixPatterns)).toContain('local checkout path')
+  })
+
   it('findContentLeaks reports per-file findings and skips unreadable files', () => {
     const findings = findContentLeaks({
       files: ['dist/a.js', 'dist/missing.js'],

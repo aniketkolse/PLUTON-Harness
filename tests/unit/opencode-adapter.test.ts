@@ -106,18 +106,23 @@ describe('opencode adapter: capabilities and discovery', () => {
   })
 
   it('listModels() parses the real `opencode models` line format', async () => {
+    let seenArgv: string[] | undefined
     const { adapter } = makeAdapter(new FakeAcpAgent(), {
-      runFn: async (argv) => ({
-        argv,
-        exitCode: 0,
-        timedOut: false,
-        stdout: 'opencode/big-pickle\nopencode/cat-jam-free\n\njunk line with spaces\nopencode/big-pickle\nopencode/deepseek-v4.1-flash-free\n',
-        stderr: '',
-        truncated: false,
-        durationMs: 1,
-      }),
+      runFn: async (argv) => {
+        seenArgv = argv
+        return {
+          argv,
+          exitCode: 0,
+          timedOut: false,
+          stdout: 'opencode/big-pickle\nopencode/cat-jam-free\n\njunk line with spaces\nopencode/big-pickle\nopencode/deepseek-v4.1-flash-free\n',
+          stderr: '',
+          truncated: false,
+          durationMs: 1,
+        }
+      },
     })
     const models = await adapter.listModels()
+    expect(seenArgv).toEqual(['/fake/opencode', 'models', '--standalone'])
     expect(models.map((m: EngineModel) => m.id)).toEqual([
       'opencode/big-pickle',
       'opencode/cat-jam-free',
@@ -139,8 +144,10 @@ describe('opencode adapter: capabilities and discovery', () => {
 
   it('authStatus() checks the Muse engine home and reports presence only', async () => {
     let seenEnv: Record<string, string> | undefined
+    let seenArgv: string[] | undefined
     const { adapter } = makeAdapter(new FakeAcpAgent(), {
       runFn: async (argv, options) => {
+        seenArgv = argv
         seenEnv = options?.env as Record<string, string> | undefined
         return { argv, exitCode: 0, timedOut: false, stdout: 'No authenticated integrations\n', stderr: '', truncated: false, durationMs: 1 }
       },
@@ -148,6 +155,7 @@ describe('opencode adapter: capabilities and discovery', () => {
     const none = await adapter.authStatus(join('C:', 'muse-home'))
     expect(none.configured).toBe(false)
     expect(none.hint).toMatch(/auth login/)
+    expect(seenArgv).toEqual(['/fake/opencode', 'auth', 'list', '--standalone'])
     expect(seenEnv?.['XDG_CONFIG_HOME']).toBe(join(join('C:', 'muse-home'), 'config'))
   })
 })
