@@ -1,5 +1,10 @@
 # Pluton `run` Wiring + Live Smoke Implementation Plan
 
+> **Historical plan — do not execute engine steps as written (engine note 2026-10-22):** Qwen Code
+> support was removed. Qwen worker, `PLUTON_QWEN_BIN`, and Qwen image-install steps below record the
+> plan that was executed at the time, not current instructions. Use the OpenCode-only configuration
+> in [`../../../docs/MIGRATION.md`](../../../docs/MIGRATION.md) §8 for current work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `pluton run` a real command that drives the tested `RunSupervisor` end-to-end with per-Muse MCP bridge specs, budget from config, and engine env allowlisting — first on host engines, then with engines inside per-Muse Docker containers — proven by a live smoke (manager on OpenCode + worker on Qwen) that `pluton verify` closes.

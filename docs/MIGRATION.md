@@ -6,7 +6,7 @@ This guide explains how to migrate existing Pluton projects from Docker containe
 
 ## 1. Executive Summary
 
-Historically, Pluton ran AI coding engines (such as OpenCode and Qwen Code) inside dedicated Linux containers via Docker Desktop or the Docker engine. Pluton now provides **first-class native execution** as its default runtime substrate:
+Historically, Pluton ran AI coding engines inside dedicated Linux containers via Docker Desktop or the Docker engine. Pluton now provides **first-class native execution** as its default runtime substrate, with OpenCode as its only supported real engine:
 
 - **Zero Docker dependency**: Run `pluton init`, `pluton doctor`, `pluton run`, `pluton chat`, `pluton attach`, and `pluton verify` without Docker Desktop, Linux containers, or WSL2 virtual machine overhead.
 - **Lower latency and resource consumption**: Eliminates VM boot times, container creation overhead, and bind-mount translation latency.
@@ -65,13 +65,13 @@ sandbox:
 muses:
   manager:
     role: supervisor
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: coordinator-read-only
   worker-a:
     role: coder
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: isolated-task-checkout
 ```
 
@@ -114,13 +114,13 @@ sandbox:
 muses:
   manager:
     role: supervisor
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: coordinator-read-only
   worker-a:
     role: coder
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: isolated-task-checkout
 ```
 
@@ -266,3 +266,50 @@ If your team requires strict OS-level container isolation or containerized netwo
    pluton sandbox build-image
    ```
 4. Verify with `pluton doctor`.
+
+---
+
+## 8. Engine Migration: Qwen Code Support Removed
+
+**Status: current (2026-10-22).** Qwen Code is no longer a supported engine and no longer ships
+in Pluton's worker image, registry, approval policy, templates or tests. OpenCode is the only
+supported real engine; the deterministic `mock` adapter remains for tests/development.
+
+### What changed
+
+- `engine: qwen` is no longer accepted by the engine registry. Every Muse must use
+  `engine: opencode` (or `engine: mock` in an explicitly dev/test configuration).
+- Qwen-specific session modes, `allow_once` approval grants, model-value conversion and
+  `QWEN_DIR` state redirection were removed. OpenCode sessions use the same fail-closed policy
+  table as every supported real engine: `autonomous-bounded` → `deny`, ask-* → interactive.
+- `PLUTON_QWEN_BIN`, `QWEN_DIR` and Qwen auth hints are no longer read.
+- The `engines` worker-image profile installs only `@opencode/cli`; an existing image containing
+  Qwen must be rebuilt to match the current profile.
+- Qwen ACP fixtures/helpers and Qwen-only adapter tests were deleted. Deterministic engine tests
+  now use the fake OpenCode CLI or the mock engine.
+
+### Migration steps
+
+1. In `pluton.yaml`, change every `engine: qwen` to `engine: opencode`.
+2. Replace each Qwen model id with an OpenCode model id. Discover the ids available to a Muse:
+   ```bash
+   pluton muse model list <muse>
+   # or query the engine directly:
+   opencode models --standalone
+   ```
+   Template examples use `opencode/deepseek-v4.1-flash-free`.
+3. Re-authenticate OpenCode in each Muse's private engine home if the old home only contained
+   Qwen credentials. Credentials are never copied between engines.
+4. Remove `PLUTON_QWEN_BIN` from shell profiles/CI and remove Qwen-only `OPENAI_*` /
+   `DASHSCOPE_*` variables unless your OpenCode provider actually needs them.
+5. If using container mode, rebuild and reprovision the worker image:
+   ```bash
+   pluton sandbox build-image --engines
+   ```
+   The current image proves only the OpenCode binary at build time.
+6. Run `pluton doctor` and then a small native run. Approval requests under
+   `autonomous-bounded` are intentionally denied; use `ask-for-sensitive-actions` or
+   `ask-always` when operator approval prompts are desired.
+
+No SQLite schema migration is required. Historical runs retain their recorded engine values and
+events as immutable history; only new sessions use the OpenCode-only configuration.

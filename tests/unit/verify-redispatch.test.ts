@@ -203,4 +203,33 @@ describe('PR-4: Verification Gate Re-dispatch', () => {
       store.close()
     }
   })
+
+  it('does not call a run verified when terminal tasks were cancelled, and records why', () => {
+    const { store, runId, task1Id, task2Id } = createTestSetup()
+
+    try {
+      // The documented manager failure mode: it cancels a dependent while the
+      // prerequisite is verifying. Both end terminal, but neither is success.
+      store.setTaskState(task1Id, 'cancelled', { failure: { code: 'operator_cancelled' } })
+      store.setTaskState(task2Id, 'cancelled', { failure: { code: 'dependency_cancelled' } })
+
+      const runVerdict = finalizeRunVerdict(store, runId)
+      expect(runVerdict).toMatchObject({ state: 'failed', outcome: 'failure' })
+
+      const run = store.getRun(runId)
+      expect(run.state).toBe('failed')
+      expect(run.finalSummary).toContain('cancelled')
+
+      const row = store.db
+        .prepare("SELECT payload_json FROM events WHERE run_id = ? AND type = 'run.finished'")
+        .get(runId) as { payload_json: string } | undefined
+      expect(JSON.parse(row?.payload_json as string)).toMatchObject({
+        outcome: 'failure',
+        via: 'verification',
+        cancelledTasks: 2,
+      })
+    } finally {
+      store.close()
+    }
+  })
 })

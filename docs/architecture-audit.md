@@ -1,5 +1,10 @@
 # Pluton-Harness Architecture Audit (Priority 0)
 
+> **Historical audit (2026-10-17; engine note 2026-10-22):** This report predates the
+> OpenCode-only migration. Qwen Code support was removed; references below describe the repository
+> at audit time and are not current support or setup instructions. OpenCode is the only supported
+> real engine (`mock` is tests/dev only).
+
 Date: 2026-10-17. Scope: repository structure, launcher path, chat/TUI pipeline, approval
 lifecycle, tool-catalog integration. Method: source inspection + real command runs
 (`npm run typecheck`, `npm run test`, `npm run build`, live bridge probe). No claims below
@@ -13,7 +18,8 @@ are based on documentation alone where a run was possible.
 - Entry points: `src/app.ts` (CLI), `src/cli/commands/chat.ts` (chat command),
   `src/chat/session.ts` (interactive session loop), `src/tui/*` (rendering).
 - Persistence: SQLite via `src/store/*` (runs, tasks, chat sessions/messages, approvals,
-  events). Engine integration: ACP adapters under `src/engines/` (opencode, qwen, mock).
+  events). Engine integration: ACP adapters under `src/engines/` (opencode, mock; Qwen support was
+  removed 2026-10-22 and is historical).
 - Orchestration: Manager/worker Muses through a restricted tool bridge
   (`src/tools/bridge.ts`, `src/tools/operator-catalog.ts`, `src/tools/handlers.ts`).
 

@@ -49,7 +49,7 @@ cycles, duplicate wakeups and hidden team growth are exactly the failure modes t
   limits and records a pending approval row (plus a `muse.proposal_recorded` event); nothing is
   instantiated silently, and applying an approved proposal is pending the run loop.
 - Engine-side tool consumption recon (OpenCode v2 `mcp.servers.*` shape and Code-Mode visibility,
-  Qwen approval-gated project scope, recommended host-side Streamable HTTP endpoint with per-Muse
+  plus historical Qwen notes, recommended host-side Streamable HTTP endpoint with per-Muse
   bearer tokens, stdio fallback) recorded in
   `docs/reverse-engineering/engine-mcp-integration.md`; container→host reachability is a Phase 6
   test item.

@@ -251,6 +251,73 @@ function assertDependenciesVisible(env: ToolEnv, dependsOn: string[] | undefined
 }
 
 /**
+ * Cancel every not-yet-terminal task that transitively depends on `rootTaskId`.
+ *
+ * A dependent can only be dispatched after its prerequisite reaches
+ * `completed`; once the prerequisite is cancelled that can never happen, so
+ * leaving dependents queued strands them forever. Each dependent gets the
+ * immediate cancelled prerequisite plus the cascade root in its durable failure
+ * record, and an explicit audit event.
+ */
+function cancelDependentTasks(env: ToolEnv, rootTaskId: string, reason: string): string[] {
+  const dependentsByDependency = new Map<string, string[]>()
+  for (const edge of env.store.listEdges(env.runId)) {
+    const list = dependentsByDependency.get(edge.toTaskId) ?? []
+    list.push(edge.fromTaskId)
+    dependentsByDependency.set(edge.toTaskId, list)
+  }
+
+  const cancelled: string[] = []
+  const seen = new Set<string>([rootTaskId])
+  const queue: Array<{ taskId: string; dependencyTaskId: string }> = [
+    { taskId: rootTaskId, dependencyTaskId: rootTaskId },
+  ]
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i] as { taskId: string; dependencyTaskId: string }
+    for (const dependentId of dependentsByDependency.get(current.taskId) ?? []) {
+      if (seen.has(dependentId)) continue
+      seen.add(dependentId)
+      const dependent = env.store.getTask(dependentId)
+      // A completed dependent may legitimately have ready children; only a
+      // cancelled/failed terminal dependent makes its subtree unreachable.
+      if (TERMINAL_TASK_STATES.has(dependent.state)) continue
+      try {
+        env.store.setTaskState(dependent.id, 'cancelled', {
+          failure: {
+            code: 'dependency_cancelled',
+            dependencyTaskId: current.taskId,
+            rootTaskId,
+            reason,
+          },
+        })
+      } catch (e) {
+        if (!(e instanceof StateTransitionError)) throw e
+        // Another writer made it terminal between the read and the CAS. Its
+        // subtree is no longer ours to touch; the direct cancel already won.
+        if (!TERMINAL_TASK_STATES.has(env.store.getTask(dependent.id).state)) throw e
+        continue
+      }
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: dependent.id,
+        museId: env.callerMuseId,
+        type: 'task.cancelled_by_dependency',
+        payload: {
+          dependencyTaskId: current.taskId,
+          rootTaskId,
+          reason,
+          cancelledBy: env.callerMuseId,
+        },
+      })
+      cancelled.push(dependent.id)
+      queue.push({ taskId: dependent.id, dependencyTaskId: current.taskId })
+    }
+  }
+  return cancelled
+}
+
+/**
  * Approval expiry stamp from the operator's `runtime.approval_timeout_minutes`
  * (0 = approvals never expire). One helper so every creation site — specialist
  * proposals and generic approval requests — rides the same TTL.
@@ -488,9 +555,14 @@ export const TOOL_HANDLERS: ToolHandlers = {
       type: 'task.cancelled_by_tool',
       payload: { reason: a.reason, cancelledBy: env.callerMuseId },
     })
+    const cancelledDependents = cancelDependentTasks(env, task.id, a.reason)
     return {
       task: summarizeTask(updated),
-      note: 'a live engine attempt for this task is interrupted by the runtime on its next control tick',
+      ...(cancelledDependents.length > 0 ? { cancelledDependents } : {}),
+      note:
+        cancelledDependents.length > 0
+          ? `a live engine attempt for this task is interrupted by the runtime on its next control tick; also cancelled ${cancelledDependents.length} dependent task(s) that can no longer run`
+          : 'a live engine attempt for this task is interrupted by the runtime on its next control tick',
     }
   },
 

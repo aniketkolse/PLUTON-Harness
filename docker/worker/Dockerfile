@@ -9,10 +9,10 @@
 # The build script records the resulting image ID; the runtime refuses to run
 # a plugin image that no longer matches the recorded ID (see src/sandbox/image.ts).
 #
-# Engine CLIs (OpenCode, Qwen Code) are installed by the optional `engines`
-# profile layer below (`pluton sandbox build-image --engines`), pinned to the
-# versions live-verified against the adapters on the development host. The
-# base profile stays small and its tests stay honest about what it contains.
+# The OpenCode engine CLI is installed by the optional `engines` profile layer
+# below (`pluton sandbox build-image --engines`), pinned to the version
+# live-verified against the adapter on the development host. The base profile
+# stays small and its tests stay honest about what it contains.
 
 ARG BASE=node:24-bookworm-slim
 FROM ${BASE}
@@ -28,17 +28,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # --- engines profile (build-arg PLUTON_ENGINES=1) ---------------------------
-# Pinned to the versions verified against the adapters on the dev host:
+# Pinned to the version verified against the adapter on the dev host:
 #   @opencode/cli 2.0.31  (declares linux/x64 platform packages, incl. musl)
-#   @qwen-code/qwen-code 0.25.2  (node CLI, bin `qwen`)
 # Install + self-check run as root (global npm prefix) while the worker user
 # does not exist yet: a broken platform install fails the build here, never a
-# live run. `src/sandbox/image.ts` proves both binaries again after the build.
+# live run. `src/sandbox/image.ts` proves the binary again after the build.
 ARG PLUTON_ENGINES=0
 RUN if [ "$PLUTON_ENGINES" = "1" ]; then \
-      npm install -g --omit=dev @opencode/cli@2.0.31 @qwen-code/qwen-code@0.25.2 \
-      && opencode --version \
-      && qwen --version; \
+      npm install -g --omit=dev @opencode/cli@2.0.31 \
+      && opencode --version; \
     fi
 
 # Non-root worker user; `docker create` also passes --user 10001:10001 (ADR-0004).

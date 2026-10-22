@@ -47,8 +47,7 @@ muses:
   qa:
     display_name: QA
     role: tester
-    # Mixed engines (prompt §4): every Muse owns its engine+model; QA runs on Qwen Code here.
-    engine: qwen
-    model: cbai/glm-5.2
+    engine: opencode
+    model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/qa.md
     permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run]

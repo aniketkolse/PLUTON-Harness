@@ -1,5 +1,9 @@
 # PLUTON Feature Parity — reference capability matrix (Phase 1 audit)
 
+> **Historical audit (2026-10-18; engine note 2026-10-22):** Qwen Code support was removed after
+> this audit. Qwen capability claims below are historical evidence, not current support. OpenCode
+> is the only supported real engine; `mock` is tests/dev only.
+
 **Date:** 2026-10-18 · **Baseline:** `main` @ `506fa72` (typecheck/build/unit/E2E green — see `docs/PLUTON_BASELINE_REPORT.md`)
 **Reference set:** `Y:\Setup\REA deepseek\01-kernel-and-composition.md`, `02-agent-session-persistence.md`, `03-model-tools-capabilities.md`, `04-interfaces-delivery-reference.md` — a reverse-engineering specification of **DeepSeek Harness (`dsh`)**.
 
@@ -29,7 +33,7 @@ Boundary rule used throughout: the four volumes describe a **harness** (model �
 
 - Durable, idempotent core: single SQLite/WAL store, `BEGIN IMMEDIATE` transactions, receipts, append-only sequenced events, forward-only migrations (`src/store/*`; 762 tests green).
 - Explicit state machines and typed refusals; no prose-as-state (`src/domain/state.ts`; ADR-0006/0007).
-- Real engine adapters over ACP with capability honesty, live-verified OpenCode + Qwen, deterministic mock (`src/engines/*`).
+- Real engine adapter over ACP with capability honesty, live-verified OpenCode, deterministic mock (`src/engines/*`). Qwen support was removed on 2026-10-22 and is historical only.
 - Restricted tool bridge with per-call authorization, MCP stdio + HTTP transports, adversarial-review hardened (`src/tools/*`).
 - Container isolation with hardening + per-Muse tmux + per-task checkouts; gated E2E 5/5 green (`src/sandbox/*`, `src/workspace/*`, `src/terminal/*`).
 - Verification gate: completion only via durable evidence (`src/verify/*`, `pluton verify`, `pluton integrate`).

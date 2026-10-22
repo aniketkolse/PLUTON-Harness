@@ -29,7 +29,7 @@ import {
   type EnginePermissionRequest,
 } from '../../src/engines/interactive-approval.ts'
 import { MockEngineAdapter, type MockScriptStep } from '../../src/engines/mock/adapter.ts'
-import { QwenEngineAdapter } from '../../src/engines/qwen/adapter.ts'
+import { OpenCodeEngineAdapter } from '../../src/engines/opencode/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import type { FileLeaseManager } from '../../src/orchestrator/lease-manager.ts'
 import { MAX_RESULT_TEXT_CHARS, RunSupervisor, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
@@ -52,7 +52,7 @@ import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
 
-// The default-adapter test below resolves non-qwen kinds through the registry.
+// The default-adapter test below resolves real engines through the registry.
 registerBuiltinEngines()
 
 afterEach(() => {
@@ -554,10 +554,12 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
   })
 
   it('proves checkout isolation to the adapter factory, per session, from workspace facts', async () => {
-    // The qwen allow_once grant is only permitted when the runtime can prove a
-    // throwaway checkout; this pins the proof: a real workspace row marks the
-    // task session isolated, while project-root sessions (manager, and tasks of
-    // non-checkout Muses) are explicitly not.
+    // The runtime still proves session isolation per task from durable
+    // workspace facts: a real workspace row marks the task session isolated,
+    // while project-root sessions (manager, and tasks of non-checkout Muses)
+    // are explicitly not. The fact is passed to the adapter factory for
+    // engine-specific policy; with OpenCode it never upgrades a permission
+    // grant beyond the Muse approval mode.
     const world = makeWorld({
       repoGit: true,
       isolatedMuses: ['worker-a'],
@@ -629,9 +631,9 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
   }, 20_000)
 
   it('records engine approval requests durably (never silently drops a denial)', async () => {
-    // Regression pin (host-mode smoke, 2026-10-16): the qwen worker's edit was
-    // denied fail-closed, the approval event was dropped by the supervisor, and
-    // the task still claimed success. Every engine ask must leave a record.
+    // Regression pin (host-mode smoke, 2026-10-16): a worker edit was denied
+    // fail-closed, the approval event was dropped by the supervisor, and the
+    // task still claimed success. Every engine ask must leave a record.
     const created: string[] = []
     const world = makeWorld({
       managerTools: async (bridge) => {
@@ -703,37 +705,38 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     // registry lookup must fail this test, not just the unit mapping tests.
     const world = makeWorld({ useDefaultAdapters: true })
 
+    // OpenCode has no session-side auto mode: a proven isolated checkout must
+    // never turn into a blanket allow_once grant.
     const bounded = world.supervisor.adapterFor(
       {
-        engineKind: 'qwen',
+        engineKind: 'opencode',
         approvalMode: 'autonomous-bounded',
       } as unknown as MuseRecord,
       { isolatedCheckout: true },
     )
-    expect(bounded).toBeInstanceOf(QwenEngineAdapter)
-    expect((bounded as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'auto', policy: 'allow_once' })
+    expect(bounded).toBeInstanceOf(OpenCodeEngineAdapter)
+    expect((bounded as OpenCodeEngineAdapter).sessionApproval).toEqual({ policy: 'deny' })
 
-    // Without the proven-checkout fact the same Muse must go interactive:
-    // allow_once is reserved for sessions bounded by a throwaway checkout.
     const projectRoot = world.supervisor.adapterFor(
       {
-        engineKind: 'qwen',
-        approvalMode: 'autonomous-bounded',
+        engineKind: 'opencode',
+        approvalMode: 'ask-for-sensitive-actions',
       } as unknown as MuseRecord,
       { isolatedCheckout: false },
     )
-    expect((projectRoot as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'auto', policy: 'interactive' })
+    expect((projectRoot as OpenCodeEngineAdapter).sessionApproval).toEqual({ policy: 'interactive' })
 
     const askAlways = world.supervisor.adapterFor(
       {
-        engineKind: 'qwen',
+        engineKind: 'opencode',
         approvalMode: 'ask-always',
       } as unknown as MuseRecord,
       { isolatedCheckout: false },
     )
-    expect((askAlways as QwenEngineAdapter).sessionApproval).toEqual({ mode: 'default', policy: 'interactive' })
+    expect((askAlways as OpenCodeEngineAdapter).sessionApproval).toEqual({ policy: 'interactive' })
 
-    // Non-qwen kinds still resolve through the engine registry.
+    // Mock remains the deterministic test/dev adapter and resolves through the
+    // same registry/factory path.
     expect(
       world.supervisor.adapterFor({ engineKind: 'mock', approvalMode: 'ask-always' } as unknown as MuseRecord, {
         isolatedCheckout: true,

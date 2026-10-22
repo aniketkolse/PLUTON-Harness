@@ -1,4 +1,9 @@
-# Host-mode live smoke — `pluton run` with OpenCode manager + Qwen worker
+# Host-mode live smoke — `pluton run` with OpenCode manager + Qwen worker (historical)
+
+> **Historical smoke (2026-10-16/17; engine note 2026-10-22):** Qwen Code support was removed in
+> the OpenCode-only migration. The Qwen worker steps and `PLUTON_QWEN_BIN` commands below record
+> what was executed at the time; they are **not** current setup instructions and must not be
+> rerun as written. Current OpenCode-only configuration is in [`MIGRATION.md`](MIGRATION.md) §8.
 
 Status legend: `[x]` executed on this host · `[ ]` not run · failures stay failures.
 

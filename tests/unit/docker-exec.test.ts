@@ -69,7 +69,7 @@ describe('dockerExecSpawn', () => {
       SystemRoot: 'C:\\Windows',
       APPDATA: 'C:\\Users\\Asus\\AppData\\Roaming',
       HOME: 'C:\\homes\\worker-a',
-      QWEN_DIR: 'C:\\homes\\worker-a\\qwen',
+      XDG_CONFIG_HOME: 'C:\\homes\\worker-a\\config',
       XDG_DATA_HOME: 'C:\\homes\\worker-a\\data',
       OPENAI_API_KEY: 'test-key-value',
       LANG: 'C.UTF-8',
@@ -80,7 +80,7 @@ describe('dockerExecSpawn', () => {
     const spawn = fakeSpawn()
     const spawnFn = dockerExecSpawn(ctx, spawn.spawnFn)
 
-    spawnFn('/usr/local/bin/qwen', ['--acp'], {
+    spawnFn('/usr/local/bin/opencode', ['acp', '--log-level', 'warn'], {
       cwd: 'C:\\work\\checkout\\task_x',
       env: sessionEnv(),
       windowsHide: true,
@@ -89,7 +89,7 @@ describe('dockerExecSpawn', () => {
     const agent = spawn.lastAgent()
     const argv = agent.spawnArgs
     expect(argv.slice(0, 5)).toEqual(['docker', 'exec', '-i', '-w', '/work/task_x'])
-    expect(argv.slice(-3)).toEqual(['pluton-demo-worker-a', '/usr/local/bin/qwen', '--acp'])
+    expect(argv.slice(-5)).toEqual(['pluton-demo-worker-a', '/usr/local/bin/opencode', 'acp', '--log-level', 'warn'])
 
     // Every `-e` is NAME-only: a `NAME=value` argument would put secrets in the
     // docker CLI's process argv (ADR-0008).
@@ -101,7 +101,7 @@ describe('dockerExecSpawn', () => {
       envNames.push(next)
     }
     expect([...envNames].sort()).toEqual(
-      ['LANG', 'OPENAI_API_KEY', 'PLUTON_RUN_ID', 'QWEN_DIR', 'XDG_DATA_HOME', 'HOME'].sort(),
+      ['LANG', 'OPENAI_API_KEY', 'PLUTON_RUN_ID', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'HOME'].sort(),
     )
 
     // Host-shaped platform variables must never override the container's own.
@@ -112,7 +112,7 @@ describe('dockerExecSpawn', () => {
     // Values ride in the spawned docker CLI's env; host paths are rewritten to
     // container paths; non-path values pass through untouched.
     expect(agent.spawnEnv['HOME']).toBe('/home/pluton')
-    expect(agent.spawnEnv['QWEN_DIR']).toBe('/home/pluton/qwen')
+    expect(agent.spawnEnv['XDG_CONFIG_HOME']).toBe('/home/pluton/config')
     expect(agent.spawnEnv['XDG_DATA_HOME']).toBe('/home/pluton/data')
     expect(agent.spawnEnv['OPENAI_API_KEY']).toBe('test-key-value')
     expect(agent.spawnEnv['PLUTON_RUN_ID']).toBe('run_1')
@@ -124,7 +124,7 @@ describe('dockerExecSpawn', () => {
   it('lets the per-session env win over the context env on key collisions', () => {
     const spawn = fakeSpawn()
     const spawnFn = dockerExecSpawn({ ...ctx, env: { LANG: 'C' } }, spawn.spawnFn)
-    spawnFn('/usr/local/bin/qwen', [], { cwd: 'C:\\work\\checkout', env: { LANG: 'C.UTF-8' }, windowsHide: true })
+    spawnFn('/usr/local/bin/opencode', [], { cwd: 'C:\\work\\checkout', env: { LANG: 'C.UTF-8' }, windowsHide: true })
     expect(spawn.lastAgent().spawnEnv['LANG']).toBe('C.UTF-8')
   })
 
@@ -132,7 +132,7 @@ describe('dockerExecSpawn', () => {
     const spawn = fakeSpawn()
     const spawnFn = dockerExecSpawn(ctx, spawn.spawnFn)
     expect(() =>
-      spawnFn('/usr/local/bin/qwen', ['--acp'], { cwd: 'D:\\outside', env: {}, windowsHide: true }),
+      spawnFn('/usr/local/bin/opencode', ['acp'], { cwd: 'D:\\outside', env: {}, windowsHide: true }),
     ).toThrowError(ValidationError)
     expect(spawn.agents).toHaveLength(0)
   })
@@ -142,7 +142,7 @@ describe('dockerExecSpawn', () => {
     process.env['DOCKER_CONTEXT'] = 'desktop-linux-test'
     try {
       const spawn = fakeSpawn()
-      dockerExecSpawn(ctx, spawn.spawnFn)('/usr/local/bin/qwen', ['--acp'], {
+      dockerExecSpawn(ctx, spawn.spawnFn)('/usr/local/bin/opencode', ['acp'], {
         cwd: 'C:\\work\\checkout',
         env: { PATH: 'C:\\Windows\\system32' },
         windowsHide: true,

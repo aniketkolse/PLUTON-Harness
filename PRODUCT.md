@@ -22,8 +22,8 @@ not-yet-published package. There is no team-plan, seat-based, or multi-tenant us
 ## Product Purpose
 
 PLUTON is a CLI-first, local-first orchestration control plane for a team of persistent AI agent
-identities called **Muses**. Each Muse has its own engine, model, role instructions, permissions,
-workspace policy, resource limits, and terminal. Pluton is not a coding model: engines do
+identities called **Muses**. Each Muse has its own model, role instructions, permissions,
+workspace policy, resource limits, and terminal. Pluton is not a coding model: OpenCode does
 inference, containers provide process isolation, tmux provides terminal persistence, Git tracks
 changes, and a durable local runtime (SQLite) records what was requested, accepted, dispatched,
 completed, failed, or left uncertain.
@@ -37,9 +37,9 @@ with an auditable record of every step, including the steps that failed or staye
 PLUTON is the control plane around the models, not a model. The mechanism a neighbouring product
 could not truthfully copy is **durable task truth**: request idempotency, explicit
 `unknown_outcome` instead of blind replay, fail-closed operator approvals, write leases per Muse,
-and integration that never silently merges into the operator's branch. On top of that, the engine
-and model are chosen per Muse and validated against that engine's real capabilities — there is no
-global "one engine for everyone" switch.
+and integration that never silently merges into the operator's branch. On top of that, the model
+and role are chosen per Muse and validated against OpenCode's real capabilities — there is no
+global model switch.
 
 ## Operating Context
 
@@ -47,8 +47,8 @@ global "one engine for everyone" switch.
   supported as the daemon host. macOS is untested. Worker terminals live inside Linux containers
   because native PowerShell has no tmux.
 - **Runtime**: Node.js >= 24 (built-in `node:sqlite`), Git >= 2.40 for checkout isolation and diff
-  capture, an engine CLI such as OpenCode v2 over the ACP stdio protocol with model auth
-  configured per engine.
+  capture, OpenCode v2 over the ACP stdio protocol with model auth configured in each Muse's
+  private engine home. The deterministic `mock` adapter is for tests/dev only.
 - **State**: one authoritative SQLite database per workspace at `.pluton/state/pluton.sqlite`
   holding runs, tasks, dependency edges, receipts, events, approvals, sessions, and resume tokens.
   Workspace-local runs, logs, and server claims live under `.pluton/run/`.
@@ -78,14 +78,14 @@ global "one engine for everyone" switch.
   through it: the browser workspace reads the same values in its CSS `:root`, and the terminal
   interface maps its own role vocabulary onto the same roles and degrades through one shared
   256- and 16-colour table. There is no second, drifting token set.
-- **Local-first and offline.** The control plane talks to local engines, local containers, and a
-  local database. Nothing about the interface depends on a hosted service.
+- **Local-first and offline.** The control plane talks to the local OpenCode engine, local containers,
+  and a local database. Nothing about the interface depends on a hosted service.
 - **The terminal is always sufficient.** Every capability reachable in the graphical workspace is
   reachable from the CLI, and every suitable command emits JSON for automation.
 - **Same experience, two shells.** Desktop app window and browser must show the same screens,
   state, and session model, because they are the same application (ADR-0014).
-- **Undecided / not yet true**: the package is not published to the npm registry; a second engine
-  (Qwen) is implemented but not installed or verified on the supported host; macOS is untested; the
+- **Undecided / not yet true**: the package is not published to the npm registry; OpenCode is the
+  only supported real engine (the `mock` adapter is dev/test only); macOS is untested; the
   standalone Tauri v2 installer (ADR-0015 Tier 2) is planned, not built.
 
 ## Brand Commitments

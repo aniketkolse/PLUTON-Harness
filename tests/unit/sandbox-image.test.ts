@@ -100,13 +100,12 @@ describe('worker image build', () => {
     expect(readWorkerImageRecord(root)).toEqual(record)
   })
 
-  it('builds the engines profile with the pinned engine layer, verifies both binaries, and records the profile', async () => {
+  it('builds the engines profile with the pinned OpenCode layer, verifies the binary, and records the profile', async () => {
     const root = tmpRoot()
     const dockerfileDir = workerDockerfileDir()
     const { runFn, calls } = scripted([
       ...happyRules(),
       { label: 'opencode', match: (argv) => isEntrypointRun(argv, 'opencode'), result: (argv) => okResult(argv, '2.0.31\n') },
-      { label: 'qwen', match: (argv: string[]) => isEntrypointRun(argv, 'qwen'), result: (argv: string[]) => okResult(argv, '0.25.2\n') },
     ])
     const record = await new WorkerImageManager({ runFn }).build(root, { tag: 'pluton-worker:test', profile: 'engines' })
     expect(record.profile).toBe('engines')
@@ -121,9 +120,10 @@ describe('worker image build', () => {
       'PLUTON_ENGINES=1',
       dockerfileDir,
     ])
-    // Both engine binaries are proven by running them inside the built image.
+    // The engine binary is proven by running it inside the built image.
     const entrypoints = calls.filter((c) => c[1] === 'run').map((c) => c[c.indexOf('--entrypoint') + 1])
-    expect(entrypoints).toEqual(expect.arrayContaining(['opencode', 'qwen']))
+    expect(entrypoints).toEqual(expect.arrayContaining(['opencode']))
+    expect(entrypoints.filter((entrypoint) => entrypoint === 'opencode')).toHaveLength(1)
     expect(readWorkerImageRecord(root)?.profile).toBe('engines')
   })
 
@@ -136,7 +136,6 @@ describe('worker image build', () => {
         match: (argv: string[]) => isEntrypointRun(argv, 'opencode'),
         result: (argv: string[]) => failResult(argv, 'opencode: executable file not found in $PATH', 127),
       },
-      { label: 'qwen', match: (argv: string[]) => isEntrypointRun(argv, 'qwen'), result: (argv: string[]) => okResult(argv, '0.25.2\n') },
     ]
     const err = await new WorkerImageManager({ runFn: scripted(rules).runFn }).build(root, { profile: 'engines' }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(SandboxUnavailableError)

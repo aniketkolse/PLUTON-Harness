@@ -104,6 +104,8 @@ export interface OpenCodeAdapterOptions {
   spawnRetry?: RetryOptions
   /** Skip PATH resolution (tests, or an operator-pinned binary). */
   binaryPath?: string
+  /** Node executable used when the pinned path is a .js/.mjs/.cjs entry (tests/dev fixtures). */
+  nodePath?: string
   platform?: NodeJS.Platform
   /** Maps the host session workdir to the engine's namespace (container mode); identity when absent. */
   mapWorkdir?: (hostPath: string) => string
@@ -335,14 +337,27 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     })
   }
 
+  /**
+   * Spawn shape for a resolved artifact. Real OpenCode installs are standalone
+   * executables; a .js/.mjs/.cjs override is run through Node without a shell
+   * (used by deterministic cross-platform ACP fixtures).
+   */
+  private spawnInvocation(path: string): { path: string; command: string; baseArgs: string[] } {
+    if (/\.(m?js|cjs)$/i.test(path)) {
+      return { path, command: this.opts.nodePath ?? process.execPath, baseArgs: [path] }
+    }
+    return { path, command: path, baseArgs: [] }
+  }
+
   async discover(): Promise<EngineDiscovery> {
     const resolved = this.resolveBinary()
     if (!resolved.ok) {
       return { engineKind: this.kind, installed: false, binaryPath: null, version: null, fix: resolved.fix }
     }
+    const invocation = this.spawnInvocation(resolved.binary.path)
     let version: string | null = null
     try {
-      const out = await this.runFn([resolved.binary.path, '--version'], {
+      const out = await this.runFn([invocation.command, ...invocation.baseArgs, '--version'], {
         timeoutMs: this.opts.versionTimeoutMs ?? 15_000,
         maxOutputBytes: 64 * 1024,
       })
@@ -355,7 +370,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     return {
       engineKind: this.kind,
       installed: true,
-      binaryPath: resolved.binary.path,
+      binaryPath: invocation.path,
       version,
       fix: '',
     }
@@ -364,10 +379,11 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
   async listModels(): Promise<EngineModel[]> {
     const resolved = this.resolveBinary()
     if (!resolved.ok) throw new EngineMissingError(this.kind, resolved.fix)
+    const invocation = this.spawnInvocation(resolved.binary.path)
     // `--standalone` keeps this one-shot query off OpenCode's shared managed
     // service. Without it, concurrent doctor/model probes collide on the
     // service port and can leave a detached `opencode serve --service` behind.
-    const out = await this.runFn([resolved.binary.path, 'models', '--standalone'], {
+    const out = await this.runFn([invocation.command, ...invocation.baseArgs, 'models', '--standalone'], {
       timeoutMs: 30_000,
       maxOutputBytes: 512 * 1024,
     })
@@ -435,6 +451,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
   async authStatus(configDir: string): Promise<EngineAuthStatus> {
     const resolved = this.resolveBinary()
     if (!resolved.ok) return { configured: false, hint: resolved.fix }
+    const invocation = this.spawnInvocation(resolved.binary.path)
     const env = buildEngineEnv(configDir, {}, this.opts.platform ?? process.platform)
     // On Windows, the OS credential store hangs when USERPROFILE is diverted from the active user account
     if ((this.opts.platform ?? process.platform) === 'win32' && process.env['USERPROFILE']) {
@@ -443,7 +460,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     // `--standalone` avoids the shared managed service: doctor checks one
     // engine home per Muse, and the service is global to the OpenCode process,
     // so non-standalone checks collide and time out on a single port.
-    const out = await this.runFn([resolved.binary.path, 'auth', 'list', '--standalone'], {
+    const out = await this.runFn([invocation.command, ...invocation.baseArgs, 'auth', 'list', '--standalone'], {
       timeoutMs: 5_000,
       env,
       envMode: 'explicit',
@@ -462,6 +479,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     assertNonEmptyModel(req.muse.model)
     const resolved = this.resolveBinary()
     if (!resolved.ok) throw new EngineMissingError(this.kind, resolved.fix)
+    const invocation = this.spawnInvocation(resolved.binary.path)
 
     const retryOpts = this.opts.spawnRetry
     const maxRetries = retryOpts?.maxRetries ?? (this.opts.spawnFn ? 0 : 2)
@@ -476,8 +494,8 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       }> => {
         const holder: { session: OpenCodeEngineSession | null } = { session: null }
         const client = new AcpClient({
-          command: resolved.binary.path,
-          args: ['acp', '--log-level', 'warn'],
+          command: invocation.command,
+          args: [...invocation.baseArgs, 'acp', '--log-level', 'warn'],
           cwd: req.workdir,
           env: buildEngineEnv(req.configDir, req.env, this.opts.platform ?? process.platform),
           spawnFn: this.opts.spawnFn,
@@ -564,7 +582,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new EngineMissingError(
           this.kind,
-          `'${resolved.binary.path}' could not be started (ENOENT). ${OPENCODE_MISSING_FIX}`,
+          `'${invocation.path}' could not be started (ENOENT). ${OPENCODE_MISSING_FIX}`,
         )
       }
       if (

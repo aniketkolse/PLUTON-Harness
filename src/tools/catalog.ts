@@ -164,7 +164,7 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'task.cancel',
     mutating: true,
     description:
-      'Cancel a task that has not reached a terminal state. Recorded with your reason; a live engine attempt is interrupted by the runtime on its next control tick (within about a second), and an already terminal task is acknowledged idempotently instead of raising a conflict.',
+      'Cancel a task that has not reached a terminal state. Recorded with your reason; a live engine attempt is interrupted by the runtime on its next control tick (within about a second), and an already terminal task is acknowledged idempotently instead of raising a conflict. Not-yet-terminal tasks that transitively depend on the cancelled task are cancelled too, because they can never become ready. Cancellation is not success: a run with any cancelled task cannot finish as completed.',
   },
   'task.request_revision': {
     permission: 'task.request_revision',

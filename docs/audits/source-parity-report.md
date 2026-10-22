@@ -1,5 +1,10 @@
 # PLUTON-Harness ↔ DeepSeek Harness (`dsh`) — Source Parity Report
 
+> **Historical audit snapshot (2026-10-21; engine note 2026-10-22):** Qwen Code support was
+> removed after this audit. Adapter lists, fixture paths, test counts and Qwen references below are
+> as of the audit date; some of those files no longer exist. They are historical evidence, not
+> current support or setup instructions. OpenCode is the only supported real engine.
+
 - **Audit type:** read-only architectural and feature-parity audit. No source files were modified; the only artifact produced by this audit is this report.
 - **Repository:** `aniketkolse/PLUTON-Harness` at HEAD `595e8b6588e6deae6962c7efa40a6e09eada3ef5` (`595e8b6`), working tree clean except five pre-existing untracked files (`docs/audit-*.png`).
 - **Audit date:** 2026-10-21. Platform: win32. Node `v24.20.0`, npm `10.9.9`, git `2.56.0.windows.2`.

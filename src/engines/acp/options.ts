@@ -5,12 +5,10 @@ import type { McpServerSpec } from '../contract/types.ts'
 /**
  * Shared pure helpers for engines that speak ACP (Agent Client Protocol).
  *
- * `configOptions` shapes were recorded live from both engines (2026-10-16):
- * `opencode acp` v2.0.29 and `qwen --acp` (Qwen Code v0.25.2) both return a
- * select option `{id, name, category, type:'select', currentValue, options:
- * [{value, name, description}]}` for `model`; qwen additionally exposes `mode`.
- * Choice values are engine-native strings (for qwen they are composite runtime
- * ids like `$runtime|openai|cbai/glm-5.2(openai)`) and must be used verbatim.
+ * `configOptions` shapes were recorded live from `opencode acp` v2.0.29
+ * (2026-10-16): the engine returns a select option `{id, name, category,
+ * type:'select', currentValue, options: [{value, name, description}]}` for
+ * `model`. Choice values are engine-native strings and must be used verbatim.
  */
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
@@ -71,23 +69,9 @@ export function readConfigOption(
   return null
 }
 
-/** The `model` select option (matched by id or category, as both engines report it). */
+/** The `model` select option (matched by id or category, as OpenCode reports it). */
 export function readModelOption(configOptions: unknown): AcpSelectOption | null {
   return readConfigOption(configOptions, (opt) => opt['id'] === 'model' || opt['category'] === 'model')
-}
-
-/** The `mode`/approval select option (qwen reports id/category `mode`). */
-export function readModeOption(configOptions: unknown): AcpSelectOption | null {
-  return readConfigOption(configOptions, (opt) => opt['id'] === 'mode' || opt['category'] === 'mode')
-}
-
-/**
- * Find the engine choice for a model the user wrote down. Accepts either the
- * exact option value or its display name (Qwen Code labels choices with the
- * bare model id while values are composite runtime ids).
- */
-export function matchModelChoice(option: AcpSelectOption, want: string): AcpOptionChoice | null {
-  return option.choices.find((c) => c.value === want) ?? option.choices.find((c) => c.name === want) ?? null
 }
 
 export function toAcpMcpServers(specs: McpServerSpec[] | undefined): unknown[] {
@@ -115,7 +99,7 @@ export function toAcpMcpServers(specs: McpServerSpec[] | undefined): unknown[] {
 export function assertNonEmptyModel(model: string): void {
   if (typeof model !== 'string' || model.trim() === '') {
     throw new ValidationError(
-      "muse.model must be a non-empty engine model id (e.g. 'opencode/deepseek-v4.1-flash-free' or 'cbai/glm-5.2')",
+      "muse.model must be a non-empty engine model id (e.g. 'opencode/deepseek-v4.1-flash-free')",
     )
   }
 }

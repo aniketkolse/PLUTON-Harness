@@ -203,7 +203,7 @@ describe('interactive engine approval channel', () => {
 
     const promise = channel.requestPermission({
       requestId: 'call_9122',
-      description: 'engine requested permission: Writing to qwen2-write.txt',
+      description: 'engine requested permission: Writing to worker-note.txt',
       scope: { tool: 'write_file', path: 'src/a.ts' },
     })
 
@@ -214,7 +214,7 @@ describe('interactive engine approval channel', () => {
     expect(record.runId).toBe(runId)
     expect(record.taskId).toBe(taskId)
     expect(record.requestedByMuseId).toBe('worker')
-    expect(record.reason).toContain('Writing to qwen2-write.txt')
+    expect(record.reason).toContain('Writing to worker-note.txt')
     expect(record.expiresAt).not.toBeNull()
     expect(record.scope).toMatchObject({ source: 'engine', engineRequestId: 'call_9122', tool: 'write_file' })
     expect(timers.live().timeouts).toBe(1)

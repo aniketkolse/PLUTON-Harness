@@ -1,5 +1,9 @@
 # OpenMausBot runtime — architecture reverse-engineering report
 
+> **Historical study of a third-party project (engine note 2026-10-22):** Qwen references below
+> describe OpenMausBot's drivers, not current Pluton support. Pluton removed its own Qwen Code
+> support; OpenCode is the only supported real engine.
+
 Read-only inspection of `references/openmausbot` at the pinned snapshot below.
 Audience: the architect of a different TypeScript product; transferable design over local detail.
 Electron/UI, cloud deployment and `enterprise/` internals are explicitly out of scope.

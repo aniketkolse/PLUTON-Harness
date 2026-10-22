@@ -21,6 +21,21 @@ export function loadRecordedFrames(): RecordedFrames {
   return JSON.parse(readFileSync(url, 'utf8')) as RecordedFrames
 }
 
+/** Synthetic ACP permission shape used by tests; not part of the recorded live frames. */
+export const OPENCODE_PERMISSION_PARAMS = {
+  sessionId: 'ses_permission',
+  toolCall: {
+    toolCallId: 'call_fake_permission',
+    title: 'write worker note',
+    kind: 'edit',
+    locations: [{ path: 'worker-note.txt' }],
+  },
+  options: [
+    { optionId: 'proceed_once', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'deny_once', name: 'Deny', kind: 'reject_once' },
+  ],
+} as const
+
 export interface OpencodeScriptOptions {
   loadSession?: boolean
   /** Override the model option list; default: recorded list. */
@@ -42,6 +57,8 @@ export interface OpencodeScriptOptions {
   loadError?: { code: number; message: string }
   /** Extra behavior when a prompt arrives (e.g. send a permission request). */
   onPrompt?: (agent: FakeAcpAgent, sessionId: string, requestId: number, params: unknown) => void
+  /** Send a synthetic session/request_permission during a prompt. */
+  permissionOnPrompt?: boolean
 }
 
 export interface OpencodeScriptState {
@@ -51,6 +68,9 @@ export interface OpencodeScriptState {
   /** Every prompt request's params, in order. */
   prompts: Array<{ sessionId: string; prompt: unknown[] }>
   cancels: string[]
+  permissionRequestsSent: number
+  /** Server requests sent by the fake (id -> params), for response assertions. */
+  serverRequests: Map<number, unknown>
 }
 
 export function scriptOpencode(agent: FakeAcpAgent, opts: OpencodeScriptOptions = {}): OpencodeScriptState {
@@ -65,7 +85,10 @@ export function scriptOpencode(agent: FakeAcpAgent, opts: OpencodeScriptOptions 
     pendingPrompts: new Map(),
     prompts: [],
     cancels: [],
+    permissionRequestsSent: 0,
+    serverRequests: new Map(),
   }
+  let serverRequestId = 9000
 
   function buildConfigOptions(currentModel: string): Array<Record<string, unknown>> {
     const options = structuredClone(frames.sessionNew.configOptions)
@@ -138,6 +161,21 @@ export function scriptOpencode(agent: FakeAcpAgent, opts: OpencodeScriptOptions 
         state.pendingPrompts.set(id, params.sessionId)
         state.prompts.push({ sessionId: params.sessionId, prompt: params.prompt })
         opts.onPrompt?.(a, params.sessionId, id, msg.params)
+        if (opts.permissionOnPrompt) {
+          const requestId = serverRequestId++
+          const permissionParams = { ...OPENCODE_PERMISSION_PARAMS, sessionId: params.sessionId }
+          state.permissionRequestsSent += 1
+          state.serverRequests.set(requestId, permissionParams)
+          a.send({ id: requestId, method: 'session/request_permission', params: permissionParams })
+          // Give the client time to answer before ending the turn, matching a
+          // real engine that continues after a denial.
+          setTimeout(() => {
+            if (!state.pendingPrompts.has(id)) return
+            state.pendingPrompts.delete(id)
+            finishPrompt(id, params.sessionId, opts.stopReason ?? 'end_turn')
+          }, 250)
+          return true
+        }
         if (!opts.promptNeverResolves && !opts.deferPromptUntilCancel) {
           state.pendingPrompts.delete(id)
           finishPrompt(id, params.sessionId, opts.stopReason ?? 'end_turn')

@@ -10,6 +10,12 @@
 
 **Worktree:** post-hardening review fixes plus this audit; no push or release performed
 
+> **Superseded engine note (2026-10-22):** This audit predates the OpenCode-only migration. Qwen
+> Code support was subsequently **removed**; every Qwen row, command and limitation below is
+> retained as historical audit evidence and is **not** a current acceptance criterion or setup
+> instruction. OpenCode is now the only supported real engine; see
+> [`MIGRATION.md`](MIGRATION.md) §8.
+
 ---
 
 ## 1. Executive verdict
@@ -60,8 +66,8 @@ direct execution:
 - interactive TTY attach/chat on Windows and macOS (Linux WSL PTY is now **PASS**; the Windows
   harness is non-interactive and `winpty` is absent);
 - Docker-mode container E2E (legacy opt-in path; daemon intentionally not started);
-- a real Qwen Code engine (`qwen` is absent/not configured; the Qwen paths used the repository's ACP
-  fake).
+- ~~a real Qwen Code engine~~ — **historical only:** Qwen support was removed in the OpenCode-only
+  migration; this was an audit-time coverage gap, not a current requirement.
 
 The first real Windows attempt, `run_mvj7jw3y432500d4`, is recorded as a Manager-planning limitation:
 the Manager created a dependent QA task, then cancelled it when the worker task parked in
@@ -130,7 +136,7 @@ not meet it), **BLOCKED** (could not execute because of a concrete environmental
 | Docker CLI | `29.8.2`, build `7fc2dff` | not installed in the Ubuntu userland |
 | Docker daemon | not reachable (`dockerDesktopLinuxEngine` pipe absent) | not applicable |
 | Shell | PowerShell | Bash via `wsl.exe -d Ubuntu-24.04 -u root` |
-| Qwen | absent / not configured | absent / not configured |
+| Qwen | absent / not configured (audit-time only; support removed 2026-10-22) | absent / not configured (audit-time only; support removed) |
 | macOS | no host or SSH target | **NOT VERIFIED** |
 
 Repository state at validation start:
@@ -216,7 +222,7 @@ tests, or unused Docker assets. Static imports of Docker modules do not spawn Do
 | 4 | Clean onboarding | Docker hidden; `pluton init --team full-stack --name init-audit` | **PASS** | exit 0; generated `kind: native`, `network_policy: open`, both acknowledgements | default onboarding is Docker-free |
 | 5 | Diagnostics, repo config | Docker hidden; `pluton --json doctor` in repository | **PASS** | exit 0; 15 ok / 0 warn / 0 fail; `docker-cli: not probed — native mode does not use Docker` | native doctor does not probe Docker |
 | 6 | Diagnostics, opencode-only native project | Docker hidden; `pluton --json doctor` | **PASS** | exit 0; engine and auth checks pass | no Docker requirement |
-| 7 | Diagnostics, full-stack template | Docker hidden; `pluton --json doctor` in fresh init | **PASS (Docker dimension)** | exit 1; 12 ok / 2 warn / 1 fail; sole fail `engine:qwen: not installed`; Docker `info` not probed | Qwen is an engine prerequisite, not a Docker dependency |
+| 7 | Diagnostics, full-stack template (historical) | Docker hidden; `pluton --json doctor` in fresh init | **PASS (Docker dimension, historical)** | exit 1 at audit time; 12 ok / 2 warn / 1 fail; sole fail `engine:qwen: not installed`; Docker `info` not probed | Qwen prerequisite at audit time; the template is now OpenCode-only and Qwen support is removed |
 | 8 | Substrate probe | Docker hidden; `pluton --json sandbox probe` | **PASS** | `kind=native`, `available=true`, `dispatchReady=true`, `image=null` | no daemon/image needed |
 | 9 | Multi-agent run, fake engine | Docker hidden; `pluton --json run --goal …` | **PASS** | `run_mvj0j6m717d0bfd2` completed/success; 1 task completed | manager + worker executed natively |
 | 10 | Real-engine runs | Docker hidden; OpenCode v2.1.2 runs on Windows and Linux | **PASS** | Windows post-fix `run_mvj7x6ig87b32c2e` completed/success, 1 task, verification passed, exact 2-byte `ok` in checkout; Linux `run_mvj5w3i8844a4ab5` completed/success, 1 task, 3-byte `ok\n` in checkout; both 8 native execution events and 0 sandboxes | real engine works under the native provider on both OSes |
@@ -258,7 +264,7 @@ tests, or unused Docker assets. Static imports of Docker modules do not spawn Do
 | 36 | macOS runtime | no macOS host or SSH target | **NOT VERIFIED** | macOS process-group, signal, path, and 0600 behavior unexecuted |
 | 37 | True Docker-uninstalled host | `Get-Command docker` after PATH filter | **NOT VERIFIED** | Docker is installed; PATH filtering + interception used on Windows; WSL Ubuntu has no Docker CLI but is not a separate physical host |
 | 38 | Legacy Docker E2E | Docker-mode `pluton --json doctor` | **BLOCKED** | Docker mode correctly fails closed with daemon stopped; no container run attempted |
-| 39 | Real Qwen engine | `qwen` presence check / source inspection | **BLOCKED** | `qwen` is absent/not configured; Qwen paths used the repository's ACP fake; real OpenCode was used |
+| 39 | Real Qwen engine (historical) | `qwen` presence check / source inspection | **N/A — support removed 2026-10-22** | At audit time `qwen` was absent/not configured and Qwen paths used the ACP fake; Qwen support was later removed entirely; real OpenCode was used | historical coverage gap; no current remediation |
 | 40 | Fresh dependency installation | `npm ci` with Docker hidden | **PASS (Windows)** | 42 packages installed, 0 vulnerabilities; the post-install suite passed 130 files / 1,211 tests at the earlier baseline, and the final suite passed 1,212 | locked install is reproducible on Windows; a fresh Linux clone additionally lacks two gitignored fixtures (see §9) |
 
 Rows marked **FAIL**, **BLOCKED**, or **NOT VERIFIED** are not passes. Their remediation/next step
@@ -319,7 +325,8 @@ summary: 15 ok, 0 warn, 0 fail
 With Docker visible, the same `docker-cli` line is still `info` and still says `not probed`; the
 mode check, not Docker availability, controls the branch.
 
-The full-stack fresh-init doctor exits 1 only because `engine:qwen` is not installed:
+At audit time, the full-stack fresh-init doctor exited 1 only because `engine:qwen` was not
+installed (historical; Qwen support and the template's Qwen Muses have since been removed):
 
 ```text
 doctor exit=1 summary=12 ok/2 warn/1 fail
@@ -333,7 +340,8 @@ passes 15/0/0.
 
 ### 6.3 Fake-engine multi-agent run and checkout isolation
 
-Command (Docker hidden):
+At audit time the fake-engine command used the Qwen ACP fixture (historical; Qwen support and
+that fixture have since been removed — current deterministic tests use the fake OpenCode CLI):
 
 ```powershell
 $env:PLUTON_QWEN_BIN = 'Y:\Pluton\tests\helpers\fake-qwen-cli.mjs'
@@ -724,9 +732,10 @@ being described as stronger than it is.
    fails closed in `doctor`, but container creation, image build, and Docker-mode task execution
    were not run. This is the opt-in legacy path, outside the native acceptance gate, but it remains
    a regression risk. Remediation: run the opt-in Docker E2E suite on a host with Docker Desktop.
-5. **Real Qwen is blocked.** `qwen` is absent/not configured; Qwen workflows used the repository's
-   fake ACP engine. Real OpenCode v2.1.2 succeeded on Windows and Linux, but one engine is not broad
-   engine coverage. Remediation: install/configure Qwen and repeat the real-engine smoke.
+5. **Qwen coverage gap is historical (superseded).** At audit time `qwen` was absent/not
+   configured and Qwen workflows used the repository's fake ACP engine. Qwen support was
+   subsequently removed in the OpenCode-only migration, so this is no longer a current coverage
+   requirement. OpenCode v2.1.2 succeeded on Windows and Linux.
 6. **Native isolation is partial by design.** Filesystem, network, and resource limits are not
    kernel-enforced. The acknowledgements and `doctor` text are accurate, but operators must not
    treat native mode as a container boundary.
@@ -737,9 +746,9 @@ being described as stronger than it is.
    14/0/1 because Windows does not enforce POSIX mode bits. Both clean-tree gates were run after the
    reviewed commit. Publication was not performed and nothing was pushed; macOS CI remains
    outstanding.
-9. **Full-stack template requires Qwen.** A fresh full-stack `doctor` exits 1 when Qwen is absent,
-   even though Docker is not involved. This is an engine prerequisite, not a Docker regression;
-   users can use an opencode-only team or install Qwen.
+9. **Full-stack template Qwen requirement is historical.** At audit time a fresh full-stack
+   `doctor` exited 1 when Qwen was absent. The template now uses OpenCode for every Muse and Qwen
+   support has been removed, so this is no longer a current defect.
 10. **Fresh dependency installation is verified on Windows only, and the Linux workspace was
     prepared.** `npm ci` with Docker hidden installed 42 locked packages with 0 vulnerabilities, and
     the post-install suite passed 130 files / 1,211 tests at the earlier baseline; the final Windows
@@ -780,8 +789,9 @@ Windows 11 and WSL 2 Ubuntu 24.04:
 - no blocking native-path defect remains after the reviewed fixes above.
 
 The decision is not unconditional **ACCEPTED** because true Docker absence, macOS runtime,
-interactive TTY on Windows/macOS, Docker-mode E2E, and real Qwen execution still lack direct
-evidence. Those are recorded as **BLOCKED** or **NOT VERIFIED**, not hidden as PASS. The Linux TTY
+interactive TTY on Windows/macOS, and Docker-mode E2E still lack direct evidence. Qwen coverage
+was an audit-time gap; Qwen support has since been removed and is not a current criterion. The
+remaining gaps are recorded as **BLOCKED** or **NOT VERIFIED**, not hidden as PASS. The Linux TTY
 requirement is now satisfied and is no longer a gate blocker.
 
 The reviewed changes are committed and both clean-tree release gates were run: Linux **15/15**
@@ -798,7 +808,8 @@ validation passed on both hosts; nothing was pushed or published.
 3. Perform a real TTY attach and interactive chat test on Windows and macOS, with and without tmux,
    and decide whether the `pluton chat --demo` option collision should be fixed.
 4. Run the opt-in Docker E2E suite on a host with a working Docker daemon.
-5. Run at least one real Qwen engine smoke in addition to OpenCode.
+5. ~~Run at least one real Qwen engine smoke in addition to OpenCode.~~ **Removed (2026-10-22):**
+   Qwen Code support was removed; OpenCode is the only supported real engine.
 
 ---
 

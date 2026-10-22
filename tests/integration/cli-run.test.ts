@@ -19,7 +19,7 @@ import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
 import { FakeAcpAgent, fakeSpawn, type FakeAgentMessage } from '../helpers/fake-acp-agent.ts'
 import { FakeSandbox } from '../helpers/fake-sandbox.ts'
-import { loadQwenFrames, scriptQwen } from '../helpers/qwen-script.ts'
+import { loadRecordedFrames, scriptOpencode } from '../helpers/opencode-script.ts'
 
 /**
  * Integration: `pluton run` wiring — the manager Muse reaches the restricted
@@ -140,7 +140,7 @@ muses:
   manager:
     display_name: Manager
     role: supervisor
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: coordinator-read-only
     approval_mode: autonomous-bounded
@@ -158,7 +158,7 @@ muses:
   worker-a:
     display_name: Worker A
     role: coder
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
@@ -169,7 +169,7 @@ muses:
   researcher:
     display_name: Researcher
     role: researcher
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: read-only
     approval_mode: ask-always
@@ -199,13 +199,17 @@ function enginesImageProbe(): WorkerImageProbe {
 }
 
 /**
- * Manager-side qwen session that drives the real tool bridge during its first
- * prompt: the container-mode manager speaks ACP for real, so the bridge work
- * happens between `session/prompt` and its response.
+ * Manager-side OpenCode session that drives the real tool bridge during its
+ * first prompt: the container-mode manager speaks ACP for real, so the bridge
+ * work happens between `session/prompt` and its response.
  */
 function scriptedBridgeManager(agent: FakeAcpAgent, createdTaskIds: string[], specOut: { value: McpServerSpec | null }): void {
-  const frames = loadQwenFrames()
-  scriptQwen(agent, { promptNeverResolves: true, modelChoices: [{ value: 'test/model-a' }] })
+  const frames = loadRecordedFrames()
+  scriptOpencode(agent, {
+    promptNeverResolves: true,
+    defaultModel: 'test/model-a',
+    models: [{ value: 'test/model-a', name: 'test/model-a' }],
+  })
   const baseOnMessage = agent.onMessage
   let driving = false
   agent.onMessage = (msg: FakeAgentMessage, a: FakeAcpAgent): boolean => {
@@ -492,7 +496,11 @@ describe('runRun — container mode (engines through docker exec)', () => {
       const index = spawned
       spawned += 1
       if (index === 0) scriptedBridgeManager(agent, createdTaskIds, specOut)
-      else scriptQwen(agent, { modelChoices: [{ value: 'test/model-a' }] })
+      else
+        scriptOpencode(agent, {
+          defaultModel: 'test/model-a',
+          models: [{ value: 'test/model-a', name: 'test/model-a' }],
+        })
       return agent
     })
 
@@ -553,15 +561,19 @@ describe('runRun — container mode (engines through docker exec)', () => {
     expect(managerAgent.spawnArgs.slice(0, 5)).toEqual(['docker', 'exec', '-i', '-w', '/pluton/project'])
     expect(workerAgent.spawnArgs.slice(0, 4)).toEqual(['docker', 'exec', '-i', '-w'])
     expect(workerAgent.spawnArgs[4]).toMatch(/^\/pluton\/workspaces\//)
-    expect(managerAgent.spawnArgs.slice(-3)).toEqual([
+    expect(managerAgent.spawnArgs.slice(-5)).toEqual([
       sandboxContainerName(projectId, 'manager'),
-      '/usr/local/bin/qwen',
-      '--acp',
+      '/usr/local/bin/opencode',
+      'acp',
+      '--log-level',
+      'warn',
     ])
-    expect(workerAgent.spawnArgs.slice(-3)).toEqual([
+    expect(workerAgent.spawnArgs.slice(-5)).toEqual([
       sandboxContainerName(projectId, 'worker-a'),
-      '/usr/local/bin/qwen',
-      '--acp',
+      '/usr/local/bin/opencode',
+      'acp',
+      '--log-level',
+      'warn',
     ])
     for (const agent of [managerAgent, workerAgent]) {
       for (let i = 0; i < agent.spawnArgs.length; i += 1) {
@@ -569,7 +581,12 @@ describe('runRun — container mode (engines through docker exec)', () => {
       }
       expect(agent.spawnArgs).not.toContain('PATH') // host essentials never cross
       expect(agent.spawnEnv['HOME']).toBe('/pluton/engine-home')
-      expect(agent.spawnEnv['QWEN_DIR']).toBe('/pluton/engine-home/qwen')
+      expect(agent.spawnEnv['XDG_CONFIG_HOME']).toBe('/pluton/engine-home/config')
+      // Runtime data/cache stay on the container filesystem (SQLite/process
+      // locks do not work on bind mounts); configuration and HOME remain on
+      // the Muse's private engine home.
+      expect(agent.spawnEnv['XDG_DATA_HOME']).toBe('/home/pluton/data')
+      expect(agent.spawnEnv['XDG_CACHE_HOME']).toBe('/home/pluton/cache')
     }
 
     // The ACP session cwd is the CONTAINER path (not the host workdir the

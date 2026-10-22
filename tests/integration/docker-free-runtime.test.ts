@@ -114,7 +114,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   }
 })
 
-const FAKE_QWEN_BIN = fileURLToPath(new URL('../helpers/fake-qwen-cli.mjs', import.meta.url))
+const FAKE_OPENCODE_BIN = fileURLToPath(new URL('../helpers/fake-opencode-cli.mjs', import.meta.url))
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
@@ -170,7 +170,7 @@ muses:
   manager:
     display_name: Manager
     role: supervisor
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: coordinator-read-only
     approval_mode: autonomous-bounded
@@ -189,7 +189,7 @@ muses:
   worker-a:
     display_name: Worker A
     role: coder
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
@@ -313,8 +313,8 @@ muses: {}
   it('d. pluton run executes a multi-agent run with manager and worker checkouts with 0 Docker spawns', async () => {
     const { ctx, store, projectId } = makeProject(NATIVE_PROJECT_CONFIG)
 
-    const origQwenBin = process.env.PLUTON_QWEN_BIN
-    process.env.PLUTON_QWEN_BIN = FAKE_QWEN_BIN
+    const origOpenCodeBin = process.env.PLUTON_OPENCODE_BIN
+    process.env.PLUTON_OPENCODE_BIN = FAKE_OPENCODE_BIN
 
     try {
       const summary = await runRun(ctx, {
@@ -355,8 +355,8 @@ muses: {}
       // Assert ZERO Docker invocations across the whole multi-agent run
       expect(dockerCalls).toHaveLength(0)
     } finally {
-      if (origQwenBin !== undefined) process.env.PLUTON_QWEN_BIN = origQwenBin
-      else delete process.env.PLUTON_QWEN_BIN
+      if (origOpenCodeBin !== undefined) process.env.PLUTON_OPENCODE_BIN = origOpenCodeBin
+      else delete process.env.PLUTON_OPENCODE_BIN
     }
   })
 

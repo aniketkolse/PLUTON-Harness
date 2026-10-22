@@ -4,7 +4,6 @@ import type { RetryOptions } from './acp/retry.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { MockEngineAdapter } from './mock/adapter.ts'
 import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
-import { QwenEngineAdapter } from './qwen/adapter.ts'
 
 /**
  * Creation options threaded to real adapters: container mode pins in-image
@@ -69,11 +68,5 @@ export function registerBuiltinEngines(): void {
     description: 'OpenCode CLI over ACP (stdio JSON-RPC; verified against v2.0.29)',
     devOnly: false,
     create: (opts) => new OpenCodeEngineAdapter(opts ?? {}),
-  })
-  registerEngine({
-    kind: 'qwen',
-    description: 'Qwen Code CLI over ACP (stdio JSON-RPC; verified against v0.25.2; needs OPENAI_*/DASHSCOPE_* env or a per-Muse login)',
-    devOnly: false,
-    create: (opts) => new QwenEngineAdapter(opts ?? {}),
   })
 }

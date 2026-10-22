@@ -1,17 +1,23 @@
-import { describe, expect, it } from 'vitest'
-import { join } from 'node:path'
-import { bootstrapStore } from '../../src/bootstrap.ts'
-import { loadConfig } from '../../src/config/load.ts'
+import { afterEach, describe, expect, it } from 'vitest'
 import { PlanManager } from '../../src/plan/manager.ts'
 import { renderPlanGraph } from '../../src/tui/plan-graph.ts'
 import { StateTransitionError, ValidationError } from '../../src/domain/errors.ts'
+import { createTestContext, type TestContext } from '../helpers/context.ts'
 
 describe('live smoke-docker plan mode validation', () => {
-  const smokeDir = join(process.cwd(), '.pluton-tmp', 'smoke-docker')
+  let context: TestContext | undefined
+
+  afterEach(async () => {
+    await context?.cleanup()
+    context = undefined
+  })
 
   it('validates plan creation, dependency constraints, approval invalidation, and execution handoff', async () => {
-    const loaded = loadConfig(smokeDir)
-    const { store, projectId } = bootstrapStore(loaded)
+    // Build a hermetic project from tracked sources instead of reusing the
+    // gitignored .pluton-tmp/smoke-docker scratch checkout, which is absent
+    // in a fresh clone and made this test environment-dependent.
+    context = await createTestContext()
+    const { store, projectId } = context
 
     const managerMuse = store.getMuse('manager') ?? store.listMuses().find((m) => m.slug === 'manager')!
     expect(managerMuse).toBeDefined()

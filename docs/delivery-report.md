@@ -1,5 +1,10 @@
 # Pluton-Harness — final delivery report (§17)
 
+> **Historical delivery record (2026-10-17; engine note 2026-10-22):** Qwen Code support was
+> removed in the OpenCode-only migration. Qwen work described below is retained as delivery history
+> and is not current support or setup guidance. Current engine scope: OpenCode only; `mock` is
+> tests/dev only. See [`MIGRATION.md`](MIGRATION.md) §8.
+
 Status date: 2026-10-17 · host: Windows 11 + Docker Desktop (WSL2) · Node v24.22.0 · git `main`,
 unpushed. This report states exactly what was built, what was executed and observed, and what was
 **not** — per the master prompt's honesty rules. Nothing below is claimed without a file, a commit,
@@ -188,7 +193,7 @@ Commands and results observed at the report commit:
 |---|---|---|
 | CLI-first; `--json` clean stdout, diagnostics stderr | `src/cli/output.ts`, every command | integration tests parse stdout envelopes; stderr carries human text only |
 | Per-Muse engine/model, no global switch; capabilities never faked | `src/engines/`, config schema | adapter conformance suites; doctor/model list honest errors |
-| OpenCode first-class; Qwen Code second real adapter | `src/engines/opencode/`, `src/engines/qwen/` | live suites 3/3 + 4/4 |
+| OpenCode first-class; Qwen Code adapter historically second (removed 2026-10-22) | `src/engines/opencode/` (Qwen source deleted) | live suite 3/3; historical Qwen 4/4 |
 | tmux per Muse in Linux containers; tmux ≠ security boundary | `src/terminal/`, ADR-0004/0005, SECURITY.md | E2E tmux roundtrip, window-id kills, duplicate-proofing tests |
 | Docker fail-closed | `src/sandbox/` | `sandbox.test.ts`: daemon down → typed error with exact fix |
 | Idempotent requests; durably recorded before acceptance | `src/store/store.ts` receipts | `store.test.ts` replay same request-id → same outcome |

@@ -3,9 +3,9 @@
 **Plan → Delegate → Execute → Verify → Deliver.**
 
 Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent
-AI coding agent identities — *Muses*. Each Muse has its own engine (OpenCode, …), model, role
-instructions, permissions, workspace policy, resource limits and a persistent tmux terminal.
-Pluton is not a coding model: engines do inference, native process policies (or optional containers)
+AI coding agent identities — *Muses*. Each Muse has its own model, role instructions, permissions,
+workspace policy, resource limits and a persistent tmux terminal.
+Pluton is not a coding model: OpenCode does inference, native process policies (or optional containers)
 provide execution isolation, tmux provides terminal persistence, Git tracks changes, and a durable local
 runtime (SQLite) records what was requested, accepted, dispatched, completed, failed or left uncertain.
 
@@ -22,8 +22,8 @@ provides the missing control plane for local multi-agent development:
 
 - **CLI-first** — the terminal is the command center; every suitable command supports `--json`
   for automation. No web UI is required for anything.
-- **Multiple engines, per Muse** — engine and model are chosen per Muse and validated against the
-  engine's real capabilities. No global "one engine for everyone" switch.
+- **Per-Muse model and role configuration** — every Muse is configured independently and model
+  choices are validated against OpenCode's real capabilities. There is no global model switch.
 - **Durable task truth** — SQLite-backed runs, tasks, dependency edges, receipts, events and
   approvals; request idempotency; explicit `unknown_outcome` instead of blind replay.
 - **Native-first execution** — first-class host execution (`sandbox.kind: native`, see
@@ -37,9 +37,13 @@ provides the missing control plane for local multi-agent development:
 |---|---|
 | Node.js ≥ 24 | local daemon + CLI; uses the built-in `node:sqlite` |
 | Git ≥ 2.40 | checkout isolation and diff capture |
-| An engine CLI | e.g. OpenCode v2 (`opencode acp` protocol) or Qwen Code; model auth configured per engine |
+| An engine CLI | OpenCode v2 (`opencode acp` protocol); model auth configured in the Muse's engine home |
 | Docker Desktop *(optional for native)* | required only when using container mode (`sandbox.kind: docker`) |
 | Windows 11 with WSL2 / Linux | tested on Windows 11 and Linux hosts |
+
+> **Engine support:** OpenCode is the only supported real inference engine (`engine: opencode`).
+> The deterministic `mock` adapter exists for tests and development only; it is not a substitute
+> for a real run. Qwen Code support was removed in the OpenCode-only migration.
 
 Native host execution (`sandbox.kind: native`) runs without Docker Desktop or containers. See
 [`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md) for native configuration and security details. For
@@ -157,7 +161,7 @@ src/cli/            CLI entry & command handlers
 src/domain/         IDs, state machines, contracts (no I/O)
 src/runtime/        durable scheduler & lifecycle supervision
 src/persistence/    SQLite schema + migrations (node:sqlite)
-src/engines/        engine contract + adapters (opencode, second engine, deterministic mock)
+src/engines/        engine contract + OpenCode adapter + deterministic mock
 src/orchestration/  Manager tool bridge, task graph, budgets, approvals
 src/execution/      native execution provider & process-policy enforcement
 src/sandbox/        Docker container lifecycle policy (legacy opt-in substrate)

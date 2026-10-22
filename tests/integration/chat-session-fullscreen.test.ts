@@ -54,7 +54,7 @@ describe('ChatSession Full-Screen TUI Integration', () => {
         displayName: 'Worker 1',
         role: 'coder',
         engineKind: 'mock',
-        model: 'qwen/coder-32b',
+        model: 'mock/model-a',
         instructionsFile: null,
         workspacePolicy: 'isolated-task-checkout',
         permissions: ['project.read', 'project.write'],

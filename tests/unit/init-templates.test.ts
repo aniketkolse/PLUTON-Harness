@@ -9,7 +9,7 @@ import { run } from '../../src/util/exec.ts'
 
 /**
  * Team templates are product surface: `pluton init --team <t>` must always
- * produce a schema-valid, mixed-engine config. This suite existed after a real
+ * produce a schema-valid, OpenCode-only config. This suite existed after a real
  * bug: bugfix.yaml had `network_policy` nested under `sandbox:` while the
  * schema is strict and expects it under `runtime:` — validation caught it at
  * init time (fail-closed, nothing written) but no test guarded the templates.
@@ -41,11 +41,15 @@ describe('team templates', () => {
     expect(findManager(loaded.config)).not.toBeNull()
   })
 
-  it.each(TEAMS)('%s mixes engines across Muses (per-Muse engine selection)', (team) => {
-    const root = tmpDir(`${team}-mix`)
+  it.each(TEAMS)('%s uses the supported OpenCode engine for every Muse', (team) => {
+    const root = tmpDir(`${team}-engine`)
     const loaded = validateConfig(parseYaml(templateText(team)), root, join(root, 'pluton.yaml'))
-    const kinds = new Set(Object.values(loaded.config.muses).map((m) => m.engine))
-    expect(kinds.size, `template ${team} uses only ${[...kinds].join(', ')}`).toBeGreaterThanOrEqual(2)
+    const muses = Object.values(loaded.config.muses)
+    expect(muses.length).toBeGreaterThan(0)
+    for (const muse of muses) {
+      expect(muse.engine, `template ${team} muse ${muse.display_name}`).toBe('opencode')
+      expect(muse.model).toMatch(/^opencode\//)
+    }
   })
 })
 

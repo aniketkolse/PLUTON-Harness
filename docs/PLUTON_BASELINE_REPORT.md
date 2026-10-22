@@ -1,5 +1,9 @@
 # PLUTON Baseline Test/Build Report — Phase 1 audit
 
+> **Historical audit (2026-10-18; engine note 2026-10-22):** Qwen Code support was removed after
+> this audit. Qwen test commands and results below are historical evidence, not current
+> instructions. Current engine coverage is OpenCode only.
+
 **Date:** 2026-10-18 · **Branch:** `main` · **HEAD:** `506fa72` ("feat(tui): align chat layout to single-column card design and remediate visual defects")
 **Nature of this audit:** read-only. **No source code was changed.** The only repository additions are the four audit documents (`docs/PLUTON_ARCHITECTURE.md`, `docs/PLUTON_FEATURE_PARITY.md`, `docs/PLUTON_IMPLEMENTATION_ROADMAP.md`, this report). Untracked items present before the audit: `.pluton/`, `pluton.yaml`, `PLUTON_TUI_REFINEMENT_PROMPT.md`.
 

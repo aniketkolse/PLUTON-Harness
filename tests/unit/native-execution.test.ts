@@ -6,6 +6,7 @@ import {
   ExecutionClosedError,
   ExecutionTimeoutError,
   PolicyDeniedError,
+  ValidationError,
 } from '../../src/domain/errors.ts'
 import {
   NativeExecutionProvider,
@@ -106,6 +107,13 @@ describe('NativeExecutionProvider', () => {
     expect(probe.capabilities.filesystemConfinement).toBe(false)
     expect(probe.capabilities.networkConfinement).toBe(false)
     expect(probe.detail).toMatch(/partial/i)
+  })
+
+  it('rejects NaN or non-finite sessionTimeoutMs, terminateGraceMs, and maxOutputBytes in constructor', () => {
+    const root = makeRoot()
+    expect(() => makeProvider(root, [], { sessionTimeoutMs: NaN })).toThrow(ValidationError)
+    expect(() => makeProvider(root, [], { terminateGraceMs: NaN })).toThrow(ValidationError)
+    expect(() => makeProvider(root, [], { maxOutputBytes: NaN })).toThrow(ValidationError)
   })
 
   it('rejects a working directory outside the allowed roots', async () => {

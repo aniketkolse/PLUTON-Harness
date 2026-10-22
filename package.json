@@ -1,7 +1,7 @@
 {
   "name": "pluton-harness",
   "version": "0.1.0",
-  "description": "CLI-first, local-first orchestration control plane coordinating a team of persistent AI coding Muses across different engines, models, workspaces and terminals.",
+  "description": "CLI-first, local-first orchestration control plane coordinating a team of persistent AI coding Muses with per-Muse models, workspaces and terminals.",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {

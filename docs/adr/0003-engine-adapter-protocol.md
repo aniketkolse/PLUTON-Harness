@@ -1,15 +1,22 @@
-# ADR-0003 — Engine adapter protocol and the first two engines
+# ADR-0003 — Engine adapter protocol (OpenCode; historical second-engine addendum)
 
-- Status: **Accepted** (2026-10-16) — Phase 4 completed: ACP transport implemented, OpenCode adapter
-  live-verified, second engine selected and live-verified per the addendum below
-- Supersedes: none. Addendum: "Phase 4 addendum — second engine selection: Qwen Code (verified)"
+- Status: **Accepted** (2026-10-16) — ACP adapter architecture. **Current engine scope updated
+  2026-10-22:** OpenCode is the only supported real engine; the Qwen Code second-engine addendum
+  below is retained as **legacy history** and is not current support or setup guidance.
+- Supersedes: none. Historical addendum: "Phase 4 addendum — second engine selection: Qwen Code
+  (verified; support removed 2026-10-22)".
+
+> **Legacy-history notice:** Qwen Code support was removed in the OpenCode-only migration. Any
+> Qwen adapter, env-var, mode, approval or test descriptions below describe work that existed at the
+> time; they are **not** current instructions. See [`../MIGRATION.md`](../MIGRATION.md) §8.
 
 ## Context
 
 Pluton must drive heterogeneous coding engines through their **official, currently supported
-structured protocols** — never by scraping TUI text. Engine and model are chosen per Muse. The
-first engine is OpenCode; a second *real* engine is required for the MVP (the mock adapter does
-not count). Capabilities differ per engine and must be reported, not faked.
+structured protocols** — never by scraping TUI text. Engine and model are chosen per Muse. OpenCode
+is the supported real engine; the deterministic mock adapter does not count as a real engine. The
+original MVP plan also required a second real engine, but that requirement was superseded by the
+2026-10-22 OpenCode-only decision. Capabilities differ per engine and must be reported, not faked.
 
 ## Verified protocol surface (this host, 2026-10-16)
 
@@ -35,7 +42,8 @@ not count). Capabilities differ per engine and must be reported, not faked.
 - **First engine:** OpenCode via **ACP over stdio** (`opencode acp`) as the managed protocol;
   `opencode run --format json` remains a verified fallback path if ACP proves unstable on a
   platform (recorded as adapter capability deviation, not silently).
-- **Second engine:** selected from Codex app-server / Gemini-CLI-ACP / Pi-RPC by the criteria:
+- **Second engine (historical; superseded):** selected from Codex app-server / Gemini-CLI-ACP /
+  Pi-RPC by the criteria:
   (1) protocol documentation verifiable from official sources, (2) fixture-testable offline,
   (3) installable here without paid auth, (4) value of protocol diversity vs implementation
   complexity. **Final choice recorded as an addendum to this ADR in Phase 4.** If the second
@@ -62,14 +70,17 @@ not count). Capabilities differ per engine and must be reported, not faked.
   JSONL `{"type":"text",…,"sessionID":"ses_…"}` containing the exact requested marker.
 - Web: geminicli.com ACP mode docs; github.com/openai/codex app-server README; pi.dev RPC docs.
 
-## Phase 4 addendum — second engine selection: Qwen Code (verified)
+## Phase 4 addendum — second engine selection: Qwen Code (verified) [LEGACY HISTORY — support removed]
 
-Status: **Accepted** (2026-10-16). The four selection criteria from the Decision section were
-applied against the candidates that could be installed and driven here without paid auth:
+Status: **Historical decision** (2026-10-16); Qwen support was **removed 2026-10-22**. Retained only
+to explain how the ACP transport was validated against a second independent engine. This section is
+not a current setup guide.
 
-| Candidate | Protocol docs | Offline fixture-able | Installable here | Kept? |
+Historical candidate evaluation:
+
+| Candidate | Protocol docs | Offline fixture-able | Installable here | Kept at the time? |
 |---|---|---|---|---|
-| Qwen Code (`@qwen-code/qwen-code` 0.25.2) | ACP, `qwen --acp` (same spec as OpenCode; `--help` + live frames) | yes (recorded frames replay) | yes (npm, Node >= 22) | **yes** |
+| Qwen Code (`@qwen-code/qwen-code` 0.25.2) | ACP, `qwen --acp` (same spec as OpenCode; `--help` + live frames) | yes (recorded frames replay) | yes (npm, Node >= 22) | **yes** — removed 2026-10-22 |
 | Codex CLI `codex app-server` | yes (repo README) | yes | requires ChatGPT/API auth | deferred |
 | Gemini CLI `--acp` | yes | yes | requires Google login | deferred |
 | Pi RPC | yes | yes | not installed here | deferred |
@@ -121,11 +132,9 @@ model — it is not a wrapper around OpenCode.
   the engine crashes with ENOENT if its home dir does not exist → the adapter creates the Muse
   engine home before spawning (found by the live suite).
 
-**Verification:** shared refactor kept the OpenCode behavior green (its 42 offline tests pass
-against the extracted `src/engines/acp/*` modules); the new offline suite
-(`tests/unit/qwen-*.test.ts`, scripted by recorded frames in `tests/fixtures/qwen-acp/`) covers
-capabilities, discovery, mode/model pinning (both already-match and switch paths), resume, MCP
-mapping, auth mapping, the three approval policies, unknown server requests, stray notifications,
-cancel, timeout→poison, overlap refusal, model drift and close; the opt-in live suite
-(`tests/live/qwen.live.test.ts`, `PLUTON_LIVE_QWEN=1 … npm run test:live`) passed 4/4 against the
-real binary including codeword-recall resume. `npm run check` = typecheck + 169 tests, green.
+**Verification (historical):** the shared refactor kept OpenCode behavior green against the
+extracted `src/engines/acp/*` modules. The Qwen offline suite was scripted from recorded frames in
+`tests/fixtures/qwen-acp/`, and the opt-in live suite passed 4/4 against the real binary including
+codeword-recall resume. Those Qwen tests, fixtures and helpers were **deleted on 2026-10-22** with
+the OpenCode-only migration; current ACP/OpenCode coverage lives in `tests/unit/opencode-*.test.ts`
+and the shared ACP suites.

@@ -15,8 +15,8 @@ Trusted:
 
 Semi-trusted (assumed adversarial):
 
-- **engine sessions** — any LLM-driven process (OpenCode, Qwen Code, mocks) is
-  treated as an untrusted caller. It decides what tools to call, with what
+- **engine sessions** — any LLM-driven process (OpenCode, or the deterministic
+  mock in tests/dev) is treated as an untrusted caller. It decides what tools to call, with what
   arguments, and can be steered by prompt-injected repository content.
 - **repository content** — README files, source comments and task briefs may
   contain instructions aimed at the model. Repository content is data, never

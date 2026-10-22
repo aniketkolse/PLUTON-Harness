@@ -38,7 +38,7 @@ We adopt **Architecture Option C: Shared Web Application + Local Application Ser
 │  - Store & SQLite DB (.pluton/state/pluton.sqlite)     │
 │  - RunSupervisor, PlanManager, FileLeaseManager        │
 │  - UsageLedger, CircuitBreaker, WakeupRegistry         │
-│  - Engine Adapters (OpenCode, Qwen, Mock)              │
+│  - Engine Adapters (OpenCode, Mock)                     │
 │  - Restricted Tool Bridge & Sandbox Containers         │
 └────────────────────────────────────────────────────────┘
 ```

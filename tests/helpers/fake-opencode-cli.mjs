@@ -2,35 +2,48 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import readline from 'node:readline'
-import { fileURLToPath } from 'node:url'
 
 /**
- * Host ACP CLI mock simulating Qwen Code v0.25.2 over stdio.
- * Handles `--version`, `--acp`, ACP lifecycle handshakes, and either:
+ * Deterministic OpenCode ACP CLI for spawned-process integration tests.
+ * Handles `--version`, the `acp --log-level warn` invocation, the ACP
+ * lifecycle, and either:
  * - (Manager) tool bridge HTTP RPCs (task.create, task.wait)
  * - (Worker) isolated workspace actions (file creation and commit)
+ *
+ * This is a test fixture, not a replacement engine: it speaks enough of the
+ * recorded OpenCode v2.0.29 wire shape for Pluton's real ACP transport and
+ * supervisor to run without a live model.
  */
 
 const args = process.argv.slice(2)
 if (args.includes('--version')) {
-  process.stdout.write('qwen 0.25.2\n')
+  process.stdout.write('opencode v2.0.29\n')
   process.exit(0)
 }
 
-if (!args.includes('--acp')) {
-  process.stderr.write('fake-qwen-cli: missing --acp flag\n')
+// One-shot commands used by discovery/model probes when a fixture is pinned.
+if (args.includes('models')) {
+  process.stdout.write('opencode/test-model\n')
+  process.exit(0)
+}
+if (args.includes('auth')) {
+  process.stdout.write('No authenticated integrations found.\n')
+  process.exit(0)
+}
+
+if (!args.includes('acp')) {
+  process.stderr.write('fake-opencode-cli: expected the `acp` command\n')
   process.exit(1)
 }
 
-const framesUrl = new URL('../fixtures/qwen-acp/recorded-frames.json', import.meta.url)
+const framesUrl = new URL('../fixtures/opencode-acp/recorded-frames.json', import.meta.url)
 const frames = JSON.parse(readFileSync(framesUrl, 'utf8'))
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
 
 let mcpServers = null
-let currentMode = 'auto'
 let currentModel = 'test/model-a'
-let sessionId = 'ses-fake-qwen'
+let sessionId = 'ses-fake-opencode'
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n')
@@ -39,24 +52,14 @@ function send(msg) {
 function buildConfigOptions() {
   return [
     {
-      id: 'mode',
-      name: 'Mode',
-      category: 'mode',
-      currentValue: currentMode,
-      options: [
-        { value: 'plan', name: 'Plan' },
-        { value: 'default', name: 'Default' },
-        { value: 'auto', name: 'Auto' },
-      ],
-    },
-    {
       id: 'model',
       name: 'Model',
       category: 'model',
+      type: 'select',
       currentValue: currentModel,
       options: [
         { value: 'test/model-a', name: 'test/model-a' },
-        { value: '$runtime|openai|cbai/glm-5.2(openai)', name: 'cbai/glm-5.2' },
+        { value: 'opencode/deepseek-v4.1-flash-free', name: 'opencode/DeepSeek V4.1 Flash Free' },
       ],
     },
   ]
@@ -75,43 +78,29 @@ for await (const rawLine of rl) {
   const { id, method, params } = req
 
   if (method === 'initialize') {
-    send({
-      jsonrpc: '2.0',
-      id,
-      result: frames.initializeResult,
-    })
+    send({ jsonrpc: '2.0', id, result: frames.initializeResult })
   } else if (method === 'session/new') {
-    if (params?.mcpServers) {
-      mcpServers = params.mcpServers
-    }
+    if (params?.mcpServers) mcpServers = params.mcpServers
     sessionId = `ses-${Math.random().toString(36).slice(2, 9)}`
     send({
       jsonrpc: '2.0',
       id,
-      result: {
-        sessionId,
-        models: frames.sessionNew.models,
-        modes: frames.sessionNew.modes,
-        configOptions: buildConfigOptions(),
-      },
+      result: { sessionId, configOptions: buildConfigOptions() },
     })
+  } else if (method === 'session/load') {
+    if (params?.mcpServers) mcpServers = params.mcpServers
+    sessionId = typeof params?.sessionId === 'string' ? params.sessionId : sessionId
+    send({ jsonrpc: '2.0', id, result: { configOptions: buildConfigOptions() } })
   } else if (method === 'session/set_config_option') {
-    const configId = params?.configId ?? params?.id
-    const value = params?.value
-    if (configId === 'mode') currentMode = value
-    if (configId === 'model') currentModel = value
-    send({
-      jsonrpc: '2.0',
-      id,
-      result: {
-        configOptions: buildConfigOptions(),
-      },
-    })
+    if (params?.configId === 'model' && typeof params.value === 'string') currentModel = params.value
+    send({ jsonrpc: '2.0', id, result: { configOptions: buildConfigOptions() } })
+  } else if (method === 'session/close') {
+    send({ jsonrpc: '2.0', id, result: {} })
   } else if (method === 'session/prompt') {
     const isWorker = /[/\\]workspaces[/\\]/.test(process.cwd())
 
     if (!isWorker) {
-      // MANAGER PATH: drive the HTTP tool bridge
+      // MANAGER PATH: drive the HTTP tool bridge.
       const bridgeServer = Array.isArray(mcpServers)
         ? mcpServers.find((s) => s.type === 'http' || (s.url && typeof s.url === 'string'))
         : null
@@ -184,23 +173,16 @@ for await (const rawLine of rl) {
           },
         })
 
-        send({
-          jsonrpc: '2.0',
-          id,
-          result: { stopReason: 'end_turn' },
-        })
+        send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
       } catch (err) {
         send({
           jsonrpc: '2.0',
           id,
-          error: {
-            code: -32603,
-            message: err instanceof Error ? err.message : String(err),
-          },
+          error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
         })
       }
     } else {
-      // WORKER PATH: record evidence in current working directory
+      // WORKER PATH: record evidence in the current working directory.
       try {
         const cwd = process.cwd()
         const evidenceFile = join(cwd, 'worker-evidence.txt')
@@ -216,7 +198,7 @@ for await (const rawLine of rl) {
           // git commit is best-effort
         }
 
-        // Write an environment evidence file to inspect filtered environment
+        // Environment evidence for the allowlist assertions.
         const envEvidenceFile = join(cwd, 'worker-env.json')
         writeFileSync(envEvidenceFile, JSON.stringify(process.env, null, 2), 'utf8')
 
@@ -232,19 +214,12 @@ for await (const rawLine of rl) {
           },
         })
 
-        send({
-          jsonrpc: '2.0',
-          id,
-          result: { stopReason: 'end_turn' },
-        })
+        send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
       } catch (err) {
         send({
           jsonrpc: '2.0',
           id,
-          error: {
-            code: -32603,
-            message: err instanceof Error ? err.message : String(err),
-          },
+          error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
         })
       }
     }

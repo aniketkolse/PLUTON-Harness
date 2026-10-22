@@ -45,7 +45,7 @@ transport are all hand-rolled; no verbatim reuse.
   calls); run scope keeps the existing catalog and never sees operator tools.
 - **Chat persistence.** Migration v3 adds `chat_sessions` + `chat_messages`; `--continue` /
   `--resume <id>`; native resume tokens are passed only to engines whose capabilities advertise
-  resume (opencode yes; qwen degrades to transcript re-render, documented).
+  resume (OpenCode yes; the mock does not, so it degrades to transcript re-render, documented).
 - **`run.start` drives in-process.** The chat process creates the run (same admission/receipt
   path as `pluton run`) and hosts its `RunSupervisor` in the background — one chat-started run at
   a time; progress renders from the durable event cursor (`store.eventsSince`). Exiting chat

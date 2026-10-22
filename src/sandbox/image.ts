@@ -25,14 +25,14 @@ const PROBE_TIMEOUT_MS = 20_000
 
 /**
  * Image profiles: `base` is the probe/terminal layer (tmux, git, node);
- * `engines` adds the pinned engine CLIs (OpenCode, Qwen Code) that
- * container-mode supervised runs execute through `docker exec`. Container-mode
- * dispatch requires the `engines` profile; probe-only use accepts `base`.
+ * `engines` adds the pinned engine CLI (OpenCode) that container-mode
+ * supervised runs execute through `docker exec`. Container-mode dispatch
+ * requires the `engines` profile; probe-only use accepts `base`.
  */
 export type WorkerImageProfile = 'base' | 'engines'
 
 /** Binary names the `engines` profile must provide (Dockerfile layer + build-time proof). */
-const ENGINE_BINARIES = ['opencode', 'qwen'] as const
+const ENGINE_BINARIES = ['opencode'] as const
 
 export interface WorkerImageRecord {
   image: string

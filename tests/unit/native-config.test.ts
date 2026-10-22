@@ -143,6 +143,19 @@ describe('native execution config', () => {
     expect(() => assertNativeSandboxConfig(loaded.config)).toThrow(SandboxUnavailableError)
   })
 
+  it('tolerates unparsed native config with missing optional fields without NaN session timeouts', () => {
+    const dir = root()
+    const raw = nativeConfig()
+    delete (raw.sandbox.native as Record<string, unknown>).session_timeout_minutes
+    delete (raw.sandbox.native as Record<string, unknown>).terminate_grace_seconds
+    delete (raw.sandbox.native as Record<string, unknown>).max_output_bytes
+    const provider = createNativeExecutionProvider({ config: raw as any, rootDir: dir })
+    expect(provider).toBeDefined()
+    expect(provider['sessionTimeoutMs']).toBe(0)
+    expect(provider['terminateGraceMs']).toBe(2000)
+    expect(provider['maxOutputBytes']).toBe(1048576)
+  })
+
   it('does not select native through the Docker SandboxManager factory', () => {
     const dir = root()
     const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))

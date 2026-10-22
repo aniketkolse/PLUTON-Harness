@@ -12,7 +12,7 @@ import { createNativeExecutionProvider } from '../../src/execution/factory.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
 
-const FAKE_QWEN_BIN = fileURLToPath(new URL('../helpers/fake-qwen-cli.mjs', import.meta.url))
+const FAKE_OPENCODE_BIN = fileURLToPath(new URL('../helpers/fake-opencode-cli.mjs', import.meta.url))
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
@@ -63,7 +63,7 @@ muses:
   manager:
     display_name: Manager
     role: supervisor
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: coordinator-read-only
     approval_mode: autonomous-bounded
@@ -82,7 +82,7 @@ muses:
   worker-a:
     display_name: Worker A
     role: coder
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
@@ -120,11 +120,11 @@ describe('Native execution integration: manager & worker across isolated Git che
   it('executes manager at project root and worker in an isolated Git checkout without Docker', async () => {
     const { dir, ctx } = makeProject(NATIVE_PROJECT_CONFIG)
 
-    const origQwenBin = process.env.PLUTON_QWEN_BIN
+    const origOpenCodeBin = process.env.PLUTON_OPENCODE_BIN
     const origAllowed = process.env.CUSTOM_ALLOWED_TEST_VAR
     const origSecret = process.env.UNSAFE_HOST_SECRET
 
-    process.env.PLUTON_QWEN_BIN = FAKE_QWEN_BIN
+    process.env.PLUTON_OPENCODE_BIN = FAKE_OPENCODE_BIN
     process.env.CUSTOM_ALLOWED_TEST_VAR = 'native-test-allowed-value'
     process.env.UNSAFE_HOST_SECRET = 'super-secret-host-credential'
 
@@ -210,8 +210,8 @@ describe('Native execution integration: manager & worker across isolated Git che
         expect(payload.code).toBe(0)
       }
     } finally {
-      if (origQwenBin !== undefined) process.env.PLUTON_QWEN_BIN = origQwenBin
-      else delete process.env.PLUTON_QWEN_BIN
+      if (origOpenCodeBin !== undefined) process.env.PLUTON_OPENCODE_BIN = origOpenCodeBin
+      else delete process.env.PLUTON_OPENCODE_BIN
 
       if (origAllowed !== undefined) process.env.CUSTOM_ALLOWED_TEST_VAR = origAllowed
       else delete process.env.CUSTOM_ALLOWED_TEST_VAR
@@ -236,7 +236,7 @@ describe('Native execution integration: manager & worker across isolated Git che
         provider.prepare({
           projectId: 'proj-1',
           museId: 'worker-a',
-          engineKind: 'qwen',
+          engineKind: 'opencode',
           hostWorkdir: outsideDir,
           hostEngineHome: join(dir, '.pluton', 'engine-homes', 'worker-a'),
           allowedRoots: [dir, join(dir, '.pluton', 'workspaces')],

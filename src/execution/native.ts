@@ -185,7 +185,6 @@ const SAFE_ENV_KEYS: ReadonlySet<string> = new Set([
   'XDG_DATA_HOME',
   'XDG_CACHE_HOME',
   'XDG_STATE_HOME',
-  'QWEN_DIR',
   'OPENCODE_CONFIG',
   'OPENCODE_CONFIG_DIR',
   'NO_COLOR',
@@ -385,9 +384,15 @@ export class NativeExecutionProvider implements ExecutionProvider {
     this.maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
     this.terminateGraceMs = opts.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS
     this.sessionTimeoutMs = opts.sessionTimeoutMs ?? 0
-    if (this.maxOutputBytes <= 0) throw new ValidationError('native maxOutputBytes must be positive')
-    if (this.terminateGraceMs < 0) throw new ValidationError('native terminateGraceMs must be >= 0')
-    if (this.sessionTimeoutMs < 0) throw new ValidationError('native sessionTimeoutMs must be >= 0')
+    if (!Number.isFinite(this.maxOutputBytes) || this.maxOutputBytes <= 0) {
+      throw new ValidationError('native maxOutputBytes must be positive')
+    }
+    if (!Number.isFinite(this.terminateGraceMs) || this.terminateGraceMs < 0) {
+      throw new ValidationError('native terminateGraceMs must be >= 0')
+    }
+    if (!Number.isFinite(this.sessionTimeoutMs) || this.sessionTimeoutMs < 0) {
+      throw new ValidationError('native sessionTimeoutMs must be >= 0')
+    }
   }
 
   async probe(): Promise<ExecutionProbe> {
@@ -887,7 +892,7 @@ class NativeExecutionSession implements ExecutionSession {
   private armTimer(): void {
     if (this.timer !== null) return
     const timeoutMs = this.provider.configuredSessionTimeoutMs
-    if (timeoutMs <= 0) return
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return
     this.timer = setTimeout(() => {
       this.timer = null
       void this.onTimeout()

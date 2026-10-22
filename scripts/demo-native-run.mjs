@@ -7,7 +7,7 @@ import { Store } from '../src/store/store.ts'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SCRATCH = join(ROOT, '.pluton-tmp', 'demo-native')
-const FAKE_CLI = join(ROOT, 'tests', 'helpers', 'fake-qwen-cli.mjs')
+const FAKE_CLI = join(ROOT, 'tests', 'helpers', 'fake-opencode-cli.mjs')
 
 console.log('=== Pluton Native Execution Demonstration ===\n')
 
@@ -42,7 +42,7 @@ muses:
   manager:
     display_name: Manager
     role: supervisor
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: coordinator-read-only
     approval_mode: autonomous-bounded
@@ -61,7 +61,7 @@ muses:
   worker-a:
     display_name: Worker A
     role: coder
-    engine: qwen
+    engine: opencode
     model: test/model-a
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
@@ -97,7 +97,7 @@ console.log(`   - Warnings: ${probe.warnings.join('; ')}`)
 console.log('\n3. Executing multi-agent run without Docker...')
 const runEnv = {
   ...process.env,
-  PLUTON_QWEN_BIN: FAKE_CLI,
+  PLUTON_OPENCODE_BIN: FAKE_CLI,
   DEMO_CUSTOM_VAR: 'demo-secret-pass',
   UNSAFE_DEMO_TOKEN: 'should-not-leak',
 }

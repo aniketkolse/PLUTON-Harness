@@ -439,6 +439,7 @@ export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | nu
   }
 
   const allCompleted = tasks.every((t) => t.state === 'completed')
+  const cancelledTaskIds = tasks.filter((t) => t.state === 'cancelled').map((t) => t.id)
   const state: RunState = allCompleted ? 'completed' : 'failed'
   store.setRunState(runId, state, {
     // The manager's answer (persisted when the run entered `verifying`) is the
@@ -446,13 +447,20 @@ export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | nu
     // answer was ever produced.
     finalSummary: allCompleted
       ? (run.finalSummary ?? `${String(tasks.length)}/${String(tasks.length)} tasks verified`)
-      : 'verification failed',
+      : cancelledTaskIds.length > 0
+        ? `verification failed; ${String(cancelledTaskIds.length)} task(s) were cancelled`
+        : 'verification failed',
   })
   store.appendEvent({
     projectId: run.projectId,
     runId,
     type: 'run.finished',
-    payload: { outcome: allCompleted ? 'success' : 'failure', via: 'verification', tasks: tasks.length },
+    payload: {
+      outcome: allCompleted ? 'success' : 'failure',
+      via: 'verification',
+      tasks: tasks.length,
+      ...(cancelledTaskIds.length > 0 ? { cancelledTasks: cancelledTaskIds.length } : {}),
+    },
   })
   return { runId, state, outcome: allCompleted ? 'success' : 'failure' }
 }

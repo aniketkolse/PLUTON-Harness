@@ -1,5 +1,9 @@
 # Implementation decisions — what Pluton took from the reference studies
 
+> **Historical study (engine note 2026-10-22):** Qwen Code support was removed in the OpenCode-only
+> migration. Qwen references below record studied third-party behavior or historical Pluton
+> decisions, not current support or setup instructions.
+
 ## Purpose
 
 This document records, per decision, what Pluton-Harness **adopted**, **rejected**, or left

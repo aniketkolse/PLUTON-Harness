@@ -10,7 +10,7 @@ Pluton historically ran AI coding engines inside Docker containers (`sandbox.kin
 
 The native execution provider enables Pluton to orchestrate supervisors and workers directly on the host operating system:
 
-- **Host engine execution**: Spawns engine processes (OpenCode, Qwen Code, etc.) directly on the host via ACP (Agent Client Protocol) over stdio.
+- **Host engine execution**: Spawns the OpenCode engine process directly on the host via ACP (Agent Client Protocol) over stdio.
 - **Git checkout isolation**: Preserves isolated task checkouts via local Git clones under `.pluton/workspaces/`. A coordinator runs at the project root while workers operate in private checkouts.
 - **Fail-closed configuration gates**: Refuses to run unless the operator explicitly acknowledges the partial enforcement and host network exposure.
 - **Durable event stream**: Records lifecycle events (`execution.session_prepared`, `execution.session_started`, `execution.session_exited`, `execution.session_closed`) into SQLite.
@@ -85,8 +85,8 @@ muses:
   manager:
     display_name: Manager
     role: supervisor
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: coordinator-read-only
     approval_mode: autonomous-bounded
     permissions:
@@ -103,8 +103,8 @@ muses:
   worker-a:
     display_name: Worker
     role: coder
-    engine: qwen
-    model: test/model-a
+    engine: opencode
+    model: opencode/deepseek-v4.1-flash-free
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
     permissions:

@@ -1,6 +1,6 @@
 /**
  * Re-export shim: ACP update normalization is engine-generic and lives in
- * `src/engines/acp/normalize.ts` (shared by the opencode and qwen adapters).
+ * `src/engines/acp/normalize.ts` (shared ACP normalization).
  * Kept here so existing imports (tests included) stay stable.
  */
 export {

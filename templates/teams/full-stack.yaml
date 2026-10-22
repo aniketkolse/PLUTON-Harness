@@ -1,5 +1,5 @@
 # Pluton full-stack team template — copy into your project with `pluton init`
-# or adapt freely: every Muse may use a different engine and model.
+# or adapt freely: every Muse has its own model, role and permissions.
 # Replace model ids with ones from `pluton muse model list <muse>`.
 version: 1
 
@@ -67,10 +67,11 @@ muses:
   worker-b:
     display_name: Worker B
     role: coder
-    # Mixed engines (prompt §4): Worker A and Worker B deliberately differ —
-    # replace model ids with ones from `pluton muse model list worker-b`.
-    engine: qwen
-    model: cbai/glm-5.2
+    # Worker A and Worker B are independent coding Muses with their own model,
+    # instructions and checkout; replace model ids with ones from
+    # `pluton muse model list worker-b`.
+    engine: opencode
+    model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
     permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]

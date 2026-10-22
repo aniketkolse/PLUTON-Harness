@@ -1,5 +1,7 @@
-import { existsSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 import { loadConfig } from '../../src/config/load.ts'
 import {
@@ -9,6 +11,8 @@ import {
 } from '../../src/domain/models.ts'
 import { ROLE_DEFAULT_PERMISSIONS } from '../../src/domain/permissions.ts'
 import { museConfigSchema } from '../../src/config/schema.ts'
+
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 describe('Ship Workers Role Registry', () => {
   it('defines all 5 persistent roles in pluton.yaml', () => {
@@ -62,13 +66,26 @@ describe('Ship Workers Role Registry', () => {
   })
 
   it('verifies instructions_file exists for each persistent role in pluton.yaml', () => {
-    const { config, rootDir } = loadConfig('pluton.yaml')
-    const roles = ['manager', 'qa', 'researcher', 'coder', 'reviewer']
-    for (const id of roles) {
-      const muse = config.muses[id]
-      expect(muse).toBeDefined()
-      expect(muse!.instructions_file).toBeDefined()
-      expect(existsSync(join(rootDir, muse!.instructions_file!))).toBe(true)
+    // The repository's .pluton/roles/ is gitignored runtime state. Build the
+    // fixture from tracked sources so this test also passes in a fresh clone.
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'pluton-ship-roles-'))
+    try {
+      cpSync(join(repoRoot, 'pluton.yaml'), join(fixtureRoot, 'pluton.yaml'))
+      mkdirSync(join(fixtureRoot, '.pluton'), { recursive: true })
+      cpSync(join(repoRoot, 'templates', 'roles'), join(fixtureRoot, '.pluton', 'roles'), {
+        recursive: true,
+      })
+
+      const { config, rootDir } = loadConfig(fixtureRoot)
+      const roles = ['manager', 'qa', 'researcher', 'coder', 'reviewer']
+      for (const id of roles) {
+        const muse = config.muses[id]
+        expect(muse).toBeDefined()
+        expect(muse!.instructions_file).toBeDefined()
+        expect(existsSync(join(rootDir, muse!.instructions_file!))).toBe(true)
+      }
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true })
     }
   })
 

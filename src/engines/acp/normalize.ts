@@ -4,8 +4,7 @@ import type { EngineEvent } from '../contract/types.ts'
  * Normalization of ACP `session/update` notifications into Pluton's engine
  * event vocabulary, plus prompt-result classification. Pure functions: the
  * shapes replayed here are the ones actually recorded from `opencode acp`
- * v2.0.29 and `qwen --acp` (Qwen Code v0.25.2) on 2026-10-16
- * (`.pluton-tmp/acp-probe*.log`, `qwen-acp-probe*.log`). Unknown update kinds
+ * v2.0.29 on 2026-10-16 (`.pluton-tmp/acp-probe*.log`). Unknown update kinds
  * are ignored and counted — never guessed into a fabricated event.
  */
 

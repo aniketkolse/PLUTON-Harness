@@ -1,5 +1,9 @@
 # Architecture map — cloudroom-core, OpenMausBot, Pluton-Harness
 
+> **Historical study (engine note 2026-10-22):** Qwen references describe the studied third-party
+> projects or Pluton's pre-migration adapter. Qwen Code support was removed; those references are
+> not current Pluton support or setup instructions. OpenCode is the only supported real engine.
+
 ## Purpose
 
 One page per project showing how the pieces are arranged, what owns state transitions, where the

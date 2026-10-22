@@ -27,7 +27,7 @@ There is no daemon, no service container, and no plugin lifecycle today (verifie
 | `src/cli/commands/run.ts:240` | `createRunSupervisor`: builds the long-lived `RunSupervisor` for `pluton run` (in-process manager bridge + HTTP bridge registered per Muse/task with bearer tokens) |
 | `src/orchestrator/supervisor.ts:170` | `RunSupervisor`: the manager session, dispatch loop, per-Muse locking, engine sessions, outcome mapping, retries, verification hand-off |
 | `src/chat/session.ts` (35.4 KB) | `ChatSession`: interactive operator TUI loop, streaming turns, background run polling (`runPollTick`), approvals inbox, slash commands |
-| `src/engines/registry.ts:52` | Engine registry: a simple `Map` of factories (`mock` devOnly, `opencode`, `qwen`) — the closest thing to a service registry that exists |
+| `src/engines/registry.ts:52` | Engine registry: a simple `Map` of factories (`opencode`, `mock` devOnly) — the closest thing to a service registry that exists |
 
 Composition is static and config-driven: one `pluton.yaml` per project, validated by Zod (`src/config/schema.ts`), plus role templates in `templates/`. There is no profile/bundle/patch layering and no hot reload.
 
@@ -40,7 +40,7 @@ Composition is static and config-driven: one `pluton.yaml` per project, validate
 | `src/domain/` | 6 | IDs, typed models, errors, permission catalog, task/run/sandbox state machines, plan types |
 | `src/store/` | 3 | SQLite open/pragmas (`db.ts`), forward-only migrations (`migrations.ts`), the single `Store` class (62.8 KB, 80 public methods) |
 | `src/orchestrator/` | 8 | Supervisor, task-graph admission, wakeups, circuit breaker, keyed mutex, file-lease manager, usage ledger, run-setup mapping |
-| `src/engines/` | 3 + acp(5) + contract(2) + opencode(3) + qwen(3) + mock | Engine contract, ACP stdio client, adapters, docker-exec spawn, approval-mode mapping, discovery |
+| `src/engines/` | 3 + acp(5) + contract(2) + opencode(3) + mock | Engine contract, ACP stdio client, adapters, docker-exec spawn, approval-mode mapping, discovery |
 | `src/tools/` | 6 | Restricted tool catalog + handlers, authorization bridge, MCP stdio server, HTTP transport, operator tool catalog |
 | `src/sandbox/` | 6 | Docker lifecycle, worker image build/probe, Muse containers, factory, ack-gated local-process path |
 | `src/server/` | 8 | Local workspace app server (loopback + workspace-token gate): SPA assets, HTTP routes, SSE log-watcher, instance discovery/lifecycle |
@@ -52,7 +52,7 @@ Composition is static and config-driven: one `pluton.yaml` per project, validate
 | `src/tui/` | 14 | TUI 2.0 primitives: terminal, layout, render, state, theme, markdown, sanitize, width, editor, keys, activity, approval cards, orchestra inspector, plan graph |
 | `src/ui/` | 10 | TUI 2.0 design-system components: brand banner, header, messages, cards, tools, status bar, input, approval, theme, demo |
 
-Tests: 70 unit files, 19 integration files, 1 gated E2E file, 2 opt-in live files, fixtures for OpenCode/Qwen ACP frames (`tests/fixtures/`).
+Tests: 128-file default suite (90 unit, 30 integration, 7 focused, 1 E2E) plus a 3-file Docker/Linux-gated E2E suite and 1 opt-in live suite; fixtures for OpenCode ACP frames (`tests/fixtures/`).
 
 ## 4. Durable model (SQLite)
 
@@ -81,7 +81,7 @@ Task state machine (`src/domain/state.ts`): `created → queued → admitted →
 2. Dispatch loop takes `listReadyTasks` up to `maxConcurrentWorkers`, per-Muse serialization via `KeyedMutex`, and stops dispatch while the circuit breaker is tripped.
 3. A task with `isolated-task-checkout` gets a per-task `git clone --local` checkout (`src/workspace/manager.ts`), recorded in `workspaces`.
 4. Engine session via `adapterFor(muse)`; prompt has a hard wall-clock timeout (`runPrompt`); timeout maps to outcome `unknown` with `prompt_timeout` — never a fabricated success.
-5. Outcomes: `success` → `verifying` when verification checks exist, else `completed`; `failure` → circuit-breaker decision → retry (new attempt, `task.retry_scheduled`) or fail; `cancelled` → `cancelled`; `unknown` → `unknown_outcome`. Every transition appends an event and notifies waiters exactly once (`wakeups.ts`).
+5. Outcomes: `success` → `verifying` when verification checks exist, else `completed`; `failure` → circuit-breaker decision → retry (new attempt, `task.retry_scheduled`) or fail; `cancelled` → `cancelled`; `unknown` → `unknown_outcome`. Every transition appends an event and notifies waiters exactly once (`wakeups.ts`). In the verification path, a run containing any cancelled task finalizes `failed` with an explicit count of cancelled tasks. `task.cancel` also cancels not-yet-terminal dependents transitively (`task.cancelled_by_dependency`), because a dependent can never become ready after its prerequisite is cancelled; direct cancellation still emits `task.cancelled_by_tool`.
 6. `scope.declare`/`scope.release` map to file leases; leases are released in a `finally` block on task exit.
 7. Usage events (`inputTokens`/`outputTokens`/`costUsd`) are absorbed by `UsageLedger.record`; overrun triggers `session.interrupt()` (`supervisor.ts:473–486`). Budgets are **opt-in**: `runtime.max_run_input_tokens` / `max_run_output_tokens` / `max_run_cost_usd` and the per-Muse caps (`src/config/schema.ts:73–82`) map through `usageBudgetsFromRuntime` (`src/orchestrator/run-setup.ts:42–52`) into the ledger when configured (`run.ts:330,350`) — absent limits mean no limit (`supervisor.ts:347`). See the parity doc gap table.
 8. `pluton verify` runs configured checks (argv-only, allow-listed, bounded) and closes tasks/runs only from durable verdicts (`src/verify/runner.ts`).
@@ -94,10 +94,10 @@ Restart behavior: state is durable, but there is no automatic re-dispatch; the r
 
 - Contract (`src/engines/contract/types.ts`): `EngineAdapter` (capabilities, discover, listModels, authStatus, startSession) and `EngineSession` (sendPrompt → normalized `EngineEvent` stream, interrupt, close). Events: `status`, `text`, `tool`, `approval_request`, `usage`, `result {success|failure|cancelled|unknown}`, `error`. Capabilities: `resumeSession`, `interrupt`, `approvals`, `usage`, `modelList`, `mcpServers`, `sessionExport`; conservative defaults; unsupported features must raise capability errors, never fabricate.
 - ACP transport (`src/engines/acp/client.ts`): in-repo newline-delimited JSON-RPC 2.0 over stdio; 60 s default control-request timeout; 4 MB max frame; max 64 pending; bounded stderr tail; malformed frames are fatal to the connection; request timeouts reject that request only. No retry/backoff policy exists anywhere in `src/engines/` (verified grep).
-- Adapters: `opencode` (live-verified v2.0.29; model pinning, `session/load` resume, approvals, usage), `qwen` (v0.25.2; session modes, composite model values, unknown server requests refused `-32601`, auth mapping `-32000`), `mock` (tests/dev only). Fixture-replay conformance suites in `tests/unit` and `tests/fixtures/`.
+- Adapters: `opencode` (live-verified v2.0.29; model pinning, `session/load` resume, approvals, usage) and `mock` (tests/dev only). Fixture-replay conformance suites in `tests/unit` and `tests/fixtures/`. OpenCode is the only supported real engine; Qwen Code support was removed in the OpenCode-only migration.
 - Native mode (default): `src/execution/native.ts` spawns host engine processes with realpath-checked cwd boundaries, explicit env allowlisting, byte-bounded output, process-tree termination and durable `execution.*` events; `src/execution/adapter.ts` wraps engine adapters so discovery/auth stay on the host while process creation is policy-gated.
 - Container mode (legacy opt-in): `docker-exec.ts` spawns the engine through `docker exec -i`, passes env by `-e NAME` only (values never enter argv), rewrites host paths to container paths; the worker image pins engine versions (`sandbox/image.ts`, `PLUTON_ENGINES=1` build profile gates container dispatch).
-- Approval mapping (`src/engines/approval.ts`): Muse `approval_mode` maps to engine session modes; anything the engine still asks is answered fail-closed (`deny`) except `autonomous-bounded` (`allow_once`). Known limitation recorded in that file: a denied action does not stall the turn, so a task can still record a syntactically "successful" no-op; denials are only visible as `approval.engine_decision` events and an empty diff. Engine permission requests in the ask-* modes now have an interactive operator channel: `src/engines/interactive-approval.ts` mints a durable approval per request (surfaced in the TUI inbox and the SPA approval banner) and resolves fail-closed `deny` when no decision can be recorded.
+- Approval mapping (`src/engines/approval.ts`): Muse `approval_mode` maps to an engine permission policy. `autonomous-bounded` is always fail-closed `deny` for OpenCode (there is no engine-side auto mode, even in a proven isolated checkout); ask-* modes use the interactive operator channel (`src/engines/interactive-approval.ts`), which mints a durable approval per request (TUI inbox / SPA banner) and resolves fail-closed `deny` when no decision can be recorded. A denied action does not stall the turn, so a task can still record a syntactically "successful" no-op; denials are visible as `approval.engine_decision` events and an empty diff.
 
 ## 7. Tool bridge and security boundaries
 
@@ -128,12 +128,14 @@ Machine interfaces: the MCP tool bridge (engine-facing), the CLI JSON envelopes,
 
 - `npm run check` = `tsc -p tsconfig.json` + `vitest run`; baseline 2026-10-18: typecheck exit 0, 89 files / 762 tests passed (`docs/PLUTON_BASELINE_REPORT.md`).
 - Gated Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`): 5/5 passed on this host (2026-10-18), skips cleanly without a daemon/image.
-- Opt-in live engine suites (`PLUTON_LIVE_OPENCODE=1`, `PLUTON_LIVE_QWEN=1` with `npm run test:live`) — NOT RUN in this audit (per-Muse engine auth not configured; `pluton doctor` reports 6 auth warnings).
+- Opt-in live engine suite (`PLUTON_LIVE_OPENCODE=1` with `npm run test:live`) — NOT RUN in this audit unless recorded otherwise (per-Muse engine auth not configured).
 - Honesty conventions: README status banner, ADRs with statuses, `docs/ROADMAP.md` as the live status surface, "NOT RUN with a reproducible command" reporting.
 
 ## 11. Known limitations (verified, current)
 
 Former limitation, now resolved (2026-10-19, change set `supervisor-ownership-race`): `runs.supervisor_pid` was written once and never read — every `RunSupervisor` entry point (`pluton run`, `--resume`, `approvals decide` auto-continue, `verify --dispatch`, HTTP resume, chat background runs) could construct a second supervisor for the same live run. Schema v7 + the atomic claim, renewed heartbeat and `SupervisorFence` gating (see §4 claim API and §5 supervisor-ownership paragraph) now refuse a second live owner and turn a stale owner read-only (`superseded`) with its duty writes atomically rejected; a second live owner is a clean `ConflictError`/HTTP 409. Two honest residuals remain: **(R1)** a hard-wedged stale owner cannot be forced to stop from its own side — its state writes are fenced, but its engine children may linger until the operator kills the process; **(R2)** the guarantee is per-statement atomic through one local SQLite database file, not a distributed-system protocol. (By-design boundary, not a residual: control-plane writers stay unfenced — see §5.)
+
+Former limitation, now resolved (2026-10-22): a cancelled prerequisite left its queued dependents stranded forever because dependents only become ready after prerequisites reach `completed`; `task.cancel` now transitively cascades cancellation to not-yet-terminal dependents with durable failure metadata (`dependency_cancelled`) and emits `task.cancelled_by_dependency`. In addition, `finalizeRunVerdict` now explicitly reports the count of cancelled tasks in its final summary and event payload instead of a generic "verification failed". A Manager can still choose to cancel useful dependent work after its prerequisite reaches `verifying` (as recorded in the Windows audit attempt); the verification gate refuses to mark that run successful, but the runtime cannot second-guess the Manager's planning choice.
 
 | # | Limitation | Evidence |
 |---|---|---|

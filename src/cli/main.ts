@@ -52,7 +52,7 @@ const program = new Command()
   .name('pluton')
   .description(
     'Pluton-Harness: a local-first control plane coordinating a team of AI coding Muses ' +
-      'across different engines, models, workspaces and terminals.',
+      'with per-Muse models, workspaces and terminals.',
   )
   .version(PLUTON_VERSION)
   .option('--json', 'machine-readable output: one JSON document on stdout (also via PLUTON_JSON=1)')
@@ -983,7 +983,11 @@ program
   .option('--resume <id>', 'resume an existing chat session by id')
   .option('--continue', 'continue the latest chat session with this Muse')
   .option('--demo', 'run interactive failed CI build demo scenario')
-  .action(async (museArg: string | undefined, opts: { resume?: string; continue?: boolean; demo?: boolean }, cmd: Command) => {
+  .action(async (museArg: string | undefined, _opts: { resume?: string; continue?: boolean; demo?: boolean }, cmd: Command) => {
+    // `--demo` is also a root/global option. Commander stores a value parsed
+    // before the subcommand on the parent, not in the local action options;
+    // optsWithGlobals() is the only view that sees both spellings.
+    const opts = cmd.optsWithGlobals() as { resume?: string; continue?: boolean; demo?: boolean }
     if (opts.demo) {
       const { runTuiDemo } = await import('../ui/demo.ts')
       const { getUITheme } = await import('../ui/theme.ts')

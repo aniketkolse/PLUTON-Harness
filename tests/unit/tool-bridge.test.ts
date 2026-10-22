@@ -396,6 +396,42 @@ describe('PlutonToolBridge — task lifecycle tools', () => {
     expect(fx.store.getTask(done).state).toBe('completed')
     expect(eventTypes(fx.store, fx.run.id, 'task.cancelled_by_tool')).toBe(1)
   })
+
+  it('cancelling a prerequisite transitively cancels its not-yet-terminal dependents', async () => {
+    const fx = makeFixture()
+    const manager = makeBridge(fx, 'manager')
+    const prerequisite = await createTask(manager, { title: 'prerequisite' })
+    const dependent = await createTask(manager, {
+      title: 'dependent',
+      dependsOn: [prerequisite],
+    })
+    const grandchild = await createTask(manager, {
+      title: 'grandchild',
+      dependsOn: [dependent],
+    })
+
+    const res = await manager.call('task.cancel', { taskId: prerequisite, reason: 'obsolete' })
+    expect(res.ok).toBe(true)
+    const data = res.data as { cancelledDependents?: string[] }
+    expect([...(data.cancelledDependents ?? [])].sort()).toEqual([dependent, grandchild].sort())
+
+    expect(fx.store.getTask(dependent).state).toBe('cancelled')
+    expect(fx.store.getTask(grandchild).state).toBe('cancelled')
+    expect(fx.store.getTask(dependent).failure).toMatchObject({
+      code: 'dependency_cancelled',
+      dependencyTaskId: prerequisite,
+      rootTaskId: prerequisite,
+      reason: 'obsolete',
+    })
+    expect(fx.store.getTask(grandchild).failure).toMatchObject({
+      code: 'dependency_cancelled',
+      dependencyTaskId: dependent,
+      rootTaskId: prerequisite,
+      reason: 'obsolete',
+    })
+    expect(eventTypes(fx.store, fx.run.id, 'task.cancelled_by_tool')).toBe(1)
+    expect(eventTypes(fx.store, fx.run.id, 'task.cancelled_by_dependency')).toBe(2)
+  })
 })
 
 describe('PlutonToolBridge — manager-requested revisions (CS-5)', () => {

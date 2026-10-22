@@ -1,4 +1,8 @@
-# Engine MCP integration — how OpenCode and Qwen Code can be given Pluton-controlled MCP tools
+# Engine MCP integration — OpenCode, with historical Qwen Code notes
+
+> **Legacy-history notice (2026-10-22):** Qwen Code support was removed in the OpenCode-only
+> migration. The Qwen sections below record integration research from the time; they are **not**
+> current support or setup instructions. Only the OpenCode material is current.
 
 Status: Phase 6 planning input. Written 2026-10-16 on the Pluton host (Windows, `win32`).
 Owner question: Pluton's Phase 6 manager flow needs the manager engine session to call **restricted Pluton tools** (`task.create`, `result.collect`, `muse.propose_create`, …) through an MCP server that Pluton controls and authorizes per call. This doc records how each supported engine can be wired to such a server, what is verified by live test, and what remains open.
@@ -140,7 +144,7 @@ Tool catalogs are fetched at connect time (times listed in `stub-inbound.log`); 
 
 ---
 
-## 2. Qwen Code
+## 2. Qwen Code (legacy history — support removed 2026-10-22)
 
 ### 2.1 Config location(s)
 

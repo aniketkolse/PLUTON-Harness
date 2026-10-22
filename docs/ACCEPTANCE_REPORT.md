@@ -6,9 +6,14 @@
 
 > **Independent audit note (2026-10-22):** A separate Docker-absent acceptance audit re-ran these
 > workflows and records **ACCEPTED WITH LIMITATIONS** because a true Docker-uninstalled host,
-> POSIX/macOS runtime, interactive TTY attach, Docker-mode E2E, and real Qwen execution were not
-> executable on the audit host. The audit is authoritative for release status. See
+> POSIX/macOS runtime, interactive TTY attach, and Docker-mode E2E were not executable on the
+> audit host. The audit is authoritative for release status. See
 > [`DOCKER_ABSENT_ACCEPTANCE_AUDIT.md`](DOCKER_ABSENT_ACCEPTANCE_AUDIT.md).
+>
+> **Engine support update (2026-10-22):** Qwen Code support was removed in the OpenCode-only
+> migration. Rows below that mention Qwen are historical evidence from before that change and are
+> not current acceptance criteria. OpenCode is the only supported real engine; `mock` is for
+> tests/development only.
 
 ---
 
@@ -204,7 +209,7 @@ Because native execution runs with partial process-policy enforcement rather tha
 | Security model and README updated | **VERIFIED** | `docs/SECURITY.md`, `README.md`, `docs/NATIVE_EXECUTION.md` |
 | POSIX/macOS runtime parity | **NOT VERIFIED** | Audit §9.2; only Windows executed |
 | Docker-mode E2E | **BLOCKED** | Audit §9.4; daemon stopped |
-| Real Qwen engine execution | **NOT VERIFIED** | Audit §9.5; Qwen paths used the ACP fake |
+| Qwen engine support | **REMOVED (2026-10-22)** | OpenCode-only migration; retained only as historical audit evidence |
 
 ---
 
@@ -217,5 +222,6 @@ headless app start, and host-tmux creation/reattachment all completed with Docke
 container requirements.
 
 This is **ACCEPTED WITH LIMITATIONS**, not unconditional acceptance. Complete independence on a
-Docker-uninstalled host, POSIX/macOS parity, interactive TTY behavior, Docker-mode E2E, and real
-Qwen execution remain unverified; see the independent audit for the exact status of each.
+Docker-uninstalled host, POSIX/macOS parity, interactive TTY behavior, and Docker-mode E2E remain
+unverified; see the independent audit for the exact status of each. Qwen support has since been
+removed; current engine acceptance is OpenCode-only.

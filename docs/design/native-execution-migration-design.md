@@ -1,5 +1,10 @@
 # Native execution migration design
 
+> **Historical design (2026-10-21; engine note 2026-10-22):** This design predates the
+> OpenCode-only migration. File paths, pins and environment variables for Qwen Code below were
+> removed; they are historical design input, not current instructions. OpenCode is the only
+> supported real engine. Current native setup is in [`../NATIVE_EXECUTION.md`](../NATIVE_EXECUTION.md).
+
 **Docker dependency map, execution-provider seam, and phased path to OS-confined native execution**
 
 | Field | Value |

@@ -113,7 +113,6 @@ export interface RunSummary {
 /** Engine binaries pinned by the worker image's `engines` profile (docker/worker/Dockerfile). */
 const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
   opencode: '/usr/local/bin/opencode',
-  qwen: '/usr/local/bin/qwen',
 }
 
 const CONTAINER_PIDS_LIMIT = 512
@@ -317,7 +316,7 @@ export function containerAdapterFor(
   const binaryPath = CONTAINER_ENGINE_BINARIES[muse.engineKind]
   if (binaryPath === undefined && muse.engineKind !== 'mock') {
     throw new ValidationError(
-      `engine '${muse.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode, qwen)`,
+      `engine '${muse.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode)`,
     )
   }
   return engineAdapterForMuse(muse, {

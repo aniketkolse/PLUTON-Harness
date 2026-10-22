@@ -10,26 +10,23 @@ import type { ApprovalRecord } from '../../src/domain/models.ts'
 import { engineAdapterForMuse } from '../../src/engines/approval.ts'
 import type { EngineEvent, StartSessionRequest } from '../../src/engines/contract/types.ts'
 import { createEngineApprovalChannel, pendingApprovalWaiterCount } from '../../src/engines/interactive-approval.ts'
-import type { QwenEngineSession } from '../../src/engines/qwen/adapter.ts'
+import type { OpenCodeEngineSession } from '../../src/engines/opencode/adapter.ts'
 import type { Store } from '../../src/store/store.ts'
 import { FakeAcpAgent, fakeSpawn } from '../helpers/fake-acp-agent.ts'
-import { loadQwenFrames, scriptQwen } from '../helpers/qwen-script.ts'
+import { OPENCODE_PERMISSION_PARAMS, scriptOpencode } from '../helpers/opencode-script.ts'
 
 /**
- * Adapter → channel → store seam (post-P1 hardening): a REAL QwenEngineAdapter
- * over the fake ACP transport (recorded v0.25.2 frames), the REAL durable
- * approval channel and the REAL store, decided through the operator funnel
- * (`decideApproval`). Proves the wire answer, the durable rows and session
- * closure agree — including that a late permission request after closure can
- * never mint an actionable approval.
+ * Adapter → channel → store seam: a REAL OpenCodeEngineAdapter over the fake
+ * ACP transport (recorded v2.0.29 frames plus a synthetic permission request),
+ * the REAL durable approval channel and the REAL store, decided through the
+ * operator funnel (`decideApproval`). Proves the wire answer, the durable rows
+ * and session closure agree — including that a late permission request after
+ * closure can never mint an actionable approval.
  */
 
-const frames = loadQwenFrames()
-const permissionParams = frames.permissionRequest as Record<string, unknown>
-const permissionCallId = (permissionParams['toolCall'] as { toolCallId: string }).toolCallId
-const rejectOption = (permissionParams['options'] as Array<{ kind?: string; optionId?: string }>).find(
-  (o) => typeof o.kind === 'string' && o.kind.startsWith('reject'),
-)
+const permissionParams = OPENCODE_PERMISSION_PARAMS as unknown as Record<string, unknown>
+const permissionCallId = OPENCODE_PERMISSION_PARAMS.toolCall.toolCallId
+const rejectOption = OPENCODE_PERMISSION_PARAMS.options.find((option) => option.kind.startsWith('reject'))
 
 const tmpDirs: string[] = []
 
@@ -100,8 +97,8 @@ function makeProject(): { ctx: ProjectContext; store: Store; projectId: string; 
 
 interface Seam {
   agent: FakeAcpAgent
-  state: ReturnType<typeof scriptQwen>
-  session: QwenEngineSession
+  state: ReturnType<typeof scriptOpencode>
+  session: OpenCodeEngineSession
   requested: ApprovalRecord[]
   ctx: ProjectContext
   store: Store
@@ -114,17 +111,14 @@ async function startSeam(overrides: {
 } = {}): Promise<Seam> {
   const { ctx, store, projectId, rootDir } = makeProject()
   const agent = new FakeAcpAgent()
-  const state = scriptQwen(agent, {
+  const state = scriptOpencode(agent, {
     promptUpdates: [],
     ...(overrides.permissionOnPrompt === true ? { permissionOnPrompt: true } : {}),
   })
   const spawn = fakeSpawn(() => agent)
-  // The production factory as a project-root session sees it (no proven
-  // checkout → no isolatedCheckout): qwen autonomous-bounded must resolve to
-  // `auto` + interactive operator asks, never a standalone allow_once.
   const adapter = engineAdapterForMuse(
-    { engineKind: 'qwen', approvalMode: 'autonomous-bounded' },
-    { spawnFn: spawn.spawnFn, binaryPath: join('C:', 'tools', 'qwen', 'cli-entry.js') },
+    { engineKind: 'opencode', approvalMode: 'ask-for-sensitive-actions' },
+    { spawnFn: spawn.spawnFn, binaryPath: join('C:', 'tools', 'opencode', 'opencode.exe') },
   )
 
   const requested: ApprovalRecord[] = []
@@ -144,13 +138,13 @@ async function startSeam(overrides: {
   })
 
   const req: StartSessionRequest = {
-    muse: { id: 'muse_seam', slug: 'worker-seam', role: 'coder', model: 'cbai/glm-5.2' },
+    muse: { id: 'muse_seam', slug: 'worker-seam', role: 'coder', model: 'opencode/deepseek-v4.1-flash-free' },
     workdir: rootDir,
     env: {},
     configDir: join(rootDir, '.pluton', 'engine-homes', 'worker-seam'),
     approvals: channel,
   }
-  const session = (await adapter.startSession(req)) as QwenEngineSession
+  const session = (await adapter.startSession(req)) as OpenCodeEngineSession
   return { agent, state, session, requested, ctx, store, projectId }
 }
 
@@ -167,7 +161,7 @@ describe('engine approval seam: adapter → channel → store', () => {
 
     const events: EngineEvent[] = []
     const consume = (async () => {
-      for await (const event of seam.session.sendPrompt({ text: 'edit qwen2-write.txt', timeoutMs: 30_000 })) {
+      for await (const event of seam.session.sendPrompt({ text: 'write the worker note', timeoutMs: 30_000 })) {
         events.push(event)
       }
     })()
@@ -189,7 +183,7 @@ describe('engine approval seam: adapter → channel → store', () => {
 
     await consume
     const [wireId] = [...seam.state.serverRequests.keys()]
-    const response = seam.agent.receivedResponses.find((m) => m.id === wireId)
+    const response = seam.agent.receivedResponses.find((message) => message.id === wireId)
     expect(response?.result).toEqual({ outcome: { outcome: 'selected', optionId: 'proceed_once' } })
     expect(seam.session.approvalDecisions).toEqual([
       { requestId: permissionCallId, decision: 'allow_once(interactive)' },

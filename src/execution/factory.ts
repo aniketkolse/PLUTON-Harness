@@ -111,9 +111,9 @@ export function createNativeExecutionProvider(args: {
     ...(args.spawnFn !== undefined ? { spawnFn: args.spawnFn } : {}),
     ...(args.killTreeFn !== undefined ? { killTreeFn: args.killTreeFn } : {}),
     ...(args.now !== undefined ? { now: args.now } : {}),
-    maxOutputBytes: native.max_output_bytes,
-    terminateGraceMs: Math.round(native.terminate_grace_seconds * 1_000),
-    sessionTimeoutMs: native.session_timeout_minutes * 60_000,
+    maxOutputBytes: native.max_output_bytes ?? 1_048_576,
+    terminateGraceMs: Math.round((native.terminate_grace_seconds ?? 2) * 1_000),
+    sessionTimeoutMs: (native.session_timeout_minutes ?? 0) * 60_000,
   })
 }
 

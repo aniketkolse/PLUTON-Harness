@@ -40,7 +40,7 @@ describe('Visual Acceptance & Layout Verification (Phase 13)', () => {
             slug: 'coder',
             role: 'coder',
             engine: 'opencode',
-            model: 'qwen-coder-32b',
+            model: 'opencode/deepseek-v4.1-flash-free',
             state: 'idle',
           },
         ],

@@ -35,10 +35,9 @@ muses:
   researcher:
     display_name: Researcher
     role: researcher
-    # Mixed engines (prompt §4): the researcher runs on Qwen Code here —
-    # replace the model id with one from `pluton muse model list researcher`.
-    engine: qwen
-    model: cbai/glm-5.2
+    # Replace the model id with one from `pluton muse model list researcher`.
+    engine: opencode
+    model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/researcher.md
     workspace_policy: read-only
     permissions: [project.read, research.report, diff.inspect]

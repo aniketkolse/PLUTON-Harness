@@ -1,5 +1,9 @@
 # OpenMausBot: MCP bridge, tool scoping, approvals, workspaces, tests, licensing
 
+> **Historical study of a third-party project (engine note 2026-10-22):** Qwen references below
+> describe OpenMausBot's drivers, not current Pluton support. Pluton removed its own Qwen Code
+> support; OpenCode is the only supported real engine.
+
 Reverse-engineering study for **Pluton-Harness** (CLI-first, local-first multi-agent orchestrator).
 Evidence labels: **[Verified]** = read in source/tests at the cited path+line; **[Inferred]** = conclusion
 from two or more verified facts; **[Unknown]** = not inspected. All citations are against the reference

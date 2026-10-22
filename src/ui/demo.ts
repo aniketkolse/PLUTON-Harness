@@ -149,7 +149,7 @@ export async function runTuiDemo(io: ChatIo, theme: UITheme): Promise<void> {
             slug: 'coder',
             role: 'coder',
             engine: 'opencode',
-            model: 'qwen-coder-32b',
+            model: 'deepseek-v4.1-flash-free',
             state: 'idle',
           },
         ],
