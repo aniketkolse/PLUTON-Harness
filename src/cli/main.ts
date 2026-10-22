@@ -237,7 +237,7 @@ program
 
 program
   .command('doctor')
-  .description('check the environment: Node, WSL2, Docker, git, project config, engine installs')
+  .description('check the environment: Node, Git, project config, engine installs, and the selected execution provider')
   .action(async (_opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
@@ -518,12 +518,12 @@ engineCmd
   })
 
 // ---------------------------------------------------------------------------
-// sandbox — substrate probe and worker image (Phase 5, ADR-0004)
+// sandbox — execution substrate probe and worker image (Phase 5, ADR-0004)
 // ---------------------------------------------------------------------------
 
 const sandboxCmd = program
   .command('sandbox')
-  .description('probe the sandbox substrate (Docker) and provision the worker image')
+  .description('probe the execution substrate (native or Docker) and provision optional worker images')
 
 sandboxCmd
   .command('probe')

@@ -1,5 +1,5 @@
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { engineHomesDir, workspaceDir } from '../config/load.ts'
 import type { PlutonConfig } from '../config/schema.ts'
 import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../domain/errors.ts'
@@ -25,6 +25,15 @@ import {
  */
 
 const NATIVE_PIDS_LIMIT = 512
+
+/**
+ * Resolve an existing path through symlinks/junctions for containment checks.
+ * A missing path stays lexical; the provider rejects nonexistent workdirs
+ * before spawning anything.
+ */
+function canonicalPath(path: string): string {
+  return existsSync(path) ? realpathSync.native(path) : resolve(path)
+}
 
 /**
  * Validate the native sandbox policy before any run row, container, or engine
@@ -142,6 +151,15 @@ export function nativeSpecForMuse(args: {
     )
   }
 
+  const requiresIsolatedCheckout =
+    args.sessionKind === 'run' && args.muse.workspacePolicy === 'isolated-task-checkout'
+  if (requiresIsolatedCheckout && !args.isolatedCheckout) {
+    throw new PolicyDeniedError(
+      `isolated worker '${args.muse.id}' must run in an isolated task checkout; ` +
+        'the caller reported isolatedCheckout: false',
+    )
+  }
+
   const mode =
     native.mode === 'read-only'
       ? 'read-only'
@@ -150,6 +168,26 @@ export function nativeSpecForMuse(args: {
         : args.isolatedCheckout && args.muse.workspacePolicy === 'isolated-task-checkout'
           ? 'workspace-write'
           : 'read-only'
+
+  // An isolated worker must run in its own task checkout, not merely somewhere
+  // inside the (broader) provider roots. The supervisor already passes the
+  // workspace path; this second check keeps a future wiring regression from
+  // silently running a worker at the project root or in an engine home.
+  //
+  // Canonicalize existing paths first: a symlink/junction placed under
+  // `.pluton/workspaces/` can otherwise pass a lexical prefix check while
+  // resolving to the project root, which the provider's broader allowedRoots
+  // would accept. Missing paths stay lexical; the provider rejects them later.
+  if (args.isolatedCheckout) {
+    const workspacesRoot = canonicalPath(workspaceDir(args.rootDir))
+    const workdir = canonicalPath(args.workdir)
+    const rel = relative(workspacesRoot, workdir)
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new PolicyDeniedError(
+        `isolated worker '${args.muse.id}' must run inside a task checkout under '${workspacesRoot}', got '${workdir}'`,
+      )
+    }
+  }
 
   return {
     projectId: args.projectId,

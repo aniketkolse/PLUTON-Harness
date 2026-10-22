@@ -97,54 +97,58 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
     })
   }
 
-  // 3. Docker CLI + daemon
-  const dockerCli = await exec(['docker', '--version'], { timeoutMs: 15_000 })
-  if (dockerCli.exitCode === 0) {
-    checks.push({
-      id: 'docker-cli',
-      title: 'Docker CLI',
-      status: 'pass',
-      message: isDockerMode ? firstLine(dockerCli.stdout) : `${firstLine(dockerCli.stdout)} (optional)`,
-    })
-    const info = await exec(['docker', 'info', '--format', '{{.ServerVersion}}'], { timeoutMs: 20_000 })
-    if (info.exitCode === 0 && info.stdout.trim().length > 0) {
-      checks.push({
-        id: 'docker-daemon',
-        title: 'Docker daemon',
-        status: 'pass',
-        message: isDockerMode ? `server ${info.stdout.trim()}` : `server ${info.stdout.trim()} (optional)`,
-      })
-    } else if (isDockerMode) {
-      checks.push({
-        id: 'docker-daemon',
-        title: 'Docker daemon',
-        status: 'fail',
-        message: 'daemon not reachable — worker containers cannot start',
-        fix: 'start Docker Desktop (or the docker engine) and re-run `pluton doctor`',
-      })
-    } else {
-      checks.push({
-        id: 'docker-daemon',
-        title: 'Docker daemon',
-        status: 'info',
-        message: 'daemon not running — optional (not required for native host execution)',
-      })
-    }
-  } else if (isDockerMode) {
-    checks.push({
-      id: 'docker-cli',
-      title: 'Docker CLI',
-      status: 'fail',
-      message: 'docker not found on PATH',
-      fix: 'install Docker Desktop (Windows) or docker engine (Linux)',
-    })
-  } else {
+  // 3. Docker CLI + daemon — only when Docker is the selected substrate.
+  // Native mode must not spawn the Docker binary at all: "Docker optional"
+  // means no probe, not a probe whose failure is tolerated.
+  if (!isDockerMode) {
     checks.push({
       id: 'docker-cli',
       title: 'Docker CLI',
       status: 'info',
-      message: 'not installed — optional (not required for native host execution)',
+      message:
+        loadedConfig === null
+          ? configError !== null
+            ? 'not probed — project config failed to load; Docker is optional'
+            : 'not probed — no project config; Docker is optional'
+          : loadedConfig.config.sandbox.kind === 'native'
+            ? 'not probed — native mode does not use Docker; optional for legacy container workers'
+            : 'not probed — local-process mode does not use Docker; optional for legacy container workers',
     })
+  } else {
+    const dockerCli = await exec(['docker', '--version'], { timeoutMs: 15_000 })
+    if (dockerCli.exitCode === 0) {
+      checks.push({
+        id: 'docker-cli',
+        title: 'Docker CLI',
+        status: 'pass',
+        message: firstLine(dockerCli.stdout),
+      })
+      const info = await exec(['docker', 'info', '--format', '{{.ServerVersion}}'], { timeoutMs: 20_000 })
+      if (info.exitCode === 0 && info.stdout.trim().length > 0) {
+        checks.push({
+          id: 'docker-daemon',
+          title: 'Docker daemon',
+          status: 'pass',
+          message: `server ${info.stdout.trim()}`,
+        })
+      } else {
+        checks.push({
+          id: 'docker-daemon',
+          title: 'Docker daemon',
+          status: 'fail',
+          message: 'daemon not reachable — worker containers cannot start',
+          fix: 'start Docker Desktop (or the docker engine) and re-run `pluton doctor`',
+        })
+      }
+    } else {
+      checks.push({
+        id: 'docker-cli',
+        title: 'Docker CLI',
+        status: 'fail',
+        message: 'docker not found on PATH',
+        fix: 'install Docker Desktop (Windows) or docker engine (Linux)',
+      })
+    }
   }
 
   // 4. Git
@@ -253,13 +257,13 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       title: 'tmux',
       status: 'info',
       message:
-        'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010). ' +
-        'Container-side verification runs when the worker image is built.',
+        'container mode verifies tmux inside the Linux worker image when it is built; ' +
+        'non-Docker modes use host tmux for `pluton attach` when available.',
     })
   }
   if (loadedConfig && loadedConfig.config.sandbox.kind === 'native') {
-    // Native mode has no container, no worker image and no tmux: it runs
-    // engine processes directly on the host with partial enforcement.
+    // Native mode has no container or worker image: it runs engine processes
+    // directly on the host with partial enforcement. Host tmux is optional for attach.
     try {
       const provider = createNativeExecutionProvider({
         config: loadedConfig.config,
@@ -417,7 +421,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         title: 'tmux',
         status: 'info',
         message:
-          'provided inside the Linux worker image; native-Windows tmux is NOT part of the supported path (ADR-0010).',
+          'provided inside the Linux worker image for container mode; native mode uses host tmux when available.',
       })
     }
   }

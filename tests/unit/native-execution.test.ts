@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -118,6 +118,18 @@ describe('NativeExecutionProvider', () => {
     ).rejects.toBeInstanceOf(PolicyDeniedError)
   })
 
+  it('rejects a symlinked working directory that resolves outside the allowed roots', async () => {
+    const root = makeRoot()
+    const outside = mkdtempSync(join(tmpdir(), 'pluton-native-symlink-outside-'))
+    tmpDirs.push(outside)
+    const link = join(root, 'escape-link')
+    symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+    const provider = makeProvider(root, [])
+    await expect(
+      provider.prepare(spec(root, { hostWorkdir: link })),
+    ).rejects.toBeInstanceOf(PolicyDeniedError)
+  })
+
   it('rejects network policies it cannot enforce', async () => {
     const root = makeRoot()
     const provider = makeProvider(root, [])
@@ -169,6 +181,34 @@ describe('NativeExecutionProvider', () => {
     )
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toHaveLength(100)
+    expect(result.truncated).toBe(true)
+  })
+
+  it('bounds output by UTF-8 bytes, not UTF-16 code units', async () => {
+    const root = makeRoot()
+    const provider = makeProvider(root, [])
+    const session = await provider.prepare(spec(root))
+    const result = await session.exec(
+      [process.execPath, '-e', "process.stdout.write('é'.repeat(500))"],
+      { maxOutputBytes: 100 },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(100)
+    expect(result.stdout.length).toBeLessThanOrEqual(50)
+    expect(result.truncated).toBe(true)
+  })
+
+  it('keeps decoded UTF-8 output within the byte cap when a multibyte sequence is split', async () => {
+    const root = makeRoot()
+    const provider = makeProvider(root, [])
+    const session = await provider.prepare(spec(root))
+    const result = await session.exec(
+      [process.execPath, '-e', "process.stdout.write(String.fromCharCode(233).repeat(500))"],
+      { maxOutputBytes: 101 },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(101)
+    expect(result.stdout).not.toContain('\uFFFD')
     expect(result.truncated).toBe(true)
   })
 

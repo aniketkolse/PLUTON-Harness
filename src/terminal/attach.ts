@@ -6,13 +6,14 @@ import type { TerminalManager } from './types.ts'
 
 /**
  * Interactive attach seam (ADR-0005). `pluton attach` is exactly one child
- * process: `docker exec -it <container> tmux attach-session -t <target>` with
+ * process: `docker exec -it <container> tmux attach-session -t <target>` in
+ * Docker mode or host `tmux attach-session -t <target>` in native mode, with
  * the user's terminal inherited. There is no host shell and no shell string —
  * the argv is built here, validated here, and spawned as an array.
  *
- * The tmux session is ensured through the TerminalManager first (always inside
- * the container, never on the host): attaching to a Muse that never ran still
- * works, and detaching never affects tasks.
+ * The tmux session is ensured through the TerminalManager first (inside the
+ * container in Docker mode, on the host in native mode): attaching to a Muse
+ * that never ran still works, and detaching never affects tasks.
  */
 
 export interface AttachTarget {

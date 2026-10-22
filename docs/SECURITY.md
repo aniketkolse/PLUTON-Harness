@@ -86,8 +86,10 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   Runs engine processes directly on the host operating system without Docker.
   Pluton enforces a strict partial-enforcement model: working directories are
   confined within allowed project and workspace roots, environment variables are
-  filtered against an explicit allowlist, execution sessions are bounded by
-  wall-clock timeouts, and process trees are terminated cleanly on exit.
+  filtered against an explicit allowlist, execution sessions can be capped by an
+  optional wall-clock timeout (`session_timeout_minutes`; `0` disables the cap,
+  while run/task deadlines still bound dispatch), and process trees are terminated
+  cleanly on exit.
   Because native processes run under the host user account and share the host
   network stack, native mode **fails closed** unless the operator explicitly
   acknowledges `sandbox.native.acknowledge_partial_enforcement: true`,

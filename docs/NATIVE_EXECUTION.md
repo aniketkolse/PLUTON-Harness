@@ -31,8 +31,9 @@ Pluton adheres to a strict **honesty constraint**: native execution does not cla
 2. **Environment variable filtering**:
    - Only standard runtime variables (e.g., `PATH`, `HOME`, `USERPROFILE`, `XDG_*`, `CI`, `COLORTERM`) and explicit keys defined in `sandbox.native.env_allowlist` are passed to child processes.
    - Host secrets, API tokens, and unlisted environment variables are stripped.
-3. **Session timeouts & process-tree termination**:
-   - Sessions are bounded by wall-clock timeouts.
+3. **Session timeouts, dispatch deadlines & process-tree termination**:
+   - `sandbox.native.session_timeout_minutes` optionally caps one engine session; the default `0` disables this provider-level cap.
+   - `runtime.max_run_minutes` and `runtime.default_task_minutes` still bound how long a run and its tasks may proceed.
    - When a session ends or times out, Pluton kills the entire process tree, not just the parent process.
 4. **Output bounds**:
    - `exec` output streams are capped by `sandbox.native.max_output_bytes` (default: 1 MB) to prevent denial of service via memory exhaustion.

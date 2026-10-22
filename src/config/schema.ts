@@ -92,7 +92,8 @@ export const runtimeConfigSchema = z
  * Native host execution policy. This provider runs engine processes directly on
  * the host; it is deliberately explicit about its partial enforcement. There is
  * no OS filesystem/network/resource confinement, so the two acknowledgements
- * are hard gates rather than defaults. Docker remains the isolation provider.
+ * are hard gates rather than defaults. Docker remains an optional isolation
+ * provider; native is the default substrate.
  */
 export const nativeSandboxConfigSchema = z
   .object({

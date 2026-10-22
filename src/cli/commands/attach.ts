@@ -17,10 +17,10 @@ import type { ProjectContext } from '../context.ts'
 import { resolveMuseByRef } from './mcp.ts'
 
 /**
- * `pluton attach <muse> [--window <name>]` — resolve the Muse's container and
- * tmux session names, ensure the session exists (inside the container, through
- * the SandboxManager) and hand the terminal to `docker exec -it … tmux
- * attach-session`.
+ * `pluton attach <muse> [--window <name>]` — resolve the Muse's terminal target,
+ * ensure the tmux session exists (inside the container for Docker mode, on the
+ * host for native mode) and hand the terminal to `docker exec -it … tmux
+ * attach-session` or host `tmux attach-session`.
  *
  * In `--json` mode (or when no spawn fn is injected) this is plan mode: the
  * target is resolved, the session ensured and the exact argv returned, but

@@ -210,6 +210,36 @@ function isInside(root: string, candidate: string): boolean {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))
 }
 
+/**
+ * Decode captured bytes without allowing UTF-8 replacement characters to
+ * expand the result past the configured byte cap. When the cap cuts a
+ * multibyte sequence, trim the partial sequence before decoding; the fallback
+ * also bounds malformed child output that decodes with replacement characters.
+ */
+function decodeUtf8Bounded(chunks: Buffer[], maxBytes: number): string {
+  const buffer = Buffer.concat(chunks)
+  let cut = Math.min(buffer.length, maxBytes)
+  if (cut > 0) {
+    let start = cut - 1
+    while (start > 0 && ((buffer[start] as number) & 0xc0) === 0x80) start -= 1
+    const lead = buffer[start] as number
+    const sequenceBytes = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1
+    if (start + sequenceBytes > cut) cut = start
+  }
+  const decoded = buffer.subarray(0, cut).toString('utf8')
+  if (Buffer.byteLength(decoded, 'utf8') <= maxBytes) return decoded
+
+  let bytes = 0
+  let end = 0
+  for (const char of decoded) {
+    const charBytes = Buffer.byteLength(char, 'utf8')
+    if (bytes + charBytes > maxBytes) break
+    bytes += charBytes
+    end += char.length
+  }
+  return decoded.slice(0, end)
+}
+
 function realExisting(path: string): string {
   return realpathSync.native(path)
 }
@@ -676,18 +706,27 @@ class NativeExecutionSession implements ExecutionSession {
       ...(options.env !== undefined ? { env: options.env } : {}),
     })
     const record = this.recordFor(handle)
-    let stdout = ''
-    let stderr = ''
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
     let truncated = false
     let timedOut = false
     let settled = false
 
-    const append = (current: string, chunk: Buffer): { text: string; truncated: boolean } => {
-      if (current.length >= maxOutputBytes) return { text: current, truncated: true }
-      const remaining = maxOutputBytes - current.length
-      const text = chunk.toString('utf8')
-      if (text.length <= remaining) return { text: current + text, truncated: false }
-      return { text: current + text.slice(0, remaining), truncated: true }
+    const capture = (chunks: Buffer[], currentBytes: number, chunk: Buffer): number => {
+      if (currentBytes >= maxOutputBytes) {
+        truncated = true
+        return currentBytes
+      }
+      const remaining = maxOutputBytes - currentBytes
+      if (chunk.length <= remaining) {
+        chunks.push(chunk)
+        return currentBytes + chunk.length
+      }
+      chunks.push(chunk.subarray(0, remaining))
+      truncated = true
+      return maxOutputBytes
     }
 
     const resultPromise = new Promise<RunResult>((resolveResult) => {
@@ -696,6 +735,8 @@ class NativeExecutionSession implements ExecutionSession {
         settled = true
         if (timeout !== null) clearTimeout(timeout)
         if (forceFinish !== null) clearTimeout(forceFinish)
+        let stdout = decodeUtf8Bounded(stdoutChunks, maxOutputBytes)
+        let stderr = decodeUtf8Bounded(stderrChunks, maxOutputBytes)
         if (record.errorMessage !== null) {
           stderr = stderr === '' ? record.errorMessage : `${stderr}\n${record.errorMessage}`
         }
@@ -732,14 +773,10 @@ class NativeExecutionSession implements ExecutionSession {
       const stdoutStream = handle.stdout
       const stderrStream = handle.stderr
       stdoutStream?.on('data', (chunk: Buffer | string) => {
-        const next = append(stdout, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-        stdout = next.text
-        if (next.truncated) truncated = true
+        stdoutBytes = capture(stdoutChunks, stdoutBytes, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       })
       stderrStream?.on('data', (chunk: Buffer | string) => {
-        const next = append(stderr, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-        stderr = next.text
-        if (next.truncated) truncated = true
+        stderrBytes = capture(stderrChunks, stderrBytes, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       })
 
       void handle.waitForExit().then((exit) => finish(exit.code, exit.signal))

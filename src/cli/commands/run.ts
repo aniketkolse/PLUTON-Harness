@@ -67,10 +67,11 @@ import { museContainerMounts, provisionMuseContainer } from './muse-provision.ts
  *   retried command can never create a second run.
  * - Engine auth lives in per-Muse engine homes (ADR-0008); `engineEnv` adds
  *   nothing on top of each adapter's own allowlist.
- * - `sandbox.kind: docker` (the default) runs engines inside per-Muse
- *   containers through `docker exec`, with pinned in-image binaries and the
- *   bridge exposed on the host gateway; the acknowledged dev-only
- *   `local-process` mode keeps host child processes.
+ * - `sandbox.kind: native` (the default) runs engines as host processes under
+ *   the native execution provider. Legacy `sandbox.kind: docker` runs engines
+ *   inside per-Muse containers through `docker exec`, with pinned in-image
+ *   binaries and the bridge exposed on the host gateway; the acknowledged
+ *   dev-only `local-process` mode keeps host child processes.
  */
 
 export interface RunCommandOptions {

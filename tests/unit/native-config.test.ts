@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadConfig, validateConfig } from '../../src/config/load.ts'
 import { plutonConfigSchema } from '../../src/config/schema.ts'
-import { SandboxUnavailableError, ValidationError } from '../../src/domain/errors.ts'
+import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../../src/domain/errors.ts'
 import type { MuseRecord } from '../../src/domain/models.ts'
 import {
   assertNativeSandboxConfig,
@@ -202,6 +202,103 @@ describe('native execution config', () => {
       hostEnv: {},
     })
     expect(workerSpec.mode).toBe('workspace-write')
+  })
+
+  it('accepts a checkout directory whose name starts with dots but stays inside workspaces', () => {
+    const dir = root()
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    const coder = muse()
+    const checkout = join(dir, '.pluton', 'workspaces', '..cache')
+    mkdirSync(checkout, { recursive: true })
+
+    const spec = nativeSpecForMuse({
+      config: loaded.config,
+      rootDir: dir,
+      projectId: 'project_native',
+      muse: coder,
+      workdir: checkout,
+      engineHome: coder.engineHome,
+      isolatedCheckout: true,
+      sessionKind: 'run',
+      hostEnv: {},
+    })
+    expect(spec.mode).toBe('workspace-write')
+  })
+
+  it('refuses a run session that reports no checkout for an isolated-policy muse', () => {
+    const dir = root()
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    const coder = muse()
+    const build = (): unknown =>
+      nativeSpecForMuse({
+        config: loaded.config,
+        rootDir: dir,
+        projectId: 'project_native',
+        muse: coder,
+        workdir: dir,
+        engineHome: coder.engineHome,
+        isolatedCheckout: false,
+        sessionKind: 'run',
+        hostEnv: {},
+      })
+    expect(build).toThrow(PolicyDeniedError)
+    expect(build).toThrow(/isolated task checkout/)
+  })
+
+  it('refuses an isolated worker whose workdir is not inside .pluton/workspaces', () => {
+    const dir = root()
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    const coder = muse()
+    expect(() =>
+      nativeSpecForMuse({
+        config: loaded.config,
+        rootDir: dir,
+        projectId: 'project_native',
+        muse: coder,
+        workdir: dir,
+        engineHome: coder.engineHome,
+        isolatedCheckout: true,
+        sessionKind: 'run',
+        hostEnv: {},
+      }),
+    ).toThrow(PolicyDeniedError)
+    expect(() =>
+      nativeSpecForMuse({
+        config: loaded.config,
+        rootDir: dir,
+        projectId: 'project_native',
+        muse: coder,
+        workdir: join(dir, '.pluton', 'engine-homes', 'coder'),
+        engineHome: coder.engineHome,
+        isolatedCheckout: true,
+        sessionKind: 'run',
+        hostEnv: {},
+      }),
+    ).toThrow(PolicyDeniedError)
+  })
+
+  it('refuses an isolated workspace symlink that resolves to the project root', () => {
+    const dir = root()
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    const coder = muse()
+    const workspaces = join(dir, '.pluton', 'workspaces')
+    mkdirSync(workspaces, { recursive: true })
+    const link = join(workspaces, 'task')
+    symlinkSync(dir, link, process.platform === 'win32' ? 'junction' : 'dir')
+
+    expect(() =>
+      nativeSpecForMuse({
+        config: loaded.config,
+        rootDir: dir,
+        projectId: 'project_native',
+        muse: coder,
+        workdir: link,
+        engineHome: coder.engineHome,
+        isolatedCheckout: true,
+        sessionKind: 'run',
+        hostEnv: {},
+      }),
+    ).toThrow(PolicyDeniedError)
   })
 
   it('honours a read-only native mode as a hard ceiling', () => {

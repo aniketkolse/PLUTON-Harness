@@ -133,7 +133,7 @@ muses:
 | `sandbox.native.acknowledge_host_network` | `boolean` | `true` (templates) | Mandatory acknowledgement of host network sharing |
 | `sandbox.native.mode` | `'workspace-write' \| 'read-only'` | `'workspace-write'` | Allowed filesystem write scope for native sessions |
 | `sandbox.native.env_allowlist` | `string[]` | `[]` | Explicit host environment variables to pass to engines |
-| `sandbox.native.session_timeout_minutes` | `number` | `30` | Maximum wall-clock duration for an engine session |
+| `sandbox.native.session_timeout_minutes` | `number` | `0` | Optional wall-clock cap for one engine session; `0` disables it. Run and task deadlines still bound dispatch. |
 | `sandbox.native.terminate_grace_seconds` | `number` | `2` | Grace period before sending SIGKILL / `taskkill /f` |
 | `sandbox.native.max_output_bytes` | `number` | `1048576` (1MB) | Maximum stdout/stderr bytes captured before truncation |
 
@@ -195,7 +195,7 @@ After switching to `sandbox.kind: native`, CLI commands adapt to native executio
 
 | Command | Docker Mode | Native Mode |
 |---|---|---|
-| `pluton doctor` | Requires Docker CLI and running Docker daemon (`fail` if absent) | Docker checks are marked `optional (info)`; passes on Docker-free hosts |
+| `pluton doctor` | Requires Docker CLI and running Docker daemon (`fail` if absent) | Does not spawn Docker; reports it as optional `info` |
 | `pluton sandbox probe` | Probes Docker daemon version, ping, and worker image | Probes host native process-policy provider; reports `enforcement: partial` |
 | `pluton sandbox build-image` | Builds `docker/worker/Dockerfile` with pinned toolchain | Rejects with `ValidationError` (container images are not used in native mode) |
 | `pluton run` | Spawns worker containers, bridges network via `0.0.0.0` | Spawns host child processes, bridges tool server via `127.0.0.1` |

@@ -62,27 +62,33 @@ function mockRun(
 }
 
 describe('doctor diagnostics', () => {
-  it('reports docker-cli as info and not fail when docker is missing and sandbox is native', async () => {
+  it('does not probe docker and reports it as optional when sandbox is native', async () => {
     const root = makeTempProject(`sandbox:
   kind: native
   native:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
 `)
-    const runFn = mockRun({
+    const calls: string[][] = []
+    const routes = mockRun({
       'docker --version': { exitCode: 1, stderr: 'command not found: docker' },
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
       'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
     })
+    const runFn: typeof routes = async (argv, options) => {
+      calls.push(argv)
+      return routes(argv, options)
+    }
 
     const checks = await collectDoctorChecks({ cwd: root, runFn })
     const dockerCli = checks.find((c) => c.id === 'docker-cli')
     expect(dockerCli).toBeDefined()
     expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not installed — optional (not required for native host execution)')
+    expect(dockerCli?.message).toContain('not probed — native mode does not use Docker')
 
     const dockerDaemon = checks.find((c) => c.id === 'docker-daemon')
     expect(dockerDaemon).toBeUndefined()
+    expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
 
     // Sandbox native probe should pass
     const sandboxCheck = checks.find((c) => c.id === 'sandbox')
@@ -98,31 +104,54 @@ describe('doctor diagnostics', () => {
     expect(doctorExitCode(checks)).toBe(0)
   })
 
-  it('reports docker-daemon as info when docker cli is present but daemon is down and sandbox is native', async () => {
+  it('never spawns Docker in native mode even when a Docker binary is available', async () => {
     const root = makeTempProject(`sandbox:
   kind: native
   native:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
 `)
-    const runFn = mockRun({
+    const calls: string[][] = []
+    const routes = mockRun({
       'docker --version': { exitCode: 0, stdout: 'Docker version 27.0.0' },
-      'docker info': { exitCode: 1, stderr: 'Cannot connect to the Docker daemon' },
+      'docker info': { exitCode: 0, stdout: '27.0.0' },
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
       'wsl --status': { exitCode: 0, stdout: 'WSL is operational' },
     })
+    const runFn: typeof routes = async (argv, options) => {
+      calls.push(argv)
+      return routes(argv, options)
+    }
+
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
+    expect(checks.find((c) => c.id === 'docker-daemon')).toBeUndefined()
+    expect(doctorExitCode(checks)).toBe(0)
+  })
+
+  it('distinguishes a config load failure from no project config when Docker is not probed', async () => {
+    const root = makeTempProject(`sandbox:
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+`)
+    writeFileSync(join(root, 'pluton.yaml'), 'version: 1\nproject: invalid\n', 'utf8')
+    const calls: string[][] = []
+    const routes = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
+    })
+    const runFn: typeof routes = async (argv, options) => {
+      calls.push(argv)
+      return routes(argv, options)
+    }
 
     const checks = await collectDoctorChecks({ cwd: root, runFn })
     const dockerCli = checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli).toBeDefined()
-    expect(['pass', 'info']).toContain(dockerCli?.status)
-
-    const dockerDaemon = checks.find((c) => c.id === 'docker-daemon')
-    expect(dockerDaemon).toBeDefined()
-    expect(dockerDaemon?.status).toBe('info')
-    expect(dockerDaemon?.message).toContain('daemon not running — optional (not required for native host execution)')
-
-    expect(doctorExitCode(checks)).toBe(0)
+    expect(dockerCli?.status).toBe('info')
+    expect(dockerCli?.message).toContain('project config failed to load')
+    expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
   })
 
   it('reports fail when docker is missing and sandbox is docker', async () => {
@@ -181,7 +210,7 @@ describe('doctor diagnostics', () => {
     const dockerCli = checks.find((c) => c.id === 'docker-cli')
     expect(dockerCli).toBeDefined()
     expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not installed — optional (not required for native host execution)')
+    expect(dockerCli?.message).toContain('not probed — no project config; Docker is optional')
 
     const wslCheck = checks.find((c) => c.id === 'wsl2')
     if (wslCheck) {

@@ -274,7 +274,7 @@ describe('Runtime Guard: Zero Docker Invocations across Native Runtime Lifecycle
     expect(dockerCalls).toHaveLength(0)
   })
 
-  it('c. pluton doctor verifies diagnostics pass without Docker requirement when Docker is absent', async () => {
+  it('c. pluton doctor verifies diagnostics without spawning Docker in native mode', async () => {
     const { dir } = makeProject(`version: 1
 project:
   name: doctor-demo
@@ -291,30 +291,14 @@ sandbox:
 muses: {}
 `)
 
-    const report = await runDoctor({
-      cwd: dir,
-      runFn: async (argv, opts) => {
-        if (argv[0] === 'docker' || argv[0]?.endsWith('docker') || argv[0]?.endsWith('docker.exe')) {
-          return {
-            argv,
-            exitCode: 1,
-            stdout: '',
-            stderr: 'docker: command not found',
-            timedOut: false,
-            truncated: false,
-            durationMs: 1,
-          }
-        }
-        return run(argv, opts)
-      },
-    })
+    const report = await runDoctor({ cwd: dir })
 
     expect(report.exitCode).toBe(0)
 
     const dockerCli = report.checks.find((c) => c.id === 'docker-cli')
     expect(dockerCli).toBeDefined()
     expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not installed — optional (not required for native host execution)')
+    expect(dockerCli?.message).toContain('not probed — native mode does not use Docker')
 
     const dockerDaemon = report.checks.find((c) => c.id === 'docker-daemon')
     expect(dockerDaemon).toBeUndefined()

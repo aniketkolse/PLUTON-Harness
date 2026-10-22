@@ -1,8 +1,14 @@
 # Docker-Free Pluton Acceptance Report
 
-**Date:** October 2026  
-**Status:** ACCEPTED / VERIFIED  
-**Scope:** Elimination of mandatory Docker dependency across installation, onboarding, diagnostics, task execution, terminal attachment, verification, and multi-agent orchestration.
+**Date:** October 2026\
+**Status:** ACCEPTED WITH LIMITATIONS\
+**Scope:** Elimination of mandatory Docker dependency across installation, onboarding, diagnostics, task execution, terminal attachment, verification, and multi-agent orchestration on the tested Windows host.
+
+> **Independent audit note (2026-10-22):** A separate Docker-absent acceptance audit re-ran these
+> workflows and records **ACCEPTED WITH LIMITATIONS** because a true Docker-uninstalled host,
+> POSIX/macOS runtime, interactive TTY attach, Docker-mode E2E, and real Qwen execution were not
+> executable on the audit host. The audit is authoritative for release status. See
+> [`DOCKER_ABSENT_ACCEPTANCE_AUDIT.md`](DOCKER_ABSENT_ACCEPTANCE_AUDIT.md).
 
 ---
 
@@ -12,15 +18,21 @@ Pluton-Harness was originally conceived with Linux container isolation (`sandbox
 
 This acceptance report documents and verifies the implementation of **native execution** (`sandbox.kind: native`) as the **default runtime substrate** in Pluton.
 
-### Acceptance Verdict: PASSED
+### Acceptance Verdict: ACCEPTED WITH LIMITATIONS
 
-Every requirement for Docker-free operation has been implemented, validated, and verified:
+The native path is implemented and was exercised end to end on Windows with Docker removed from
+`PATH`. It does not require Docker for the tested workflows, but it is **not** claimed to be verified
+on a host with Docker completely uninstalled, on POSIX/macOS, through a real interactive TTY, or
+through Docker-mode E2E. Those gaps are recorded as **NOT VERIFIED** or **BLOCKED** in the audit.
 
-1. **Zero Docker Dependency**: Clean installation, `pluton init`, `pluton doctor`, `pluton run`, `pluton chat`, `pluton attach`, `pluton verify`, and `pluton integrate` execute cleanly on systems with zero Docker CLI or daemon installations.
+1. **Docker-Free Execution (tested on Windows)**: With every Docker-containing directory removed
+   from `PATH`, `pluton init`, `pluton doctor`, `pluton run`, `pluton attach` plan/reattach,
+   `pluton verify`, `pluton integrate`, and headless app start/status/stop completed successfully.
+   A true Docker-uninstalled host remains **NOT VERIFIED**.
 2. **Native Default Substrate**: Configuration schemas (`src/config/schema.ts`) and all project starter templates (`templates/teams/*.yaml`) default to `sandbox.kind: native` with `runtime.network_policy: open`.
 3. **Multi-Agent Orchestration Preserved**: Pluton's core value proposition — supervisor-worker delegation, isolated per-task checkouts (`.pluton/workspaces/`), durable SQLite state tracking, approval inbox, and verification gating — functions identically and reliably in native mode.
-4. **Host Terminal Management**: Host-native terminal management (`src/terminal/native.ts`) attaches directly to host `tmux` sessions without `docker exec`, and fails closed with actionable diagnostic guidance if `tmux` is absent.
-5. **Rigorous Guard Testing**: Integration guard tests (`tests/integration/docker-free-runtime.test.ts`) intercept process spawning and assert exactly **zero Docker invocations** across the entire lifecycle.
+4. **Host Terminal Management**: Host-native terminal management (`src/terminal/native.ts`) attaches directly to host `tmux` sessions without `docker exec`, and fails closed with actionable diagnostic guidance if `tmux` is absent. Creation and reattachment were verified; an interactive TTY attach was **NOT VERIFIED**.
+5. **Guard Testing**: Integration guard tests (`tests/integration/docker-free-runtime.test.ts`) intercept process spawning and assert zero Docker invocations across five guarded lifecycle paths: init, probe, doctor, run, and attach. `verify` and `integrate` were exercised separately through the CLI with Docker hidden. The chat TUI and Docker-mode E2E are **NOT VERIFIED**.
 
 ---
 
@@ -45,13 +57,13 @@ Docker support has not been deleted; it has been isolated as an **opt-in legacy 
 ## 3. Evidence Matrix
 
 ### 3.1 Test Suite Verification
-The complete test suite runs and passes cleanly without requiring a running Docker daemon:
+The complete test suite runs and passes with every Docker-containing directory removed from `PATH`:
 
 ```
 Test Files: 130 passed (130)
-Tests:      1203 passed (1203)
-Duration:   ~100s
-Status:     100% PASS
+Tests:      1211 passed (1211)
+Duration:   ~104s
+Status:     100% PASS (Windows)
 ```
 
 ### 3.2 Runtime Guard Tests (`tests/integration/docker-free-runtime.test.ts`)
@@ -63,12 +75,16 @@ The guard suite validates five critical operational areas:
 |---|---|---|---|
 | **a. Project Onboarding** | `runInit` initializes a project from template with `sandbox.kind: native` defaults | 0 | **PASS** |
 | **b. Substrate Probing** | `sandboxProbe` probes provider capabilities, returning `provider: native` | 0 | **PASS** |
-| **c. Diagnostics** | `runDoctor` reports healthy diagnostics with simulated missing Docker CLI/daemon | 0 | **PASS** |
+| **c. Diagnostics** | `runDoctor` does not spawn Docker in native mode and reports it as optional | 0 | **PASS** |
 | **d. Multi-Agent Run** | `runRun` plans, delegates, checkouts, and completes task with isolated workspaces | 0 | **PASS** |
 | **e. Terminal Attach** | `attachMuse` and `attachToMuseTerminal` resolve host tmux argv in plan mode | 0 | **PASS** |
 
+This guard covers the five paths above. `verify` and `integrate` were executed separately through
+the CLI with Docker hidden; they are not part of this guard. The chat TUI and Docker-mode E2E were
+not covered.
+
 ### 3.3 Live Multi-Agent Execution Verification (`scripts/demo-native-run.mjs`)
-A live demonstration script was executed against a clean scratch directory on the host without Docker:
+A live demonstration script was executed against a clean scratch directory on the host with every Docker-containing directory removed from `PATH`:
 
 ```
 === Pluton Native Execution Demonstration ===
@@ -109,14 +125,22 @@ A live demonstration script was executed against a clean scratch directory on th
 === Demonstration Succeeded: Native Multi-Agent Orchestration Verified ===
 ```
 
-### 3.4 Packaging & Release Gate Validation
-Running `npm run release:check` validates package structure, TypeScript compilation, and linting rules:
+### 3.4 Packaging & Quality Validation
+A fresh `npm ci` installed 42 locked packages with 0 vulnerabilities. The local quality commands
+and the clean-tree release gate pass:
 
 ```bash
 npm run typecheck # 0 errors
 npm run build     # exit 0
-npm test          # 130 files passed, 1203 tests passed
+npm test          # 130 files passed, 1211 tests passed
+node scripts/release-check.mjs
+# checks: 15 | passed: 14 | failed: 0 | not tested: 1 (POSIX 0600)
+# TECHNICAL VALIDATION: PASS
+# PUBLICATION: ELIGIBLE — publishing still requires explicit human approval
 ```
+
+The gate was run with every Docker-containing directory removed from `PATH`. Publication was not
+performed.
 
 ---
 
@@ -131,16 +155,17 @@ Pluton enforces a strict **honesty policy** regarding security claims: native ho
      - Project root (`<project-root>`)
      - Isolated task workspaces (`<project-root>/.pluton/workspaces/`)
      - Engine homes (`<project-root>/.pluton/engine-homes/`)
-   - Any attempt to spawn a process or execute a tool outside these canonical roots is rejected fail-closed with `PolicyDeniedError`.
+   - Every spawned process cwd is canonicalized (real path) and must fall inside these roots; symlink escapes are rejected fail-closed with `PolicyDeniedError`.
+   - This is a process-launch boundary, not a filesystem sandbox: engine tools can still access any path the host user can read or write (see limitations below).
 2. **Environment Variable Filtering**:
    - Host child processes do not inherit the ambient host environment.
    - Pluton filters environment variables against an allowlist containing standard runtime variables (`PATH`, `HOME`, `USERPROFILE`, `XDG_*`, `CI`, `COLORTERM`) plus explicitly configured keys in `sandbox.native.env_allowlist`.
    - Host secrets, cloud provider tokens, and shell credentials are stripped before process spawn.
 3. **Process-Tree Termination**:
-   - Engine sessions are bounded by wall-clock timeouts (`session_timeout_minutes`).
+   - Engine sessions can be capped by `session_timeout_minutes` (default `0` disables the provider-level cap); run and task deadlines still bound dispatch.
    - When a task completes, times out, or is cancelled, Pluton kills the **entire process tree** (`taskkill /t /f` on Windows; process-group signals on POSIX), preventing orphaned child processes.
 4. **Stream Output Bounds**:
-   - Process output streams are capped at `max_output_bytes` (default 1MB) with truncation markers to prevent denial-of-service via memory exhaustion.
+   - Process output streams are capped at `max_output_bytes` (default 1MB) per stream, counted in UTF-8 bytes; results report `truncated: true` when the cap is reached.
 5. **Loopback Tool Server Binding**:
    - In native mode, the MCP tool bridge binds strictly to loopback (`127.0.0.1`), eliminating the external LAN exposure required by Docker container bridge gateways (`0.0.0.0`).
 
@@ -165,18 +190,32 @@ Because native execution runs with partial process-policy enforcement rather tha
 | Criteria | Status | Evidence |
 |---|---|---|
 | Native configuration is default across schema and templates | **VERIFIED** | `src/config/schema.ts`, `templates/teams/*.yaml`, `tests/unit/config.test.ts` |
-| `pluton init` succeeds without Docker on clean hosts | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` (Subtest A) |
-| `pluton doctor` passes without Docker installed | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` (Subtest C) |
+| `pluton init` succeeds without invoking Docker in a fresh Windows scratch repo | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` (Subtest A) |
+| `pluton doctor` does not spawn Docker in native mode | **VERIFIED** | Subtest C, real `runDoctor` guard, and `tests/unit/doctor.test.ts` |
+| `pluton doctor` passes on a host with Docker completely uninstalled | **NOT VERIFIED** | Audit §9.1; Docker CLI is installed, so PATH filtering and interception were used |
 | `pluton sandbox probe` reports native provider | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` (Subtest B) |
-| `pluton run` completes multi-agent tasks without Docker | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` (Subtest D), `scripts/demo-native-run.mjs` |
-| Task checkout isolation preserved under `.pluton/workspaces/` | **VERIFIED** | `scripts/demo-native-run.mjs` (isolated file assertions) |
-| `pluton attach` supports native host tmux sessions | **VERIFIED** | `src/terminal/native.ts`, `tests/integration/cli-attach.test.ts`, `tests/unit/attach.test.ts` |
-| Guard tests assert 0 Docker calls in native runtime | **VERIFIED** | `tests/integration/docker-free-runtime.test.ts` |
+| `pluton run` completes multi-agent tasks with Docker hidden | **VERIFIED** | Subtest D, `scripts/demo-native-run.mjs`, and the real OpenCode run |
+| Task checkout isolation preserved under `.pluton/workspaces/` | **VERIFIED** | `scripts/demo-native-run.mjs` (isolated file assertions) and native containment tests |
+| `pluton attach` supports native host tmux sessions | **VERIFIED (plan/reattach)** | `src/terminal/native.ts`, `tests/integration/cli-attach.test.ts`, `tests/unit/attach.test.ts` |
+| Interactive TTY attach and chat | **NOT VERIFIED** | Audit §9.3; no TTY in the audit harness |
+| `pluton verify` and `pluton integrate` complete with Docker hidden | **VERIFIED** | Audit §5.1 rows 11–12 |
+| Guard tests assert 0 Docker calls across guarded native paths | **VERIFIED** | Five paths in `tests/integration/docker-free-runtime.test.ts` |
 | Migration guide authored and published | **VERIFIED** | `docs/MIGRATION.md` |
 | Security model and README updated | **VERIFIED** | `docs/SECURITY.md`, `README.md`, `docs/NATIVE_EXECUTION.md` |
+| POSIX/macOS runtime parity | **NOT VERIFIED** | Audit §9.2; only Windows executed |
+| Docker-mode E2E | **BLOCKED** | Audit §9.4; daemon stopped |
+| Real Qwen engine execution | **NOT VERIFIED** | Audit §9.5; Qwen paths used the ACP fake |
 
 ---
 
 ## 6. Conclusion
 
-Pluton has achieved complete independence from Docker. Native host execution is robust, performant, securely bounded by process policy, and backed by comprehensive regression guards. Docker remains available as a well-isolated legacy alternative for users with specialized container requirements.
+Pluton's native execution path does **not** require Docker for the tested Windows workflows:
+onboarding, diagnostics, substrate probing, multi-agent execution, verification, integration,
+headless app start, and host-tmux creation/reattachment all completed with Docker removed from
+`PATH`. Docker remains available as a well-isolated legacy alternative for users with specialized
+container requirements.
+
+This is **ACCEPTED WITH LIMITATIONS**, not unconditional acceptance. Complete independence on a
+Docker-uninstalled host, POSIX/macOS parity, interactive TTY behavior, Docker-mode E2E, and real
+Qwen execution remain unverified; see the independent audit for the exact status of each.
