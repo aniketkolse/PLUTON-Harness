@@ -7,7 +7,7 @@
  *    credentials, etc. must not leak into an engine process).
  * 2. Per-Ship state directories (engine homes) are redirected into the Ship's
  *    private config dir so engines cannot read the user's global config and
- *    authentication is per-Muse.
+ *    authentication is per-Ship.
  *
  * Secret material (API keys) reaches the engine only through explicitly
  * allowlisted environment variables supplied by the operator, never through

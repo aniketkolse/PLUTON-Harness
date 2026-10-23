@@ -41,7 +41,7 @@ export function taskListHuman(tasks: TaskRecord[]): string {
       t.state,
       String(t.depth),
       t.parentTaskId ? t.parentTaskId.slice(-8) : '-',
-      t.assigneeMuseId ?? '-',
+      t.assigneeShipId ?? t.assigneeMuseId ?? '-',
       t.title.length > 60 ? `${t.title.slice(0, 57)}...` : t.title,
     ])
   }
@@ -95,7 +95,7 @@ export function graphHuman(view: GraphView): string {
   const lines: string[] = []
   const walk = (parentId: string | null, indent: number): void => {
     for (const t of byParent.get(parentId) ?? []) {
-      lines.push(`${'  '.repeat(indent)}- [${t.state}] ${t.id.slice(-8)} ${t.title} (${t.assigneeMuseId ?? 'unassigned'})`)
+      lines.push(`${'  '.repeat(indent)}- [${t.state}] ${t.id.slice(-8)} ${t.title} (${t.assigneeShipId ?? t.assigneeMuseId ?? 'unassigned'})`)
       walk(t.id, indent + 1)
     }
   }

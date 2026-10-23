@@ -128,8 +128,8 @@ export interface OpenCodeAdapterOptions {
 }
 
 /**
- * Sanitized environment for a Muse's engine process (ADR-0008): platform
- * essentials plus XDG/HOME redirection into the Muse's private engine home.
+ * Sanitized environment for a Ship's engine process (ADR-0008): platform
+ * essentials plus XDG/HOME redirection into the Ship's private engine home.
  * Verified: opencode v2.0.29 honours XDG_CONFIG_HOME/XDG_DATA_HOME/
  * XDG_CACHE_HOME (which is where its credentials, logs and caches land).
  * Consequence: the engine cannot read the user's global opencode config, and
@@ -458,7 +458,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       env['USERPROFILE'] = process.env['USERPROFILE']
     }
     // `--standalone` avoids the shared managed service: doctor checks one
-    // engine home per Muse, and the service is global to the OpenCode process,
+    // engine home per Ship, and the service is global to the OpenCode process,
     // so non-standalone checks collide and time out on a single port.
     const out = await this.runFn([invocation.command, ...invocation.baseArgs, 'auth', 'list', '--standalone'], {
       timeoutMs: 5_000,
@@ -467,7 +467,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       maxOutputBytes: 128 * 1024,
     })
     const hint =
-      'free opencode/* models need no login; to use provider models run `opencode auth login` with this Muse\'s engine home as the config dir (XDG_CONFIG_HOME)'
+      'free opencode/* models need no login; to use provider models run `opencode auth login` with this Ship\'s engine home as the config dir (XDG_CONFIG_HOME)'
     if (out.timedOut || out.exitCode !== 0) {
       return { configured: false, hint: `${hint} (auth list failed: ${out.timedOut ? 'timeout' : `exit ${String(out.exitCode)}`})` }
     }
@@ -595,7 +595,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       ) {
         throw new EngineAuthMissingError(
           this.kind,
-          `free opencode/* models need no login; otherwise authenticate into this Muse's engine home (${req.configDir}). Engine said: ${err.message}`,
+          `free opencode/* models need no login; otherwise authenticate into this Ship's engine home (${req.configDir}). Engine said: ${err.message}`,
         )
       }
       throw err

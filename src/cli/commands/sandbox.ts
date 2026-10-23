@@ -24,7 +24,7 @@ export interface SandboxProbeReport {
   image: WorkerImageProbe | null
   /** Non-fatal findings the operator must see (degraded mode, missing image). */
   warnings: string[]
-  /** True when task dispatch could actually start a Muse container right now. */
+  /** True when task dispatch could actually start a Ship container right now. */
   dispatchReady: boolean
 }
 

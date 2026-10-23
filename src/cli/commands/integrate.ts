@@ -140,7 +140,7 @@ export function approvalScopeTaskId(scope: JsonValue): string | null {
  * protected file unblocks the gate. Deliberately strict: the row must carry
  * the gate's own provenance (no requesting muse — rows filed through
  * `approval.request` are muse-stamped) and the file-list disclosure it
- * recorded at block time must cover today's matches, so neither a row a Muse
+ * recorded at block time must cover today's matches, so neither a row a Ship
  * could forge nor an approval that predates new protected edits authorizes
  * the merge.
  */

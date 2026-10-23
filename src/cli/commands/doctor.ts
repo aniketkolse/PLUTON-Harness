@@ -251,7 +251,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
     }
   }
 
-  // 6. Sandbox substrate + worker image (ADR-0004): can a Muse container actually start here?
+  // 6. Sandbox substrate + worker image (ADR-0004): can a Ship container actually start here?
   const pushTmuxInfo = (): void => {
     checks.push({
       id: 'tmux',
@@ -313,7 +313,7 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
               id: 'worker-image',
               title: 'Worker image',
               status: 'fail',
-              message: `'${tag}' is not built — Muse containers cannot start`,
+              message: `'${tag}' is not built — Ship containers cannot start`,
               fix: 'run `pluton sandbox build-image`',
             })
             pushTmuxInfo()

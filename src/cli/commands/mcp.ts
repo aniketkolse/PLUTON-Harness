@@ -72,7 +72,7 @@ export function mcpServePlan(
     projectId,
     rootDir: ctx.rootDir,
     runId: run.id,
-    callerMuseId: ship.id,
+    callerShipId: ship.id,
     callerTaskId: taskId,
     limits: toolBridgeLimitsFromRuntime(ctx.loaded.config.runtime),
     wakeups: new WakeupRegistry(),
