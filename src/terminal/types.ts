@@ -1,5 +1,5 @@
 /**
- * Terminal contract (ADR-0005). Terminals are tmux sessions inside the Muse
+ * Terminal contract (ADR-0005). Terminals are tmux sessions inside the Ship
  * container, driven through the SandboxManager — never through a host shell and
  * never on the Windows host natively (no tl;dr tmux for Windows exists here).
  *
@@ -58,4 +58,4 @@ export interface TerminalManager {
 }
 
 export const TMUX_MISSING_FIX =
-  'the Muse container image must contain tmux — rebuild it with `pluton sandbox build-image`, then re-run `pluton doctor`'
+  'the Ship container image must contain tmux — rebuild it with `pluton sandbox build-image`, then re-run `pluton doctor`'

@@ -199,6 +199,7 @@ describe('attachMuse — plan mode (--json)', () => {
     const sessionName = tmuxSessionName('cli-attach-it', 'manager')
 
     expect(result).toEqual({
+      shipId: 'manager',
       museId: 'manager',
       containerName,
       sessionName,
@@ -241,6 +242,7 @@ describe('attachMuse — plan mode (--json)', () => {
     const sessionName = tmuxSessionName('cli-attach-it', 'manager')
 
     expect(result).toEqual({
+      shipId: 'manager',
       museId: 'manager',
       containerName: 'host',
       sessionName,

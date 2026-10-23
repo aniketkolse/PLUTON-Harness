@@ -12,7 +12,7 @@ import type { TerminalManager } from './types.ts'
  * the argv is built here, validated here, and spawned as an array.
  *
  * The tmux session is ensured through the TerminalManager first (inside the
- * container in Docker mode, on the host in native mode): attaching to a Muse
+ * container in Docker mode, on the host in native mode): attaching to a Ship
  * that never ran still works, and detaching never affects tasks.
  */
 
@@ -90,11 +90,11 @@ export interface AttachDeps {
   spawnAttach?: AttachSpawnFn
 }
 
-export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutcome> {
+export async function attachToShipTerminal(deps: AttachDeps): Promise<AttachOutcome> {
   const { sandboxKind, manager, target } = deps
   if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
     throw new ValidationError(
-      'pluton attach requires container-mode Muses (sandbox.kind: docker) or native host mode (sandbox.kind: native): tmux sessions live inside the Muse container or on the host',
+      'pluton attach requires container-mode Ships (sandbox.kind: docker) or native host mode (sandbox.kind: native): tmux sessions live inside the Ship container or on the host',
     )
   }
   // Validate the target (and have the exact argv ready) even in plan mode.
@@ -146,3 +146,6 @@ export async function attachToMuseTerminal(deps: AttachDeps): Promise<AttachOutc
   }
   return { ...base, exitCode }
 }
+
+/** @deprecated Use `attachToShipTerminal`; kept for backward compatibility. */
+export const attachToMuseTerminal = attachToShipTerminal

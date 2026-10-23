@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { slugify } from '../domain/ids.ts'
 
 /**
- * Sandbox contract (ADR-0004). One long-lived container per Muse; all four
+ * Sandbox contract (ADR-0004). One long-lived container per Ship; all four
  * managers share this interface so the runtime can be tested with a fake and
  * the dev-only `local-process` degraded mode is an explicit, acknowledged
  * choice — never a silent fallback.
@@ -25,7 +25,9 @@ export interface SandboxLimits {
 
 export interface SandboxSpec {
   projectId: string
-  museId: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   image: string
   /** Sanitized name, see sandboxContainerName(). */
   containerName: string
@@ -100,25 +102,28 @@ export interface SandboxManager {
 
 export const SANDBOX_LABEL_MANAGED = 'io.pluton.managed'
 export const SANDBOX_LABEL_PROJECT = 'io.pluton.project'
-export const SANDBOX_LABEL_MUSE = 'io.pluton.muse'
+/** Canonical Ship label (replaces `Muse` terminology); value unchanged for backward compatibility with existing containers. */
+export const SANDBOX_LABEL_SHIP = 'io.pluton.ship'
+/** @deprecated Use `SANDBOX_LABEL_SHIP`; kept for backward-compatible label lookups. */
+export const SANDBOX_LABEL_MUSE = SANDBOX_LABEL_SHIP
 
 export const DOCKER_UNAVAILABLE_FIX =
   'start Docker Desktop (or the docker engine), confirm `docker info` works, and re-run `pluton doctor`'
 
 /**
- * `pluton-<project>-<muse>`, sanitized, ≤ 63 chars. When the joined slug would
+ * `pluton-<project>-<ship>`, sanitized, ≤ 63 chars. When the joined slug would
  * exceed the cap, the HEAD is truncated and a short hash of the full identity
- * is appended — a length cap must never let two Muses share one container name
- * (stop/remove are name-targeted and would otherwise act on the wrong Muse).
+ * is appended — a length cap must never let two Ships share one container name
+ * (stop/remove are name-targeted and would otherwise act on the wrong Ship).
  */
-export function sandboxContainerName(projectName: string, museId: string): string {
-  const base = `pluton-${slugify(projectName)}-${slugify(museId)}`
+export function sandboxContainerName(projectName: string, shipId: string): string {
+  const base = `pluton-${slugify(projectName)}-${slugify(shipId)}`
   if (base.length <= 63) {
     const name = base.replace(/-+$/, '')
-    if (name.length < 7) throw new ValidationError(`cannot derive a container name from '${projectName}'/'${museId}'`)
+    if (name.length < 7) throw new ValidationError(`cannot derive a container name from '${projectName}'/'${shipId}'`)
     return name
   }
-  const hash = createHash('sha1').update(`${projectName}\u0000${museId}`).digest('hex').slice(0, 6)
+  const hash = createHash('sha1').update(`${projectName}\u0000${shipId}`).digest('hex').slice(0, 6)
   return `${base.slice(0, 56).replace(/-+$/, '')}-${hash}`
 }
 

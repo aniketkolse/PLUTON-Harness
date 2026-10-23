@@ -7,7 +7,7 @@ import { isId, shortId, slugify } from '../domain/ids.ts'
  * helpers below and re-validated at every manager entry point — callers can
  * never smuggle a target-syntax metacharacter (`:`, `.`, `$`, prefixes) into a
  * tmux invocation. Names are deterministic so a crashed runtime can recompute
- * them, and they carry the muse/task id tail for per-project uniqueness.
+ * them, and they carry the ship/task id tail for per-project uniqueness.
  */
 
 export const TMUX_NAME_MAX = 64
@@ -42,11 +42,11 @@ function capSlug(s: string, max: number): string {
   return `${s.slice(0, max - 7).replace(/-+$/, '')}-${hash}`
 }
 
-/** `pluton_<project>_<muse-tail>` — stable for a given project/muse pair. */
-export function tmuxSessionName(projectName: string, museId: string): string {
+/** `pluton_<project>_<ship-tail>` — stable for a given project/ship pair. */
+export function tmuxSessionName(projectName: string, shipId: string): string {
   const project = capSlug(slugify(projectName), PROJECT_PART_MAX)
-  const muse = capSlug(isId(museId) ? shortId(museId) : slugify(museId), MUSE_PART_MAX)
-  return assertSafeTmuxName('session', `${TMUX_SESSION_PREFIX}${project}_${muse}`)
+  const ship = capSlug(isId(shipId) ? shortId(shipId) : slugify(shipId), MUSE_PART_MAX)
+  return assertSafeTmuxName('session', `${TMUX_SESSION_PREFIX}${project}_${ship}`)
 }
 
 /** One window per task: `task-<id tail>` — stable for a given task id. */

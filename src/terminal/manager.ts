@@ -14,7 +14,7 @@ import {
 
 /**
  * tmux driver (ADR-0005): every operation is `sandbox.exec(container, ['tmux', ...])`
- * — an argv array, never a shell string — inside the Muse container. The tmux
+ * — an argv array, never a shell string — inside the Ship container. The tmux
  * server lives inside the container and dies with it: terminals are convenience
  * sessions for humans, NOT the managed engine transport and NOT a sandbox.
  *
@@ -53,7 +53,7 @@ function classifyFailure(r: RunResult, ctx: TmuxContext): TerminalUnavailableErr
     fix = 'the container may be overloaded or unresponsive; check `docker stats` and re-run'
   } else if (CONTAINER_MISSING_RE.test(stderr)) {
     reason = 'container_missing'
-    fix = 're-create the Muse sandbox (`pluton muse start <muse>`); its container no longer exists'
+    fix = 're-create the Ship container (`pluton ship start <ship>`); its container no longer exists'
   } else if (TMUX_MISSING_RE.test(stderr) && /tmux/i.test(stderr)) {
     reason = 'tmux_missing'
     fix = TMUX_MISSING_FIX
@@ -150,7 +150,7 @@ export class TmuxTerminalManager implements TerminalManager {
         `tmux session '${sessionName}' does not exist in container '${containerName}'`,
         {
           details: { reason: 'session_missing', containerName, sessionName },
-          fix: 're-create it with `pluton muse start` or the next task dispatch',
+          fix: 're-create it with `pluton ship start` or the next task dispatch',
         },
       )
     }

@@ -3,7 +3,7 @@ import { firstLine, run, type RunOptions, type RunResult } from '../util/exec.ts
 import {
   DOCKER_UNAVAILABLE_FIX,
   SANDBOX_LABEL_MANAGED,
-  SANDBOX_LABEL_MUSE,
+  SANDBOX_LABEL_SHIP,
   SANDBOX_LABEL_PROJECT,
   type SandboxCreateResult,
   type SandboxExecOptions,
@@ -67,6 +67,7 @@ export class DockerSandboxManager implements SandboxManager {
   /** The exact `docker create` argument vector — kept pure for conformance tests. */
   static buildCreateArgs(spec: SandboxSpec): string[] {
     DockerSandboxManager.validateSpec(spec)
+    const shipId = spec.shipId ?? spec.museId ?? ''
     const args = [
       'create',
       '--name',
@@ -76,7 +77,9 @@ export class DockerSandboxManager implements SandboxManager {
       '--label',
       `${SANDBOX_LABEL_PROJECT}=${spec.projectId}`,
       '--label',
-      `${SANDBOX_LABEL_MUSE}=${spec.museId ?? ''}`,
+      `${SANDBOX_LABEL_SHIP}=${shipId}`,
+      '--label',
+      `io.pluton.muse=${shipId}`,
       '--user',
       spec.containerUser,
       '--cap-drop',

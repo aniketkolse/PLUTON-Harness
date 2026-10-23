@@ -10,8 +10,8 @@ import {
 } from './types.ts'
 
 /**
- * Per-Muse container provisioning (ADR-0004, Phase B): one long-lived
- * container per (project, muse), created on first use and reused afterwards.
+ * Per-Ship container provisioning (ADR-0004, Phase B): one long-lived
+ * container per (project, ship), created on first use and reused afterwards.
  * Container-mode engine sessions run through `docker exec` in these
  * containers, so every Pluton-created container carries the
  * `host.docker.internal:host-gateway` mapping and the loopback tool bridge is
@@ -26,7 +26,7 @@ import {
  * never adopted, and never removed by this path. A container whose state
  * cannot be determined fails closed.
  *
- * The record (one row per project+muse, `upsertSandbox`) is advisory state for
+ * The record (one row per project+ship, `upsertSandbox`) is advisory state for
  * status/doctor; the container itself is the source of truth.
  */
 
@@ -37,11 +37,13 @@ export const HOST_GATEWAY_HOSTNAME = 'host.docker.internal'
 export const HOST_GATEWAY_ADD_HOST = `${HOST_GATEWAY_HOSTNAME}:host-gateway`
 
 /** The uid:gid the worker image creates (docker/worker/Dockerfile). */
-const MUSE_CONTAINER_USER = '10001:10001'
+const SHIP_CONTAINER_USER = '10001:10001'
 
-export interface MuseContainerSpec {
+export interface ShipContainerSpec {
   projectId: string
-  museId: string
+  shipId?: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
   image: string
   /**
    * Image ID the spec expects (from the worker-image probe); a running
@@ -61,17 +63,18 @@ export interface MuseContainerSpec {
 }
 
 /**
- * Ensure the Muse's container exists and is running; returns its name and
+ * Ensure the Ship's container exists and is running; returns its name and
  * whether this call created it. Idempotent for a matching container (label
  * re-validated, then a no-op `start`); a stale Pluton-owned container is
  * recreated, never adopted.
  */
-export async function ensureMuseContainer(
+export async function ensureShipContainer(
   manager: SandboxManager,
   store: Store,
-  spec: MuseContainerSpec,
+  spec: ShipContainerSpec,
 ): Promise<{ containerName: string; created: boolean }> {
-  const containerName = sandboxContainerName(spec.projectId, spec.museId)
+  const shipId = spec.shipId ?? spec.museId ?? 'unknown'
+  const containerName = sandboxContainerName(spec.projectId, shipId)
   const status = await manager.status(containerName)
   if (status === 'unknown') {
     throw new SandboxUnavailableError(
@@ -90,7 +93,7 @@ export async function ensureMuseContainer(
       // start() validates the managed label first; `docker start` on a running
       // container is a no-op success, so this is safe for both states.
       await manager.start(containerName)
-      const existing = store.getSandboxForMuse(spec.projectId, spec.museId)
+      const existing = store.getSandboxForShip(spec.projectId, shipId)
       if (existing !== null && existing.containerName === containerName) {
         containerId = existing.containerId
       }
@@ -107,7 +110,8 @@ export async function ensureMuseContainer(
   if (!reusable) {
     const result = await manager.create({
       projectId: spec.projectId,
-      museId: spec.museId,
+      shipId,
+      museId: shipId,
       image: spec.image,
       containerName,
       containerUser: resolvedUser,
@@ -127,7 +131,7 @@ export async function ensureMuseContainer(
 
   store.upsertSandbox({
     projectId: spec.projectId,
-    museId: spec.museId,
+    shipId,
     kind: manager.kind,
     containerName,
     containerId,
@@ -139,7 +143,7 @@ export async function ensureMuseContainer(
 }
 
 /** Reuse predicate: the container must still serve the requested spec exactly. */
-function containerMatchesSpec(spec: MuseContainerSpec, info: SandboxInspect): boolean {
+function containerMatchesSpec(spec: ShipContainerSpec, info: SandboxInspect): boolean {
   const expectedUser = spec.containerUser ?? resolveContainerUser().containerUser
   if (info.user !== expectedUser) return false
   if (spec.imageId !== undefined && info.imageId !== '' && info.imageId !== spec.imageId) return false
@@ -149,3 +153,8 @@ function containerMatchesSpec(spec: MuseContainerSpec, info: SandboxInspect): bo
     info.mounts.some((x) => x.destination === m.containerPath && x.readOnly === (m.readOnly === true)),
   )
 }
+
+/** @deprecated Use `ShipContainerSpec`; kept for backward compatibility. */
+export type MuseContainerSpec = ShipContainerSpec
+/** @deprecated Use `ensureShipContainer`; kept for backward compatibility. */
+export const ensureMuseContainer = ensureShipContainer
