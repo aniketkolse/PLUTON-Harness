@@ -7,7 +7,7 @@ import {
   ensureMuseContainer,
   HOST_GATEWAY_ADD_HOST,
   type MuseContainerSpec,
-} from '../../src/sandbox/muse-containers.ts'
+} from '../../src/sandbox/ship-containers.ts'
 import { sandboxContainerName, type SandboxSpec } from '../../src/sandbox/types.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
@@ -29,7 +29,7 @@ afterEach(() => {
 })
 
 function freshStore(name: string): { store: Store; projectId: string } {
-  const dir = mkdtempSync(join(tmpdir(), `pluton-muse-containers-${name}-`))
+  const dir = mkdtempSync(join(tmpdir(), `pluton-ship-containers-${name}-`))
   tmpDirs.push(dir)
   const db = openDatabase(join(dir, 'pluton.sqlite'))
   openDbs.push(db)

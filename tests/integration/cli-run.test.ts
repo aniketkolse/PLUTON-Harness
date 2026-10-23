@@ -12,7 +12,7 @@ import { ConflictError, SandboxUnavailableError } from '../../src/domain/errors.
 import type { McpServerSpec } from '../../src/engines/contract/types.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
-import { HOST_GATEWAY_ADD_HOST } from '../../src/sandbox/muse-containers.ts'
+import { HOST_GATEWAY_ADD_HOST } from '../../src/sandbox/ship-containers.ts'
 import type { WorkerImageProbe } from '../../src/sandbox/image.ts'
 import { sandboxContainerName } from '../../src/sandbox/types.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'

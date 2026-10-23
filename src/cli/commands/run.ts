@@ -43,8 +43,8 @@ import {
   WorkerImageManager,
   type WorkerImageProbe,
 } from '../../sandbox/image.ts'
-import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
-import type { ShipContainerSpec } from '../../sandbox/muse-containers.ts'
+import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/ship-containers.ts'
+import type { ShipContainerSpec } from '../../sandbox/ship-containers.ts'
 import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../tools/bridge.ts'
@@ -53,7 +53,7 @@ import { PLUTON_VERSION } from '../../version.ts'
 import { GitWorkspaceManager } from '../../workspace/manager.ts'
 import type { ProjectContext } from '../context.ts'
 import { resolveShipByRef } from './mcp.ts'
-import { shipContainerMounts, provisionShipContainer } from './muse-provision.ts'
+import { shipContainerMounts, provisionShipContainer } from './ship-provision.ts'
 
 /**
  * `pluton run` — the CLI entry into supervised execution (Phase 6, ADR-0006/0007).
@@ -228,7 +228,7 @@ export function installRunCancelSignals(store: Store, runId: string): () => void
  * Container mode: fail closed before any run row exists — daemon probe, worker
  * image readiness (the `engines` profile is required), then one long-lived
  * container and a `docker exec` spawn context per enabled Ship. Mount
- * construction and provisioning live in `muse-provision.ts` (shared with the
+ * construction and provisioning live in `ship-provision.ts` (shared with the
  * approvals inbox); the once-per-run probe/readiness checks stay here.
  */
 export async function prepareContainerMode(

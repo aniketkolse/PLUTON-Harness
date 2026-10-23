@@ -1,5 +1,5 @@
 import type { ShipRecord } from '../../domain/models.ts'
-import { ensureShipContainer } from '../../sandbox/muse-containers.ts'
+import { ensureShipContainer } from '../../sandbox/ship-containers.ts'
 import type { SandboxLimits, SandboxManager, SandboxMount } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 
