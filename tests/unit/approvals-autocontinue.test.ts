@@ -47,6 +47,16 @@ function createTestProject(): { ctx: ProjectContext; store: Store; runId: string
         },
       },
       git: { protected_paths: ['src/sensitive/**'], require_approval_for_main_branch_integration: false },
+      ships: {
+        manager: {
+          display_name: 'Manager',
+          role: 'supervisor',
+          engine: 'mock',
+          model: 'mock/model',
+          workspace_policy: 'coordinator-read-only',
+          approval_mode: 'autonomous-bounded',
+        },
+      },
       muses: {
         manager: {
           display_name: 'Manager',

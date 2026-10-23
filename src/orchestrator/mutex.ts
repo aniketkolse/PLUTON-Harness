@@ -1,7 +1,7 @@
 /**
- * Keyed async mutex (prompt §5: per-Muse task serialization). One lock per key
- * (a Muse id): tasks assigned to the same Muse run strictly one at a time;
- * different Muses never block each other. The lock lives in process — the
+ * Keyed async mutex (prompt §5: per-Ship task serialization). One lock per key
+ * (a Ship id): tasks assigned to the same Ship run strictly one at a time;
+ * different Ships never block each other. The lock lives in process — the
  * durable record of "who is running what" is the store, this only prevents
  * concurrent execution inside one supervisor process.
  */

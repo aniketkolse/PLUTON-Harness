@@ -7,8 +7,8 @@ import {
   OwnershipLostError,
   StateTransitionError,
 } from '../domain/errors.ts'
-import type { ApprovalRecord, JsonValue, MuseRecord, RunRecord, TaskRecord } from '../domain/models.ts'
-import { engineAdapterForMuse, type EngineIsolationFacts } from '../engines/approval.ts'
+import type { ApprovalRecord, JsonValue, ShipRecord, RunRecord, TaskRecord } from '../domain/models.ts'
+import { engineAdapterForShip, type EngineIsolationFacts } from '../engines/approval.ts'
 import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'
 import {
@@ -37,7 +37,7 @@ import { newId } from '../domain/ids.ts'
 /**
  * Run supervisor (Phase 6, ADR-0006/0007).
  *
- * One supervisor drives one run: it opens the manager session (the Manager Muse
+ * One supervisor drives one run: it opens the manager session (the Manager Ship
  * plans and delegates through the restricted tool bridge), dispatches every
  * ready task to its assignee's engine in its own checkout, records results
  * durably, and finalizes the run from what the durable records actually say —
@@ -57,8 +57,8 @@ import { newId } from '../domain/ids.ts'
  * engines and containers on top; `adapterFor` and `mcpServerFor` are the seams.
  */
 
-/** Builds the per-Muse adapter; `session.isolatedCheckout` is a proven runtime fact. */
-export type SupervisorAdapterFactory = (muse: MuseRecord, session: EngineIsolationFacts) => EngineAdapter
+/** Builds the per-Ship adapter; `session.isolatedCheckout` is a proven runtime fact. */
+export type SupervisorAdapterFactory = (ship: ShipRecord, session: EngineIsolationFacts) => EngineAdapter
 
 /**
  * Live inspector event for one worker (task). The server maps these onto the
@@ -115,10 +115,10 @@ export interface SupervisorOptions {
   ownershipTtlMs?: number
   adapterFor?: SupervisorAdapterFactory
   workspaceManager?: GitWorkspaceManager
-  /** Extra environment variables per Muse (allowlisted by the caller; never secrets here). */
-  engineEnv?: (muse: MuseRecord) => Record<string, string>
+  /** Extra environment variables per Ship (allowlisted by the caller; never secrets here). */
+  engineEnv?: (ship: ShipRecord) => Record<string, string>
   /** MCP server spec handed to engine sessions; null = engines get no tools (dev/mock). */
-  mcpServerFor?: (muse: MuseRecord, taskId: string | null) => McpServerSpec | null
+  mcpServerFor?: (ship: ShipRecord, taskId: string | null) => McpServerSpec | null
   wakeups?: WakeupRegistry
   now?: () => number
   /**
@@ -313,9 +313,9 @@ function revisionFeedbackOf(task: TaskRecord): string | null {
   return typeof feedback === 'string' ? feedback : null
 }
 
-export function buildTaskPrompt(task: TaskRecord, muse: MuseRecord, maxChars: number): string {
+export function buildTaskPrompt(task: TaskRecord, ship: ShipRecord, maxChars: number): string {
   const lines = [
-    `You are ${muse.displayName}, a ${muse.role} Muse of the Pluton-Harness control plane.`,
+    `You are ${ship.displayName}, a ${ship.role} Ship of the Pluton-Harness control plane.`,
     '',
     `Task: ${task.title}`,
     '',
@@ -343,14 +343,14 @@ export function buildTaskPrompt(task: TaskRecord, muse: MuseRecord, maxChars: nu
 
 export function buildManagerPrompt(
   goal: string,
-  managerMuse: MuseRecord,
-  muses: MuseRecord[],
+  managerShip: ShipRecord,
+  ships: ShipRecord[],
   acceptanceCriteria: string[],
   maxChars: number,
 ): string {
-  const team = muses.map((m) => `- ${m.slug} (${m.role}, engine ${m.engineKind}, model ${m.model}, workspace ${m.workspacePolicy})`)
+  const team = ships.map((m) => `- ${m.slug} (${m.role}, engine ${m.engineKind}, model ${m.model}, workspace ${m.workspacePolicy})`)
   const lines = [
-    `You are ${managerMuse.displayName}, the Manager Muse of one Pluton-Harness run.`,
+    `You are ${managerShip.displayName}, the Manager Ship of one Pluton-Harness run.`,
     '',
     'Goal:',
     goal,
@@ -364,7 +364,7 @@ export function buildManagerPrompt(
     ...team,
     '',
     'Rules:',
-    '- Plan first: create the minimal set of tasks with the task.create tool (assign each to the right Muse; use dependsOn for ordering; an assignee may never own an ancestor task).',
+    '- Plan first: create the minimal set of tasks with the task.create tool (assign each to the right Ship; use dependsOn for ordering; an assignee may never own an ancestor task).',
     '- Delegate only through the Pluton tools; Pluton state, not your prose, is authoritative.',
     '- Use task.wait to wait for your team: it returns once every requested task has settled (completed, failed, cancelled, or awaiting verification).',
     "- A task in 'verifying' has finished its work and awaits the operator's verification gate — report it as awaiting verification; never keep waiting for it to become completed.",
@@ -401,14 +401,14 @@ export class RunSupervisor {
   private readonly loopPollMs: number
   private readonly drainBoundMs: number
   /**
-   * The per-Muse engine factory actually used: the injected seam, or the
-   * approval-aware default ({@link engineAdapterForMuse}). Public so the
+   * The per-Ship engine factory actually used: the injected seam, or the
+   * approval-aware default ({@link engineAdapterForShip}). Public so the
    * default path itself is testable without spawning engines.
    */
   readonly adapterFor: SupervisorAdapterFactory
   private readonly workspaceManager: GitWorkspaceManager | null
-  private readonly engineEnv: (muse: MuseRecord) => Record<string, string>
-  private readonly mcpServerFor: (muse: MuseRecord, taskId: string | null) => McpServerSpec | null
+  private readonly engineEnv: (ship: ShipRecord) => Record<string, string>
+  private readonly mcpServerFor: (ship: ShipRecord, taskId: string | null) => McpServerSpec | null
   private readonly wakeups: WakeupRegistry
   private readonly now: () => number
   private readonly diagnostic: (line: string) => void
@@ -458,7 +458,7 @@ export class RunSupervisor {
     this.loopPollMs = opts.loopPollMs ?? DEFAULT_LOOP_POLL_MS
     this.drainBoundMs = opts.drainBoundMs ?? DEFAULT_DRAIN_BOUND_MS
     this.adapterFor =
-      opts.adapterFor ?? ((muse, session) => engineAdapterForMuse(muse, { isolatedCheckout: session.isolatedCheckout }))
+      opts.adapterFor ?? ((ship, session) => engineAdapterForShip(ship, { isolatedCheckout: session.isolatedCheckout }))
     this.workspaceManager = opts.workspaceManager ?? null
     this.engineEnv = opts.engineEnv ?? (() => ({}))
     this.mcpServerFor = opts.mcpServerFor ?? (() => null)
@@ -484,7 +484,7 @@ export class RunSupervisor {
         projectId: this.projectId,
         rootDir: this.rootDir,
         runId: this.runId,
-        callerMuseId: run.managerMuseId,
+        callerShipId: run.managerShipId,
         callerTaskId: null,
         limits: this.limits,
         leaseManager: this.leaseManager,
@@ -507,13 +507,13 @@ export class RunSupervisor {
    * `created → active` transition (same synchronous span as that fenced write,
    * so no takeover can interleave before the heartbeat ages past the TTL).
    */
-  private appendEvent(type: string, payload: JsonValue, taskId?: string, museId?: string): void {
+  private appendEvent(type: string, payload: JsonValue, taskId?: string, shipId?: string): void {
     this.store.appendEvent(
       {
         projectId: this.projectId,
         runId: this.runId,
         ...(taskId !== undefined ? { taskId } : {}),
-        ...(museId !== undefined ? { museId } : {}),
+        ...(shipId !== undefined ? { shipId } : {}),
         type,
         payload,
       },
@@ -522,12 +522,12 @@ export class RunSupervisor {
   }
 
   /** An event written before the claim exists (or as one): deliberately unfenced. */
-  private appendEventUnfenced(type: string, payload: JsonValue, taskId?: string, museId?: string): void {
+  private appendEventUnfenced(type: string, payload: JsonValue, taskId?: string, shipId?: string): void {
     this.store.appendEvent({
       projectId: this.projectId,
       runId: this.runId,
       ...(taskId !== undefined ? { taskId } : {}),
-      ...(museId !== undefined ? { museId } : {}),
+      ...(shipId !== undefined ? { shipId } : {}),
       type,
       payload,
     })
@@ -538,7 +538,7 @@ export class RunSupervisor {
     this.emitSettledWorkerEvent(task)
   }
 
-  /** Role/model snapshot captured at claim time (never later muse config edits). */
+  /** Role/model snapshot captured at claim time (never later ship config edits). */
   private assignmentFields(task: TaskRecord): { role: string; model?: string } {
     const assignment = jsonObject(task.assignment)
     const role = assignment !== null && typeof assignment['role'] === 'string' ? assignment['role'] : 'worker'
@@ -619,12 +619,12 @@ export class RunSupervisor {
     }
   }
 
-  private instructionsFor(muse: MuseRecord): string | undefined {
-    if (!muse.instructionsFile) return undefined
+  private instructionsFor(ship: ShipRecord): string | undefined {
+    if (!ship.instructionsFile) return undefined
     try {
-      return readFileSync(join(this.rootDir, muse.instructionsFile), 'utf8')
+      return readFileSync(join(this.rootDir, ship.instructionsFile), 'utf8')
     } catch {
-      this.diagnostic(`instructions file for muse '${muse.id}' could not be read: ${muse.instructionsFile}`)
+      this.diagnostic(`instructions file for ship '${ship.id}' could not be read: ${ship.instructionsFile}`)
       return undefined
     }
   }
@@ -635,7 +635,7 @@ export class RunSupervisor {
     prompt: PromptRequest,
     context?: {
       taskId?: string
-      museId?: string
+      shipId?: string
       onTool?: (tool: { name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }) => void
     },
   ): Promise<PromptOutcome> {
@@ -668,7 +668,7 @@ export class RunSupervisor {
           onApproval: (a) => {
             // Durable record of an engine permission request and Pluton's
             // answer (the decision text lives in `description`). Distinct from
-            // `approval.requested`, which records a Muse filing an approval
+            // `approval.requested`, which records a Ship filing an approval
             // through the tool bridge: this event is the ENGINE asking and the
             // host deciding (host-mode smoke finding: denials used to vanish,
             // leaving a "successful" no-op task). Description is bounded and
@@ -678,14 +678,14 @@ export class RunSupervisor {
               'approval.engine_decision',
               { requestId: a.requestId, description: stripControlChars(a.description).slice(0, 1_000) },
               context?.taskId,
-              context?.museId,
+              context?.shipId,
             )
           },
           onUsage: (u) => {
-            if (context?.museId) {
+            if (context?.shipId) {
               const res = this.usageLedger.record(
                 {
-                  museId: context.museId,
+                  shipId: context.shipId,
                   taskId: context.taskId,
                   inputTokens: u.inputTokens,
                   outputTokens: u.outputTokens,
@@ -829,7 +829,7 @@ export class RunSupervisor {
    */
   private async ensureTaskCheckout(
     task: TaskRecord,
-    muse: MuseRecord,
+    ship: ShipRecord,
   ): Promise<{ workspaceId: string; workdir: string }> {
     const manager = this.workspaceManager
     if (!manager) {
@@ -895,7 +895,7 @@ export class RunSupervisor {
         projectId: this.projectId,
         runId: this.runId,
         taskId: task.id,
-        museId: muse.id,
+        shipId: ship.id,
         kind: 'task-checkout',
         path: info.path,
         branch: info.branch,
@@ -910,13 +910,13 @@ export class RunSupervisor {
     const store = this.store
     let lostClaim = false
     try {
-      if (!task.assigneeMuseId) {
-        this.failTask(task.id, { code: 'no_assignee', message: 'task has no assignee Muse' })
+      if (!task.assigneeShipId) {
+        this.failTask(task.id, { code: 'no_assignee', message: 'task has no assignee Ship' })
         return
       }
-      const muse = store.getMuse(task.assigneeMuseId)
-      if (!muse || !muse.enabled) {
-        this.failTask(task.id, { code: 'muse_unavailable', message: `assignee '${task.assigneeMuseId}' is not an enabled Muse` })
+      const ship = store.getShip(task.assigneeShipId)
+      if (!ship || !ship.enabled) {
+        this.failTask(task.id, { code: 'ship_unavailable', message: `assignee '${task.assigneeShipId}' is not an enabled Ship` })
         return
       }
       const claimed = store.setTaskStateIf(
@@ -925,8 +925,8 @@ export class RunSupervisor {
         'admitted',
         {
           // Snapshot the assignment exactly as it is for THIS claim (retries
-          // refresh it): later muse config edits must never rewrite history.
-          assignment: { museId: muse.id, role: muse.role, engine: muse.engineKind, model: muse.model },
+          // refresh it): later ship config edits must never rewrite history.
+          assignment: { shipId: ship.id, museId: ship.id, role: ship.role, engine: ship.engineKind, model: ship.model },
         },
         this.fence ?? undefined,
       )
@@ -940,23 +940,23 @@ export class RunSupervisor {
 
       let workspaceId: string | null = null
       let workdir = this.rootDir
-      if (muse.workspacePolicy === 'isolated-task-checkout') {
-        const ensured = await this.ensureTaskCheckout(task, muse)
+      if (ship.workspacePolicy === 'isolated-task-checkout') {
+        const ensured = await this.ensureTaskCheckout(task, ship)
         workspaceId = ensured.workspaceId
         workdir = ensured.workdir
       }
 
-      const adapter = this.adapterFor(muse, { isolatedCheckout: workspaceId !== null })
-      const mcpSpec = this.mcpServerFor(muse, task.id)
-      const instructions = this.instructionsFor(muse)
+      const adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null })
+      const mcpSpec = this.mcpServerFor(ship, task.id)
+      const instructions = this.instructionsFor(ship)
       const session = await adapter.startSession({
-        muse: { id: muse.id, slug: muse.slug, role: muse.role, model: muse.model },
+        ship: { id: ship.id, slug: ship.slug, role: ship.role, model: ship.model },
         workdir,
-        env: this.engineEnv(muse),
-        configDir: muse.engineHome,
+        env: this.engineEnv(ship),
+        configDir: ship.engineHome,
         ...(instructions !== undefined ? { instructions } : {}),
         ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
-        approvals: this.approvalChannel(muse.id, task.id),
+        approvals: this.approvalChannel(ship.id, task.id),
       })
       this.liveSessions.set(task.id, session)
       try {
@@ -969,13 +969,13 @@ export class RunSupervisor {
           },
           this.fence ?? undefined,
         )
-        this.appendEvent('task.started', { museId: muse.id, engine: adapter.kind, workspaceId }, task.id)
+        this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId }, task.id)
         this.emitWorkerEvent({
           type: 'worker.started',
           runId: this.runId,
           taskId: task.id,
-          role: muse.role,
-          model: muse.model,
+          role: ship.role,
+          model: ship.model,
           workspace: workdir,
           payload: { step: `session started (${adapter.kind})` },
         })
@@ -992,7 +992,7 @@ export class RunSupervisor {
         throw e
       }
 
-      const promptText = buildTaskPrompt(task, muse, this.limits.maxBriefChars)
+      const promptText = buildTaskPrompt(task, ship, this.limits.maxBriefChars)
       let out: PromptOutcome
       try {
         out = await this.runPrompt(
@@ -1000,7 +1000,7 @@ export class RunSupervisor {
           { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
           {
             taskId: task.id,
-            museId: muse.id,
+            shipId: ship.id,
             onTool: (tool) => {
               if (tool.phase !== 'start') return
               const label =
@@ -1009,8 +1009,8 @@ export class RunSupervisor {
                 type: 'worker.progress',
                 runId: this.runId,
                 taskId: task.id,
-                role: muse.role,
-                model: muse.model,
+                role: ship.role,
+                model: ship.model,
                 workspace: workdir,
                 payload: { step: stripControlChars(label).slice(0, 300) },
               })
@@ -1197,7 +1197,7 @@ export class RunSupervisor {
         const declared = this.leaseManager.declareScope(
           this.runId,
           task.id,
-          task.assigneeMuseId ?? 'unassigned',
+          task.assigneeShipId ?? 'unassigned',
           writeScope,
         )
         if (declared.conflicts.length > 0) {
@@ -1209,7 +1209,7 @@ export class RunSupervisor {
               id: newId('attempt'),
               runId: this.runId,
               taskId: task.id,
-              museId: task.assigneeMuseId ?? 'unassigned',
+              shipId: task.assigneeShipId ?? 'unassigned',
               path,
             },
             this.fence ?? undefined,
@@ -1217,7 +1217,7 @@ export class RunSupervisor {
         }
       }
 
-      const key = task.assigneeMuseId ?? `unassigned:${task.id}`
+      const key = task.assigneeShipId ?? `unassigned:${task.id}`
       const promise = this.mutex.withLock(key, () => this.executeTask(task))
       this.inFlight.set(task.id, promise)
       promise.then(
@@ -1241,7 +1241,7 @@ export class RunSupervisor {
 
   /**
    * Operator approval channel for one engine session: engine permission
-   * requests become durable approvals bound to this run/task/Muse, visible to
+   * requests become durable approvals bound to this run/task/Ship, visible to
    * every operator surface (TUI inbox, SPA banner) through the shared store.
    * Fail-closed defaults hold: TTL from config, expiry/abort answer deny.
    *
@@ -1263,13 +1263,13 @@ export class RunSupervisor {
    * `task.approval_settled` event, so the CS-8 SSE derivation sees the park
    * and its release like any other task transition.
    */
-  private approvalChannel(museId: string, taskId: string | null): EnginePermissionChannel {
+  private approvalChannel(shipId: string, taskId: string | null): EnginePermissionChannel {
     return createEngineApprovalChannel({
       store: this.store,
       projectId: this.projectId,
       runId: this.runId,
       taskId,
-      museId,
+      shipId,
       ttlMinutes: this.limits.approvalTtlMinutes,
       now: this.now,
       // Ownership: a stale channel must never mint an approval or flip task
@@ -1349,34 +1349,34 @@ export class RunSupervisor {
 
   private async runManagerSession(): Promise<PromptOutcome> {
     const run = this.store.getRun(this.runId)
-    const muse = this.store.getMuse(run.managerMuseId)
-    if (!muse || !muse.enabled) {
-      throw new NotFoundError('manager muse', run.managerMuseId)
+    const ship = this.store.getShip(run.managerShipId)
+    if (!ship || !ship.enabled) {
+      throw new NotFoundError('manager ship', run.managerShipId)
     }
-    const adapter = this.adapterFor(muse, { isolatedCheckout: false })
-    const mcpSpec = this.mcpServerFor(muse, null)
-    const instructions = this.instructionsFor(muse)
+    const adapter = this.adapterFor(ship, { isolatedCheckout: false })
+    const mcpSpec = this.mcpServerFor(ship, null)
+    const instructions = this.instructionsFor(ship)
     const session = await adapter.startSession({
-      muse: { id: muse.id, slug: muse.slug, role: muse.role, model: muse.model },
+      ship: { id: ship.id, slug: ship.slug, role: ship.role, model: ship.model },
       workdir: this.rootDir, // coordinator-read-only: read the tree, never write
-      env: this.engineEnv(muse),
-      configDir: muse.engineHome,
+      env: this.engineEnv(ship),
+      configDir: ship.engineHome,
       ...(instructions !== undefined ? { instructions } : {}),
       ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
-      approvals: this.approvalChannel(muse.id, null),
+      approvals: this.approvalChannel(ship.id, null),
     })
     // CS-9: register the manager session as an interrupt target while its prompt
     // is in flight (a terminal run must stop its manager too).
     this.managerSessionRef = session
     const prompt = buildManagerPrompt(
       run.goal,
-      muse,
-      this.store.listMuses().filter((m) => m.enabled),
+      ship,
+      this.store.listShips().filter((m) => m.enabled),
       run.acceptanceCriteria,
       this.limits.maxBriefChars,
     )
     try {
-      return await this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { museId: muse.id })
+      return await this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { shipId: ship.id })
     } finally {
       // CS-9: deregister before closing — the session is no longer an interrupt
       // target, and the manager's interrupt slot is free for nothing else to use.
@@ -1549,7 +1549,7 @@ export class RunSupervisor {
       if (run.state === 'created') {
         try {
           this.store.setRunState(this.runId, 'active', { supervisorPid: process.pid }, this.fence)
-          this.appendEventUnfenced('run.started', { goal: run.goal, managerMuseId: run.managerMuseId })
+          this.appendEventUnfenced('run.started', { goal: run.goal, managerShipId: run.managerShipId })
         } catch (e) {
           if (!(e instanceof StateTransitionError)) throw e
           const fresh = this.store.getRun(this.runId)

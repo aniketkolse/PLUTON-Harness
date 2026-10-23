@@ -1,7 +1,9 @@
 import type { Store, SupervisorFence } from '../store/store.ts'
 
 export interface UsageRecord {
-  museId: string
+  shipId?: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
   taskId?: string | null
   inputTokens: number
   outputTokens: number
@@ -14,8 +16,14 @@ export interface BudgetLimits {
   maxRunInputTokens?: number
   maxRunOutputTokens?: number
   maxRunCostUsd?: number
+  maxPerShipInputTokens?: number
+  maxPerShipOutputTokens?: number
+  maxPerShipCostUsd?: number
+  /** @deprecated Use `maxPerShipInputTokens`; kept for backward compatibility. */
   maxPerMuseInputTokens?: number
+  /** @deprecated Use `maxPerShipOutputTokens`; kept for backward compatibility. */
   maxPerMuseOutputTokens?: number
+  /** @deprecated Use `maxPerShipCostUsd`; kept for backward compatibility. */
   maxPerMuseCostUsd?: number
 }
 
@@ -25,6 +33,16 @@ export interface RunUsageSummary {
   totalOutputTokens: number
   totalCachedTokens: number
   totalCostUsd: number
+  perShip: Record<
+    string,
+    {
+      inputTokens: number
+      outputTokens: number
+      cachedTokens: number
+      costUsd: number
+    }
+  >
+  /** @deprecated Use `perShip`; kept for backward compatibility. */
   perMuse: Record<
     string,
     {
@@ -43,10 +61,20 @@ export class UsageLedger {
   private readonly limits: BudgetLimits
   private readonly store?: Store
   private readonly inMemoryRecords: UsageRecord[] = []
+  private readonly isMuseBudget: boolean
 
   constructor(runId: string, limits?: BudgetLimits, store?: Store) {
     this.runId = runId
-    this.limits = limits ?? {}
+    const l = limits ?? {}
+    this.isMuseBudget = l.maxPerMuseInputTokens !== undefined ||
+      l.maxPerMuseOutputTokens !== undefined ||
+      l.maxPerMuseCostUsd !== undefined
+    this.limits = {
+      ...l,
+      maxPerShipInputTokens: l.maxPerShipInputTokens ?? l.maxPerMuseInputTokens,
+      maxPerShipOutputTokens: l.maxPerShipOutputTokens ?? l.maxPerMuseOutputTokens,
+      maxPerShipCostUsd: l.maxPerShipCostUsd ?? l.maxPerMuseCostUsd,
+    }
     this.store = store
   }
 
@@ -57,13 +85,19 @@ export class UsageLedger {
    * stays exactly the same.
    */
   record(usage: UsageRecord, fence?: SupervisorFence): { withinBudget: boolean; limitExceededReason?: string } {
-    this.inMemoryRecords.push({ ...usage, timestamp: usage.timestamp ?? new Date().toISOString() })
+    const shipId = usage.shipId ?? usage.museId ?? 'unknown'
+    const normalizedUsage: UsageRecord = {
+      ...usage,
+      shipId,
+      timestamp: usage.timestamp ?? new Date().toISOString(),
+    }
+    this.inMemoryRecords.push(normalizedUsage)
 
     if (this.store) {
       this.store.recordUsage(
         {
           runId: this.runId,
-          museId: usage.museId,
+          shipId,
           taskId: usage.taskId,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
@@ -82,7 +116,7 @@ export class UsageLedger {
     let totalOutputTokens = 0
     let totalCachedTokens = 0
     let totalCostUsd = 0
-    const perMuse: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }> = {}
+    const perShip: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }> = {}
 
     // Pull either from store (authoritative durable) or in-memory
     if (this.store) {
@@ -91,8 +125,8 @@ export class UsageLedger {
       totalOutputTokens = dbUsage.totalOutputTokens
       totalCachedTokens = dbUsage.totalCachedTokens
       totalCostUsd = dbUsage.totalCostUsd
-      for (const [mId, mData] of Object.entries(dbUsage.perMuse)) {
-        perMuse[mId] = { ...mData }
+      for (const [mId, mData] of Object.entries(dbUsage.perShip)) {
+        perShip[mId] = { ...mData }
       }
     } else {
       for (const rec of this.inMemoryRecords) {
@@ -101,16 +135,17 @@ export class UsageLedger {
         totalCachedTokens += rec.cachedTokens
         totalCostUsd += rec.costUsd
 
-        const m = perMuse[rec.museId] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 }
+        const shipId = rec.shipId ?? rec.museId ?? 'unknown'
+        const m = perShip[shipId] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 }
         m.inputTokens += rec.inputTokens
         m.outputTokens += rec.outputTokens
         m.cachedTokens += rec.cachedTokens
         m.costUsd += rec.costUsd
-        perMuse[rec.museId] = m
+        perShip[shipId] = m
       }
     }
 
-    const budgetCheck = this.checkBudgetWithTotals(totalInputTokens, totalOutputTokens, totalCostUsd, perMuse)
+    const budgetCheck = this.checkBudgetWithTotals(totalInputTokens, totalOutputTokens, totalCostUsd, perShip)
 
     return {
       runId: this.runId,
@@ -118,7 +153,8 @@ export class UsageLedger {
       totalOutputTokens,
       totalCachedTokens,
       totalCostUsd,
-      perMuse,
+      perShip,
+      perMuse: perShip,
       hardLimitExceeded: !budgetCheck.withinBudget,
       limitExceededReason: budgetCheck.limitExceededReason,
     }
@@ -136,7 +172,7 @@ export class UsageLedger {
     totalInput: number,
     totalOutput: number,
     totalCost: number,
-    perMuse: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>,
+    perShip: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>,
   ): { withinBudget: boolean; limitExceededReason?: string } {
     if (this.limits.maxRunInputTokens !== undefined && totalInput > this.limits.maxRunInputTokens) {
       return {
@@ -157,23 +193,26 @@ export class UsageLedger {
       }
     }
 
-    for (const [museId, usage] of Object.entries(perMuse)) {
-      if (this.limits.maxPerMuseInputTokens !== undefined && usage.inputTokens > this.limits.maxPerMuseInputTokens) {
+    const entity = this.isMuseBudget ? 'Muse' : 'Ship'
+    const limitLabel = this.isMuseBudget ? 'per-muse' : 'per-ship'
+
+    for (const [shipId, usage] of Object.entries(perShip)) {
+      if (this.limits.maxPerShipInputTokens !== undefined && usage.inputTokens > this.limits.maxPerShipInputTokens) {
         return {
           withinBudget: false,
-          limitExceededReason: `Muse '${museId}' input tokens (${usage.inputTokens}) exceeded per-muse limit (${this.limits.maxPerMuseInputTokens})`,
+          limitExceededReason: `${entity} '${shipId}' input tokens (${usage.inputTokens}) exceeded ${limitLabel} limit (${this.limits.maxPerShipInputTokens})`,
         }
       }
-      if (this.limits.maxPerMuseOutputTokens !== undefined && usage.outputTokens > this.limits.maxPerMuseOutputTokens) {
+      if (this.limits.maxPerShipOutputTokens !== undefined && usage.outputTokens > this.limits.maxPerShipOutputTokens) {
         return {
           withinBudget: false,
-          limitExceededReason: `Muse '${museId}' output tokens (${usage.outputTokens}) exceeded per-muse limit (${this.limits.maxPerMuseOutputTokens})`,
+          limitExceededReason: `${entity} '${shipId}' output tokens (${usage.outputTokens}) exceeded ${limitLabel} limit (${this.limits.maxPerShipOutputTokens})`,
         }
       }
-      if (this.limits.maxPerMuseCostUsd !== undefined && usage.costUsd > this.limits.maxPerMuseCostUsd) {
+      if (this.limits.maxPerShipCostUsd !== undefined && usage.costUsd > this.limits.maxPerShipCostUsd) {
         return {
           withinBudget: false,
-          limitExceededReason: `Muse '${museId}' cost ($${usage.costUsd.toFixed(3)}) exceeded per-muse limit ($${this.limits.maxPerMuseCostUsd.toFixed(3)})`,
+          limitExceededReason: `${entity} '${shipId}' cost ($${usage.costUsd.toFixed(3)}) exceeded ${limitLabel} limit ($${this.limits.maxPerShipCostUsd.toFixed(3)})`,
         }
       }
     }

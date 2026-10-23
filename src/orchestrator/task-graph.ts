@@ -18,7 +18,9 @@ export interface AdmitTaskRequest {
   title: string
   brief: string
   acceptanceCriteria: string[]
-  assigneeMuseId: string | null
+  assigneeShipId?: string | null
+  /** @deprecated Use `assigneeShipId`; kept for backward compatibility. */
+  assigneeMuseId?: string | null
   writeScope?: string[]
   /** Tasks that must reach `completed` before this task becomes ready. */
   dependsOn?: string[]
@@ -87,7 +89,7 @@ export function admitTask(store: Store, req: AdmitTaskRequest, limits: AdmitTask
       title: req.title,
       brief: req.brief,
       acceptanceCriteria: req.acceptanceCriteria,
-      assigneeMuseId: req.assigneeMuseId,
+      assigneeShipId: req.assigneeShipId !== undefined ? req.assigneeShipId : (req.assigneeMuseId ?? null),
       writeScope: req.writeScope,
     } satisfies NewTaskSpec)
 
@@ -103,14 +105,14 @@ export function admitTask(store: Store, req: AdmitTaskRequest, limits: AdmitTask
       projectId: run.projectId,
       runId: req.runId,
       taskId: task.id,
-      museId: req.assigneeMuseId,
+      shipId: task.assigneeShipId,
       type: 'task.admitted',
       payload: {
         title: req.title,
         parentTaskId: req.parentTaskId,
         depth,
         dependsOn: deps,
-        assigneeMuseId: req.assigneeMuseId,
+        assigneeShipId: task.assigneeShipId,
       },
     })
 
@@ -174,7 +176,7 @@ export function wouldCreateAncestorCycle(
 export interface TaskGraphNodeOptions {
   role?: string
   state?: string
-  assigneeMuseId?: string | null
+  assigneeShipId?: string | null
   [key: string]: unknown
 }
 

@@ -540,7 +540,7 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(out.state).toBe('completed')
 
     const taskId = created[0] as string
-    const snapshot = { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' }
+    const snapshot = { shipId: 'worker-a', museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' }
     expect(world.store.getTask(taskId).assignment).toEqual(snapshot)
 
     // A later config edit changes future assignments, never recorded history.
@@ -656,10 +656,11 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
 
     const row = world.store.db
       .prepare(
-        "SELECT task_id, muse_id, payload_json FROM events WHERE run_id = ? AND type = 'approval.engine_decision'",
+        "SELECT task_id, ship_id, ship_id AS muse_id, payload_json FROM events WHERE run_id = ? AND type = 'approval.engine_decision'",
       )
-      .get(world.runId) as { task_id: string | null; muse_id: string | null; payload_json: string } | undefined
+      .get(world.runId) as { task_id: string | null; ship_id: string | null; muse_id: string | null; payload_json: string } | undefined
     expect(row?.task_id).toBe(created[0])
+    expect(row?.ship_id).toBe('worker-a')
     expect(row?.muse_id).toBe('worker-a')
     expect(JSON.parse(row?.payload_json as string)).toMatchObject({
       requestId: 'req-1',
@@ -1440,6 +1441,26 @@ function approvalContext(world: World): ProjectContext {
         },
       },
       git: { protected_paths: [], require_approval_for_main_branch_integration: false },
+      ships: {
+        manager: {
+          display_name: 'Manager',
+          role: 'supervisor',
+          engine: 'mock',
+          model: 'mock/model-a',
+          workspace_policy: 'coordinator-read-only',
+          permissions: [...PERMISSIONS],
+          approval_mode: 'autonomous-bounded',
+        },
+        'worker-a': {
+          display_name: 'Worker A',
+          role: 'coder',
+          engine: 'mock',
+          model: 'mock/model-a',
+          workspace_policy: 'coordinator-read-only',
+          permissions: [...WORKER_PERMISSIONS],
+          approval_mode: 'ask-for-sensitive-actions',
+        },
+      },
       muses: {
         manager: {
           display_name: 'Manager',

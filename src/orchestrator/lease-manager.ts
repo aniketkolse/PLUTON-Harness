@@ -49,7 +49,7 @@ export interface FileLease {
   id: string
   runId: string
   taskId: string
-  museId: string
+  shipId: string
   path: string
   symbols: string[]
   acquiredAt: string
@@ -59,7 +59,7 @@ export interface FileLease {
 export interface LeaseConflict {
   path: string
   heldByTaskId: string
-  heldByMuseId: string
+  heldByShipId: string
   reason: string
 }
 
@@ -79,7 +79,7 @@ export class FileLeaseManager {
     runId: string,
     taskId: string,
     path: string,
-  ): { conflicted: boolean; heldByTaskId?: string; heldByMuseId?: string; reason?: string } {
+  ): { conflicted: boolean; heldByTaskId?: string; heldByShipId?: string; reason?: string } {
     const norm = this.normalize(path)
     const isDep = isDependencyOrLockfile(norm)
 
@@ -92,8 +92,8 @@ export class FileLeaseManager {
         return {
           conflicted: true,
           heldByTaskId: lease.taskId,
-          heldByMuseId: lease.museId,
-          reason: `file '${norm}' is actively held by task ${lease.taskId} (${lease.museId})`,
+          heldByShipId: lease.shipId,
+          reason: `file '${norm}' is actively held by task ${lease.taskId} (${lease.shipId})`,
         }
       }
 
@@ -102,8 +102,8 @@ export class FileLeaseManager {
         return {
           conflicted: true,
           heldByTaskId: lease.taskId,
-          heldByMuseId: lease.museId,
-          reason: `concurrent dependency-file modification rejected: held by task ${lease.taskId} (${lease.museId}) on '${lease.path}'`,
+          heldByShipId: lease.shipId,
+          reason: `concurrent dependency-file modification rejected: held by task ${lease.taskId} (${lease.shipId}) on '${lease.path}'`,
         }
       }
     }
@@ -114,7 +114,7 @@ export class FileLeaseManager {
   declareScope(
     runId: string,
     taskId: string,
-    museId: string,
+    shipId: string,
     paths: string[],
     symbols?: Record<string, string[]>,
   ): DeclareScopeResult {
@@ -127,7 +127,7 @@ export class FileLeaseManager {
         conflicts.push({
           path: p,
           heldByTaskId: check.heldByTaskId!,
-          heldByMuseId: check.heldByMuseId!,
+          heldByShipId: check.heldByShipId!,
           reason: check.reason!,
         })
       }
@@ -159,7 +159,7 @@ export class FileLeaseManager {
           id: newId('attempt'),
           runId,
           taskId,
-          museId,
+          shipId,
           path: p,
           symbols: syms,
           acquiredAt: now,

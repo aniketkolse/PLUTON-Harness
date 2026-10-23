@@ -44,6 +44,16 @@ function createTestSetup(): { store: Store; runId: string; task1Id: string; task
         },
       },
       git: { protected_paths: [], require_approval_for_main_branch_integration: false },
+      ships: {
+        worker: {
+          display_name: 'Worker',
+          role: 'coder' as const,
+          engine: 'mock',
+          model: 'mock/model',
+          workspace_policy: 'isolated-task-checkout' as const,
+          approval_mode: 'autonomous-bounded' as const,
+        },
+      },
       muses: {
         worker: {
           display_name: 'Worker',

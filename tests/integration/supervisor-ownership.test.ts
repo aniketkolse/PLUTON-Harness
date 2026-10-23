@@ -187,10 +187,11 @@ class ControlledEngineAdapter implements EngineAdapter {
   startSession(req: StartSessionRequest): Promise<EngineSession> {
     const id = `ctl-session-${String(this.nextId)}`
     this.nextId += 1
-    const record: SessionRecord = { museId: req.muse.id, sessionId: id }
-    const session = new ControlledSession(this, req.muse.id, id)
+    const ship = req.ship ?? req.muse!
+    const record: SessionRecord = { museId: ship.id, sessionId: id }
+    const session = new ControlledSession(this, ship.id, id)
     this.sessionRefs.push({ record, session })
-    if (req.approvals !== undefined && req.approvals !== null) this.channels.set(req.muse.id, req.approvals)
+    if (req.approvals !== undefined && req.approvals !== null) this.channels.set(ship.id, req.approvals)
     return Promise.resolve(session)
   }
 

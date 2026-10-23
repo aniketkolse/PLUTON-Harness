@@ -40,13 +40,30 @@ export function supervisorSettingsFromRuntime(runtime: RuntimeConfig): Superviso
  * (PR-1 / audit gap G1: budgets were configurable nowhere and never applied).
  */
 export function usageBudgetsFromRuntime(runtime: RuntimeConfig): BudgetLimits | undefined {
+  const hasShip = runtime.max_ship_input_tokens !== undefined ||
+    runtime.max_ship_output_tokens !== undefined ||
+    runtime.max_ship_cost_usd !== undefined
+  const hasMuse = runtime.max_muse_input_tokens !== undefined ||
+    runtime.max_muse_output_tokens !== undefined ||
+    runtime.max_muse_cost_usd !== undefined
+
   const limits: BudgetLimits = {
     ...(runtime.max_run_input_tokens !== undefined ? { maxRunInputTokens: runtime.max_run_input_tokens } : {}),
     ...(runtime.max_run_output_tokens !== undefined ? { maxRunOutputTokens: runtime.max_run_output_tokens } : {}),
     ...(runtime.max_run_cost_usd !== undefined ? { maxRunCostUsd: runtime.max_run_cost_usd } : {}),
-    ...(runtime.max_muse_input_tokens !== undefined ? { maxPerMuseInputTokens: runtime.max_muse_input_tokens } : {}),
-    ...(runtime.max_muse_output_tokens !== undefined ? { maxPerMuseOutputTokens: runtime.max_muse_output_tokens } : {}),
-    ...(runtime.max_muse_cost_usd !== undefined ? { maxPerMuseCostUsd: runtime.max_muse_cost_usd } : {}),
+    ...(hasShip
+      ? {
+          ...(runtime.max_ship_input_tokens !== undefined ? { maxPerShipInputTokens: runtime.max_ship_input_tokens } : {}),
+          ...(runtime.max_ship_output_tokens !== undefined ? { maxPerShipOutputTokens: runtime.max_ship_output_tokens } : {}),
+          ...(runtime.max_ship_cost_usd !== undefined ? { maxPerShipCostUsd: runtime.max_ship_cost_usd } : {}),
+        }
+      : hasMuse
+        ? {
+            ...(runtime.max_muse_input_tokens !== undefined ? { maxPerMuseInputTokens: runtime.max_muse_input_tokens } : {}),
+            ...(runtime.max_muse_output_tokens !== undefined ? { maxPerMuseOutputTokens: runtime.max_muse_output_tokens } : {}),
+            ...(runtime.max_muse_cost_usd !== undefined ? { maxPerMuseCostUsd: runtime.max_muse_cost_usd } : {}),
+          }
+        : {}),
   }
   return Object.keys(limits).length > 0 ? limits : undefined
 }
