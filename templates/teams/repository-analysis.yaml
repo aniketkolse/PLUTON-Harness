@@ -22,7 +22,7 @@ sandbox:
     acknowledge_host_network: true
     mode: workspace-write
 
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor
@@ -35,7 +35,7 @@ muses:
   researcher:
     display_name: Researcher
     role: researcher
-    # Replace the model id with one from `pluton muse model list researcher`.
+    # Replace the model id with one from `pluton ship model list researcher`.
     engine: opencode
     model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/researcher.md

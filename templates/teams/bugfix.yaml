@@ -26,7 +26,7 @@ sandbox:
 git:
   require_approval_for_main_branch_integration: true
 
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor

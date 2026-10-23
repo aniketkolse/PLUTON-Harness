@@ -1,6 +1,6 @@
 # Pluton-Harness worker image (ADR-0004, ADR-0005).
 #
-# Minimal, non-root sandbox base for Muse containers: tmux for terminals,
+# Minimal, non-root sandbox base for Ship containers: tmux for terminals,
 # git for task checkouts, and a `sleep infinity` main process so
 # `docker create` + `start` behaves like a long-lived machine.
 #

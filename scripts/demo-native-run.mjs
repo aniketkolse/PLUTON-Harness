@@ -38,7 +38,7 @@ sandbox:
 runtime:
   max_concurrent_workers: 2
   network_policy: open
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor
@@ -55,7 +55,7 @@ muses:
       - task.cancel
       - result.collect
       - diff.inspect
-      - muse.propose_create
+      - ship.propose_create
       - approval.request
       - run.stop
   worker-a:
@@ -130,7 +130,7 @@ const store = new Store(db)
 const tasks = store.listTasks(run.id)
 console.log('\n4. Durable task facts from SQLite store:')
 for (const t of tasks) {
-  console.log(`   - Task ${t.id} (${t.title}): state=${t.state}, assignee=${t.assigneeMuseId}, workspace=${t.workspaceId}`)
+  console.log(`   - Task ${t.id} (${t.title}): state=${t.state}, assignee=${t.assigneeShipId}, workspace=${t.workspaceId}`)
 }
 
 const ws = store.getWorkspace(tasks[0].workspaceId)
@@ -143,7 +143,7 @@ const events = store.listEvents(run.id, { limit: 100 })
 const execEvents = events.filter((e) => e.type.startsWith('execution.'))
 console.log(`\n6. Durable execution events (${execEvents.length} recorded):`)
 for (const e of execEvents.reverse()) {
-  console.log(`   - [${e.type}] muse=${e.museId ?? 'n/a'}: ${JSON.stringify(e.payload)}`)
+  console.log(`   - [${e.type}] ship=${e.shipId ?? 'n/a'}: ${JSON.stringify(e.payload)}`)
 }
 
 db.close()

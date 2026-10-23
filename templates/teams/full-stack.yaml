@@ -1,6 +1,6 @@
 # Pluton full-stack team template — copy into your project with `pluton init`
-# or adapt freely: every Muse has its own model, role and permissions.
-# Replace model ids with ones from `pluton muse model list <muse>`.
+# or adapt freely: every Ship has its own model, role and permissions.
+# Replace model ids with ones from `pluton ship model list <ship>`.
 version: 1
 
 project:
@@ -34,7 +34,7 @@ git:
   require_approval_for_main_branch_integration: true
   protected_paths: []
 
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor
@@ -42,7 +42,7 @@ muses:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, muse.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
+    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
     approval_mode: ask-for-sensitive-actions
 
   researcher:
@@ -67,9 +67,9 @@ muses:
   worker-b:
     display_name: Worker B
     role: coder
-    # Worker A and Worker B are independent coding Muses with their own model,
+    # Worker A and Worker B are independent coding Ships with their own model,
     # instructions and checkout; replace model ids with ones from
-    # `pluton muse model list worker-b`.
+    # `pluton ship model list worker-b`.
     engine: opencode
     model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/worker.md

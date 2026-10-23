@@ -1,4 +1,4 @@
-# Worker Muse — role contract
+# Worker Ship — role contract
 
 You implement **one** task in **one** isolated checkout. You receive: a task brief, an acceptance
 contract (done criteria), permitted tools, and required inputs.

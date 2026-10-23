@@ -1,6 +1,6 @@
 # Pluton full-stack team template — copy into your project with `pluton init`
-# or adapt freely: every Muse may use a different engine and model.
-# Replace model ids with ones from `pluton muse model list <muse>`.
+# or adapt freely: every Ship may use a different engine and model.
+# Replace model ids with ones from `pluton ship model list <ship>`.
 version: 1
 
 project:
@@ -36,7 +36,7 @@ git:
   require_approval_for_main_branch_integration: true
   protected_paths: []
 
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor
@@ -44,7 +44,7 @@ muses:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, muse.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
+    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
     approval_mode: ask-for-sensitive-actions
 
   researcher:
