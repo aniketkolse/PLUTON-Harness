@@ -8,7 +8,7 @@
 
 ## 1. What Pluton is (documented)
 
-From `README.md`: Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent AI coding agents ("Muses"). Pluton is not a coding model: engines do inference, containers provide isolation, tmux provides terminal persistence, Git tracks changes, and a durable local runtime (SQLite) records what was requested, accepted, dispatched, completed, failed, or left uncertain.
+From `README.md`: Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent AI coding agents ("Ships"). Pluton is not a coding model: engines do inference, containers provide isolation, tmux provides terminal persistence, Git tracks changes, and a durable local runtime (SQLite) records what was requested, accepted, dispatched, completed, failed, or left uncertain.
 
 The preserved product rules (from the mission's conversation history and `PLUTON_TUI_REFINEMENT_PROMPT.md` line 15) are:
 
@@ -23,9 +23,9 @@ There is no daemon, no service container, and no plugin lifecycle today (verifie
 | Path | What runs there |
 |---|---|
 | `src/cli/main.ts` (46.8 KB) | Commander-based CLI; ~14 command groups; every command that needs state goes through `bootstrapStore` |
-| `src/bootstrap.ts:23` | `bootstrapStore`: ensure `.pluton/state` → open SQLite → migrate → ensure project row → mirror config muses into `muses` (disabled, not deleted, when removed from config) |
-| `src/cli/commands/run.ts:240` | `createRunSupervisor`: builds the long-lived `RunSupervisor` for `pluton run` (in-process manager bridge + HTTP bridge registered per Muse/task with bearer tokens) |
-| `src/orchestrator/supervisor.ts:170` | `RunSupervisor`: the manager session, dispatch loop, per-Muse locking, engine sessions, outcome mapping, retries, verification hand-off |
+| `src/bootstrap.ts:23` | `bootstrapStore`: ensure `.pluton/state` → open SQLite → migrate → ensure project row → mirror config ships into `ships` (disabled, not deleted, when removed from config) |
+| `src/cli/commands/run.ts:240` | `createRunSupervisor`: builds the long-lived `RunSupervisor` for `pluton run` (in-process manager bridge + HTTP bridge registered per Ship/task with bearer tokens) |
+| `src/orchestrator/supervisor.ts:170` | `RunSupervisor`: the manager session, dispatch loop, per-Ship locking, engine sessions, outcome mapping, retries, verification hand-off |
 | `src/chat/session.ts` (35.4 KB) | `ChatSession`: interactive operator TUI loop, streaming turns, background run polling (`runPollTick`), approvals inbox, slash commands |
 | `src/engines/registry.ts:52` | Engine registry: a simple `Map` of factories (`opencode`, `mock` devOnly) — the closest thing to a service registry that exists |
 
@@ -42,10 +42,10 @@ Composition is static and config-driven: one `pluton.yaml` per project, validate
 | `src/orchestrator/` | 8 | Supervisor, task-graph admission, wakeups, circuit breaker, keyed mutex, file-lease manager, usage ledger, run-setup mapping |
 | `src/engines/` | 3 + acp(5) + contract(2) + opencode(3) + mock | Engine contract, ACP stdio client, adapters, docker-exec spawn, approval-mode mapping, discovery |
 | `src/tools/` | 6 | Restricted tool catalog + handlers, authorization bridge, MCP stdio server, HTTP transport, operator tool catalog |
-| `src/sandbox/` | 6 | Docker lifecycle, worker image build/probe, Muse containers, factory, ack-gated local-process path |
+| `src/sandbox/` | 6 | Docker lifecycle, worker image build/probe, Ship containers, factory, ack-gated local-process path |
 | `src/server/` | 8 | Local workspace app server (loopback + workspace-token gate): SPA assets, HTTP routes, SSE log-watcher, instance discovery/lifecycle |
 | `src/workspace/` | 2 | Per-task/integration git checkouts; protected paths |
-| `src/terminal/` | 4 | Per-Muse tmux session management inside containers; `attach` resolution |
+| `src/terminal/` | 4 | Per-Ship tmux session management inside containers; `attach` resolution |
 | `src/verify/` | 2 | Configured verification checks, verdict logic, independent-review helpers |
 | `src/chat/` | 3 | Slash-command registry, prompt text, the chat session loop |
 | `src/plan/` | 1 | `PlanManager` (plan-mode workflow) |
@@ -58,7 +58,7 @@ Tests: 128-file default suite (90 unit, 30 integration, 7 focused, 1 E2E) plus a
 
 One database per project at `<project>/.pluton/state/pluton.sqlite` (WAL; `db.ts` sets `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=NORMAL`; transactions are explicit `BEGIN IMMEDIATE`). Migrations are forward-only; a newer schema is refused, never downgraded (`migrations.ts` header; ADR-0002).
 
-Tables (declared in `src/store/migrations.ts`): `projects`, `muses`, `runs`, `tasks`, `task_edges`, `events`, `receipts`, `workspaces`, `sandboxes`, `terminals`, `approvals`, `verification_checks`, `meta`, `chat_sessions`, `chat_messages`, `plans`, `file_leases`, `run_usage`, `verifications`.
+Tables (declared in `src/store/migrations.ts`): `projects`, `ships` (renamed from `muses` by migration v8), `runs`, `tasks`, `task_edges`, `events`, `receipts`, `workspaces`, `sandboxes`, `terminals`, `approvals`, `verification_checks`, `meta`, `chat_sessions`, `chat_messages`, `plans`, `file_leases`, `run_usage`, `verifications`.
 
 Schema v7 (`run-supervisor-ownership`, `migrations.ts:327–336`) adds the run-ownership pair to `runs`: `supervisor_token` (opaque fencing token; NULL = unowned) and `supervisor_heartbeat_at` (epoch-ms of the last renew; NULL = unowned — legacy rows read as claimable, and a token with a NULL heartbeat counts as stale). `supervisor_pid` (v1) stays as observability. The claim is one atomic statement: `claimRunSupervisor(runId, { pid, ttlMs, nowMs? })` mutates only while the row is unowned or its heartbeat is at or before `now − ttl`, and fails closed (`null`) on a live owner; `renewRunSupervisor` (heartbeat CAS) and `releaseRunSupervisor` (clear CAS) both match on the token, so an old owner can never renew or release the new owner's claim (`store.ts:456–493`). Run-owned mutating store methods take an optional trailing `SupervisorFence { runId, token }` that the same statement re-checks — a stale process's write is rejected (`OwnershipLostError`) or skipped by contract (the throw/silent-skip matrix is in §5).
 
@@ -67,8 +67,8 @@ Key records (`src/domain/models.ts`):
 - **Events** are append-only with a monotonic global sequence (`events.seq` = SQLite AUTOINCREMENT); payloads are bounded and redacted; read via `eventsSince(projectId, afterSeq)` / `listEvents(runId)` (`store.ts:984–1051`).
 - **Receipts** (`request_receipts` semantics) make every request idempotent: same id + same payload returns the stored receipt; same id + different payload is a `request_conflict` (`Store.admitRequest`, `store.ts:1292`).
 - **Approvals** are durable records with `pending|approved|denied|expired`, TTL sweep, and fail-closed expiry (`store.ts:782–984`).
-- **Usage** rows per (run, muse, task) with `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd` (`store.ts:1423–1492`).
-- **File leases** for scope declarations across concurrent Muses (`file_leases` + `FileLeaseManager`).
+- **Usage** rows per (run, ship, task) with `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd` (`store.ts:1423–1492`).
+- **File leases** for scope declarations across concurrent Ships (`file_leases` + `FileLeaseManager`).
 - **Chat** sessions/messages with per-session monotonic sequence; **plans** for plan-mode; **verifications** evidence rows.
 
 ## 5. Execution model
@@ -77,13 +77,13 @@ Task state machine (`src/domain/state.ts`): `created → queued → admitted →
 
 `RunSupervisor` flow (verified in `src/orchestrator/supervisor.ts:279–560`):
 
-1. Manager session prompts the manager Muse with the restricted tool bridge (via HTTP MCP spec).
-2. Dispatch loop takes `listReadyTasks` up to `maxConcurrentWorkers`, per-Muse serialization via `KeyedMutex`, and stops dispatch while the circuit breaker is tripped.
+1. Manager session prompts the manager Ship with the restricted tool bridge (via HTTP MCP spec).
+2. Dispatch loop takes `listReadyTasks` up to `maxConcurrentWorkers`, per-Ship serialization via `KeyedMutex`, and stops dispatch while the circuit breaker is tripped.
 3. A task with `isolated-task-checkout` gets a per-task `git clone --local` checkout (`src/workspace/manager.ts`), recorded in `workspaces`.
-4. Engine session via `adapterFor(muse)`; prompt has a hard wall-clock timeout (`runPrompt`); timeout maps to outcome `unknown` with `prompt_timeout` — never a fabricated success.
+4. Engine session via `adapterFor(ship)`; prompt has a hard wall-clock timeout (`runPrompt`); timeout maps to outcome `unknown` with `prompt_timeout` — never a fabricated success.
 5. Outcomes: `success` → `verifying` when verification checks exist, else `completed`; `failure` → circuit-breaker decision → retry (new attempt, `task.retry_scheduled`) or fail; `cancelled` → `cancelled`; `unknown` → `unknown_outcome`. Every transition appends an event and notifies waiters exactly once (`wakeups.ts`). In the verification path, a run containing any cancelled task finalizes `failed` with an explicit count of cancelled tasks. `task.cancel` also cancels not-yet-terminal dependents transitively (`task.cancelled_by_dependency`), because a dependent can never become ready after its prerequisite is cancelled; direct cancellation still emits `task.cancelled_by_tool`.
 6. `scope.declare`/`scope.release` map to file leases; leases are released in a `finally` block on task exit.
-7. Usage events (`inputTokens`/`outputTokens`/`costUsd`) are absorbed by `UsageLedger.record`; overrun triggers `session.interrupt()` (`supervisor.ts:473–486`). Budgets are **opt-in**: `runtime.max_run_input_tokens` / `max_run_output_tokens` / `max_run_cost_usd` and the per-Muse caps (`src/config/schema.ts:73–82`) map through `usageBudgetsFromRuntime` (`src/orchestrator/run-setup.ts:42–52`) into the ledger when configured (`run.ts:330,350`) — absent limits mean no limit (`supervisor.ts:347`). See the parity doc gap table.
+7. Usage events (`inputTokens`/`outputTokens`/`costUsd`) are absorbed by `UsageLedger.record`; overrun triggers `session.interrupt()` (`supervisor.ts:473–486`). Budgets are **opt-in**: `runtime.max_run_input_tokens` / `max_run_output_tokens` / `max_run_cost_usd` and the per-Ship caps (`src/config/schema.ts:73–82`) map through `usageBudgetsFromRuntime` (`src/orchestrator/run-setup.ts:42–52`) into the ledger when configured (`run.ts:330,350`) — absent limits mean no limit (`supervisor.ts:347`). See the parity doc gap table.
 8. `pluton verify` runs configured checks (argv-only, allow-listed, bounded) and closes tasks/runs only from durable verdicts (`src/verify/runner.ts`).
 
 **Supervisor ownership.** `runToCompletion()` claims the run before its first state write (`supervisor.ts:1121–1149`): the claim is atomic, so a live owner makes a second supervisor throw `ConflictError` naming the holder pid (`details.supervisorPid`; the CLI refuses cleanly, HTTP maps the code to 409 — `routes.ts:574–577`). The claim is renewed on an `ownershipTtlMs / 3` throttle (default `DEFAULT_OWNERSHIP_TTL_MS = 90_000`), and every loop tick (≤ `loopPollMs`) also fast-checks the durable token, so detection is tick-bounded while correctness is write-time: the supervisor's duty-path mutations carry `SupervisorFence { runId, token }` and their single SQL statement re-checks the token (reads stay unfenced; the one deliberately unfenced write is `run.started`, appended immediately after the claim-scoped `created → active` transition (one synchronous span with the fenced write, so no takeover can interleave before the heartbeat ages past the TTL)). Fence miss → **throw** `OwnershipLostError` (`ownership_lost`) for `setTaskState`, `setTaskStateIf`, `setRunState`, `appendEvent`, `createApproval`, `createWorkspace`, `updateWorkspace`; **silent skip** (best-effort by contract — must not throw from `finally`/engine pumps) for `recordLease`, `releaseLeasesForTask`, `reapOrphanedLeases`, `recordUsage`. State transitions are additionally CAS-protected on the pre-read state: `setTaskState`/`setRunState` repeat the expected `state` in the UPDATE's `WHERE`, so a control-plane write that commits between the read and the write (e.g. a cancel) is never resurrected — the loser gets a `StateTransitionError` naming the concurrent change, while a stale owner is classified fence-first as `OwnershipLostError`. Channel teardown writes (approval `abort`/expiry in `src/engines/interactive-approval.ts`) are deliberately best-effort **unfenced**: they are scoped to approvals the losing process itself created and they fail closed (expiry/abort resolve `deny`). On loss (fast-check mismatch, failed renew, or any fence miss) the supervisor marks itself stale, interrupts its manager + task engine sessions, and returns the read-only `superseded` outcome — **no finalize, no events, no drain, no release**; ownership changes are durable events (`run.supervisor_claimed { pid, tookOver, previousPid? }`), and every normal finish appends `run.supervisor_released` then releases in `finally`. Explicit boundary: control-plane writers (tool handlers, HTTP routes, CLI commands, chat) stay **unfenced by design** — they are state-driven and the supervisor reacts to them; on ownership loss the stale owner's already-armed engines are interrupted. Limitations: a hard-wedged owner cannot stop itself (its writes are fenced, but its engine children may linger until the process is killed), and the guarantee is atomic per statement through one local SQLite file, not a distributed protocol.
@@ -97,30 +97,30 @@ Restart behavior: state is durable, but there is no automatic re-dispatch; the r
 - Adapters: `opencode` (live-verified v2.0.29; model pinning, `session/load` resume, approvals, usage) and `mock` (tests/dev only). Fixture-replay conformance suites in `tests/unit` and `tests/fixtures/`. OpenCode is the only supported real engine; Qwen Code support was removed in the OpenCode-only migration.
 - Native mode (default): `src/execution/native.ts` spawns host engine processes with realpath-checked cwd boundaries, explicit env allowlisting, byte-bounded output, process-tree termination and durable `execution.*` events; `src/execution/adapter.ts` wraps engine adapters so discovery/auth stay on the host while process creation is policy-gated.
 - Container mode (legacy opt-in): `docker-exec.ts` spawns the engine through `docker exec -i`, passes env by `-e NAME` only (values never enter argv), rewrites host paths to container paths; the worker image pins engine versions (`sandbox/image.ts`, `PLUTON_ENGINES=1` build profile gates container dispatch).
-- Approval mapping (`src/engines/approval.ts`): Muse `approval_mode` maps to an engine permission policy. `autonomous-bounded` is always fail-closed `deny` for OpenCode (there is no engine-side auto mode, even in a proven isolated checkout); ask-* modes use the interactive operator channel (`src/engines/interactive-approval.ts`), which mints a durable approval per request (TUI inbox / SPA banner) and resolves fail-closed `deny` when no decision can be recorded. A denied action does not stall the turn, so a task can still record a syntactically "successful" no-op; denials are visible as `approval.engine_decision` events and an empty diff.
+- Approval mapping (`src/engines/approval.ts`): Ship `approval_mode` maps to an engine permission policy. `autonomous-bounded` is always fail-closed `deny` for OpenCode (there is no engine-side auto mode, even in a proven isolated checkout); ask-* modes use the interactive operator channel (`src/engines/interactive-approval.ts`), which mints a durable approval per request (TUI inbox / SPA banner) and resolves fail-closed `deny` when no decision can be recorded. A denied action does not stall the turn, so a task can still record a syntactically "successful" no-op; denials are visible as `approval.engine_decision` events and an empty diff.
 
 ## 7. Tool bridge and security boundaries
 
-- Restricted catalog (`src/tools/catalog.ts`): 13 tools — `task.create`, `task.delegate`, `task.inspect`, `task.wait`, `task.get_result`, `task.cancel`, `scope.declare`, `scope.release`, `muse.propose_create`, `approval.request`, `diff.inspect`, `project.read`, `run.stop`. Each has a strict Zod schema, one authorizing permission, and a mutating flag; JSON Schemas are exported for MCP `tools/list`.
+- Restricted catalog (`src/tools/catalog.ts`): 13 tools — `task.create`, `task.delegate`, `task.inspect`, `task.wait`, `task.get_result`, `task.cancel`, `scope.declare`, `scope.release`, `ship.propose_create` (legacy alias `muse.propose_create` accepted), `approval.request`, `diff.inspect`, `project.read`, `run.stop`. Each has a strict Zod schema, one authorizing permission, and a mutating flag; JSON Schemas are exported for MCP `tools/list`.
 - Per-call authorization (`src/tools/bridge.ts`): caller identity, permission, run graph state, budgets, pending-approval caps, path containment (realpath-checked), dependency/lockfile rules, terminal-delegation rejection.
 - Transports: MCP stdio server (`mcp-server.ts`, protocol 2024-11-05; `pluton mcp serve`) and an HTTP transport with per-session bearer tokens (`http-transport.ts`); containerized engines reach it via the host gateway, while native engines use a loopback-only binding.
 - Operator (chat) tools (`src/tools/operator-catalog.ts`): `project.status`, `run.list`, `run.get`, `run.start`, `approvals.list` (per ROADMAP §chat slice).
 - Sandbox (`src/sandbox/`): non-root, `--cap-drop ALL`, `no-new-privileges`, CPU/memory/PID limits, bounded noexec tmpfs, mount allowlist, env allowlist, Pluton-owned labels, label-guarded stop; Docker unavailable fails closed with the exact fix. `network_policy: restricted` is a bridge with DNS, **not an egress filter** (documented in `docs/SECURITY.md` / ADR-0004).
 - Workspaces: per-task clones under `.pluton/workspaces/`; the user's tree is never merged into; integration goes to `pluton/integration/<run>` (never main) with a protected-path approval gate (`src/workspace/`, ADR-0009).
-- Terminals: Docker mode uses one tmux session per Muse inside its container and resolves the exact `docker exec -it` argv; native mode uses host tmux (`src/terminal/native.ts`) and returns `tmux attach-session` argv, failing closed with an actionable error when host tmux is absent.
+- Terminals: Docker mode uses one tmux session per Ship inside its container and resolves the exact `docker exec -it` argv; native mode uses host tmux (`src/terminal/native.ts`) and returns `tmux attach-session` argv, failing closed with an actionable error when host tmux is absent.
 
 ## 8. Presentation layer (TUI 2.0)
 
 Per ADR-0013 (Accepted 2026-10-18) and `docs/tui-refinement-report.md`:
 
-- `src/tui/` primitives: alternate-screen lifecycle, responsive layout engine (two-column ≥120×30, inspector toggle, small-terminal warning), theme tokens (muted violet `\x1b[38;5;141m` + cool cyan), zero-dependency markdown/code formatting, ANSI sanitization of untrusted output, tool-activity lines with durations, boxed approval cards (`[A]`/`[D]`/`[V]`), orchestra inspector (Muses, task graph, approvals, recent events).
+- `src/tui/` primitives: alternate-screen lifecycle, responsive layout engine (two-column ≥120×30, inspector toggle, small-terminal warning), theme tokens (muted violet `\x1b[38;5;141m` + cool cyan), zero-dependency markdown/code formatting, ANSI sanitization of untrusted output, tool-activity lines with durations, boxed approval cards (`[A]`/`[D]`/`[V]`), orchestra inspector (Ships, task graph, approvals, recent events).
 - `src/ui/` components: brand banner, header, transcript messages, result cards with diff coloring, tool cards, status bar, input box, approval card, theme, demo mode.
 - 19 slash commands (`/help /status /runs /run /cancel /plan /sessions /doctor /permissions /models /model /approvals /approve /deny /new /inspector /clear /exit /quit`) with autocomplete and Levenshtein suggestions (`src/chat/commands.ts`).
 - **Known deviation (verified):** the status bar computes context utilization and cost from hardcoded constants — `DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000` and `DEFAULT_COST_PER_MILLION_TOKENS = 2.0` (`src/chat/session.ts:71–72, 1045–1050`) — i.e. a displayed cost that no engine reported. This conflicts with the project's own "never fabricate" / honest-status conventions.
 
 ## 9. Interfaces today
 
-CLI (all with `--json` envelopes): `init`, `doctor`, `muse` (list/show/create/edit, `model list`, `chat`), `engine list`, `sandbox` (probe/build-image), `status`, `task` (list/show), `graph`, `mcp serve`, `run`, `verify`, `chat`, `attach`, `integrate`, `approvals` (list/approve/deny).
+CLI (all with `--json` envelopes): `init`, `doctor`, `ship` (list/show/create/edit, `model list`, `chat`; `muse` is a deprecated alias), `engine list`, `sandbox` (probe/build-image), `status`, `task` (list/show), `graph`, `mcp serve`, `run`, `verify`, `chat`, `attach`, `integrate`, `approvals` (list/approve/deny).
 
 Machine interfaces: the MCP tool bridge (engine-facing), the CLI JSON envelopes, and the local workspace app server (`src/server/`; launched by `pluton`/`pluton --browser`, managed with `--headless --detach`, `--status`, `--stop`). The server is loopback- and workspace-token-gated and serves the SPA plus best-effort live deltas derived from the durable log (`log-watcher.ts`); the durable event log stays the source of truth — see L11. There is **no SDK and no API gateway** (consistent with README positioning).
 
@@ -128,7 +128,7 @@ Machine interfaces: the MCP tool bridge (engine-facing), the CLI JSON envelopes,
 
 - `npm run check` = `tsc -p tsconfig.json` + `vitest run`; baseline 2026-10-18: typecheck exit 0, 89 files / 762 tests passed (`docs/PLUTON_BASELINE_REPORT.md`).
 - Gated Docker E2E (`PLUTON_E2E_DOCKER=1 npm run test:e2e`): 5/5 passed on this host (2026-10-18), skips cleanly without a daemon/image.
-- Opt-in live engine suite (`PLUTON_LIVE_OPENCODE=1` with `npm run test:live`) — NOT RUN in this audit unless recorded otherwise (per-Muse engine auth not configured).
+- Opt-in live engine suite (`PLUTON_LIVE_OPENCODE=1` with `npm run test:live`) — NOT RUN in this audit unless recorded otherwise (per-Ship engine auth not configured).
 - Honesty conventions: README status banner, ADRs with statuses, `docs/ROADMAP.md` as the live status surface, "NOT RUN with a reproducible command" reporting.
 
 ## 11. Known limitations (verified, current)

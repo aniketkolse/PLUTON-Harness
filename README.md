@@ -3,7 +3,7 @@
 **Plan → Delegate → Execute → Verify → Deliver.**
 
 Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent
-AI coding agent identities — *Muses*. Each Muse has its own model, role instructions, permissions,
+AI coding agent identities — *Ships*. Each Ship has its own model, role instructions, permissions,
 workspace policy, resource limits and a persistent tmux terminal.
 Pluton is not a coding model: OpenCode does inference, native process policies (or optional containers)
 provide execution isolation, tmux provides terminal persistence, Git tracks changes, and a durable local
@@ -22,7 +22,7 @@ provides the missing control plane for local multi-agent development:
 
 - **CLI-first** — the terminal is the command center; every suitable command supports `--json`
   for automation. No web UI is required for anything.
-- **Per-Muse model and role configuration** — every Muse is configured independently and model
+- **Per-Ship model and role configuration** — every Ship is configured independently and model
   choices are validated against OpenCode's real capabilities. There is no global model switch.
 - **Durable task truth** — SQLite-backed runs, tasks, dependency edges, receipts, events and
   approvals; request idempotency; explicit `unknown_outcome` instead of blind replay.
@@ -37,7 +37,7 @@ provides the missing control plane for local multi-agent development:
 |---|---|
 | Node.js ≥ 24 | local daemon + CLI; uses the built-in `node:sqlite` |
 | Git ≥ 2.40 | checkout isolation and diff capture |
-| An engine CLI | OpenCode v2 (`opencode acp` protocol); model auth configured in the Muse's engine home |
+| An engine CLI | OpenCode v2 (`opencode acp` protocol); model auth configured in the Ship's engine home |
 | Docker Desktop *(optional for native)* | required only when using container mode (`sandbox.kind: docker`) |
 | Windows 11 with WSL2 / Linux | tested on Windows 11 and Linux hosts |
 
@@ -88,10 +88,10 @@ pluton --tui                       # launches interactive terminal chat TUI inst
 ```bash
 pluton doctor                      # checks OS/runtime, Git, tmux, engines, config (Docker optional)
 pluton init                        # write pluton.yaml + .pluton/roles in the current project (native default)
-pluton chat [muse]                 # chat with an operator Muse (default: supervisor) or `pluton muse chat <muse>`
-pluton run --goal "Implement auth" # supervised run: the manager Muse plans and delegates (Docker-free)
+pluton chat [ship]                 # chat with an operator Ship (default: supervisor) or `pluton ship chat <ship>`
+pluton run --goal "Implement auth" # supervised run: the manager Ship plans and delegates (Docker-free)
 pluton verify --run <id>           # run the project's verification checks, apply the verdict
-pluton attach <muse>               # live tmux session on host (or container in docker mode)
+pluton attach <ship>               # live tmux session on host (or container in docker mode)
 pluton integrate --run <id>        # merge verified task branches into the integration checkout (never main)
 pluton approvals list              # operator inbox: list/approve/deny pending approvals
 pluton status                      # shows recent runs and task counts from durable state
@@ -124,7 +124,7 @@ Pluton uses a two-tier desktop delivery model with **one shared graphical fronte
 ## Interactive Chat TUI
 
 Pluton includes an interactive chat TUI (zero runtime dependencies, hand-rolled inline renderer).
-Running `pluton` bare in a project (or `pluton chat [muse]`) connects the operator to an operator Muse:
+Running `pluton` bare in a project (or `pluton chat [ship]`) connects the operator to an operator Ship:
 
 - **Keybindings:**
   - `Enter` — send prompt
@@ -150,7 +150,8 @@ Running `pluton` bare in a project (or `pluton chat [muse]`) connects the operat
 
 ## Command families (target surface)
 
-`doctor` · `init` · `project` · `muse` (list/show/create/edit/chat·engine/model) · `chat` · `run` ·
+`doctor` · `init` · `project` · `ship` (list/show/create/edit/chat·engine/model; `muse` is a
+deprecated alias) · `chat` · `run` ·
 `status` · `runs` · `task` (list/show/graph/diff/retry) · `verify` · `integrate` · `attach` ·
 `approvals` (list/approve/deny) · `stop` · `logs` — all with `--json` where meaningful.
 

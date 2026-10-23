@@ -22,7 +22,7 @@ not-yet-published package. There is no team-plan, seat-based, or multi-tenant us
 ## Product Purpose
 
 PLUTON is a CLI-first, local-first orchestration control plane for a team of persistent AI agent
-identities called **Muses**. Each Muse has its own model, role instructions, permissions,
+identities called **Ships**. Each Ship has its own model, role instructions, permissions,
 workspace policy, resource limits, and terminal. Pluton is not a coding model: OpenCode does
 inference, containers provide process isolation, tmux provides terminal persistence, Git tracks
 changes, and a durable local runtime (SQLite) records what was requested, accepted, dispatched,
@@ -36,9 +36,9 @@ with an auditable record of every step, including the steps that failed or staye
 
 PLUTON is the control plane around the models, not a model. The mechanism a neighbouring product
 could not truthfully copy is **durable task truth**: request idempotency, explicit
-`unknown_outcome` instead of blind replay, fail-closed operator approvals, write leases per Muse,
+`unknown_outcome` instead of blind replay, fail-closed operator approvals, write leases per Ship,
 and integration that never silently merges into the operator's branch. On top of that, the model
-and role are chosen per Muse and validated against OpenCode's real capabilities — there is no
+and role are chosen per Ship and validated against OpenCode's real capabilities — there is no
 global model switch.
 
 ## Operating Context
@@ -47,7 +47,7 @@ global model switch.
   supported as the daemon host. macOS is untested. Worker terminals live inside Linux containers
   because native PowerShell has no tmux.
 - **Runtime**: Node.js >= 24 (built-in `node:sqlite`), Git >= 2.40 for checkout isolation and diff
-  capture, OpenCode v2 over the ACP stdio protocol with model auth configured in each Muse's
+  capture, OpenCode v2 over the ACP stdio protocol with model auth configured in each Ship's
   private engine home. The deterministic `mock` adapter is for tests/dev only.
 - **State**: one authoritative SQLite database per workspace at `.pluton/state/pluton.sqlite`
   holding runs, tasks, dependency edges, receipts, events, approvals, sessions, and resume tokens.
@@ -92,8 +92,9 @@ global model switch.
 
 All five of the following are binding on future design work.
 
-- **Name and vocabulary**: the product is **PLUTON**; the agent identities are **Muses**. The
-  motto is **Plan → Delegate → Execute → Verify → Deliver**.
+- **Name and vocabulary**: the product is **PLUTON**; the agent identities are **Ships** (the
+  legacy name *Muses* survives only as deprecated aliases for configs, APIs and the `pluton muse`
+  command). The motto is **Plan → Delegate → Execute → Verify → Deliver**.
 - **The maritime motif is the visual signature**: the ship mark in the brand, the anchor in the
   empty state and status bar, the sailboat glyph in the terminal theme. Design work extends this
   motif; it does not replace it.
@@ -113,7 +114,7 @@ All five of the following are binding on future design work.
   (dual desktop and browser application architecture) and ADR-0015 (desktop delivery and packaging).
 - Reverse-engineering and licence-audit reports under `docs/reverse-engineering/`, including the
   reuse register (empty).
-- A working CLI (`doctor`, `init`, `muse`, `chat`, `run`, `verify`, `attach`, `integrate`,
+- A working CLI (`doctor`, `init`, `ship`, `chat`, `run`, `verify`, `attach`, `integrate`,
   `approvals`, `status`) and the graphical workspace server with its embedded single-page app.
 - A vitest unit, integration, and opt-in e2e suite, including a terminal visual-acceptance test.
 - **Absent, and therefore never to be fabricated**: no published package, no pricing, no public
@@ -127,10 +128,10 @@ All five of the following are binding on future design work.
 2. **Nothing lands silently.** Verified work reaches a branch the operator chose. Integration never
    merges into main on its own, and no approval is granted by default.
 3. **Verification decides, not vibes.** Acceptance criteria and configured checks gate whether a
-   run is complete. A Muse's claim that it succeeded is a claim, not a verdict.
+   run is complete. A Ship's claim that it succeeded is a claim, not a verdict.
 4. **The terminal is sufficient.** The graphical workspace makes the work visible and pleasant; it
    never makes it possible. A feature that only exists in the graphical app is a bug.
-5. **Isolation is real or it is nothing.** Containers, per-Muse permissions, least privilege, and
+5. **Isolation is real or it is nothing.** Containers, per-Ship permissions, least privilege, and
    fail-closed defaults. The honest limitation — tmux is persistence, not a security boundary —
    is stated rather than papered over.
 

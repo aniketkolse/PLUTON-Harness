@@ -1,6 +1,6 @@
 ---
 name: PLUTON — The Bridge
-description: Quiet instrument, loud state. A local-first control plane for a team of persistent AI Muses.
+description: Quiet instrument, loud state. A local-first control plane for a team of persistent AI Ships.
 colors:
   hull-black: "#09080e"
   deck-plate: "#12101b"
@@ -138,7 +138,7 @@ components:
 **Creative North Star: "The Bridge"**
 
 PLUTON is the operator's station on a working vessel. The product is a control plane for a crew of
-persistent AI Muses; the interface is the bridge you stand on while they work. Everything about the
+persistent AI Ships; the interface is the bridge you stand on while they work. Everything about the
 visual language follows from that: instruments that are legible in low light, controls that are
 within reach, and a horizon that stays visible when the work gets loud. The maritime motif in
 PLUTON is not decoration — the ship mark, the anchor, the sailing crew — it is the product's
@@ -232,7 +232,7 @@ equivalent.
 ### Named Rules
 
 **The One Signal Rule.** Signal Violet marks PLUTON itself and nothing else. If a violet element
-is not the product, the current selection, or the current Muse, it does not exist. Status colors
+is not the product, the current selection, or the current Ship, it does not exist. Status colors
 carry state; they never carry identity.
 
 **The Luminous Floor Rule.** The darkest text allowed anywhere is Sea Fog Dim (#8e8a9f) on the
@@ -409,7 +409,7 @@ its children; the chevron rotates 90° when open. A selected file keeps a violet
 
 ### Markdown Tables
 
-A GFM pipe table in a Muse's reply renders as a real table: a 11px uppercase header row on a
+A GFM pipe table in a Ship's reply renders as a real table: a 11px uppercase header row on a
 faint violet wash, 1px `border-soft` row rules, and 12px cell text. The table sits in a
 horizontally scrollable wrapper so a wide comparison never breaks the reading column. Code
 fences and tables are the two things allowed to exceed the 74ch prose measure, because they are

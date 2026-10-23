@@ -27,7 +27,7 @@ In `pluton.yaml`:
 2. Add the `native` configuration block with explicit acknowledgements:
    - `acknowledge_partial_enforcement: true`
    - `acknowledge_host_network: true`
-3. Change `runtime.network_policy` to `open` (and remove any per-Muse `network_policy: restricted` or `none` overrides).
+3. Change `runtime.network_policy` to `open` (and remove any per-Ship `network_policy: restricted` or `none` overrides).
 
 ### Why `runtime.network_policy: open` is Required
 
@@ -62,7 +62,7 @@ sandbox:
     memory_mb: 4096
     cpus: 2
 
-muses:
+ships:
   manager:
     role: supervisor
     engine: opencode
@@ -111,7 +111,7 @@ sandbox:
     terminate_grace_seconds: 2
     max_output_bytes: 1048576
 
-muses:
+ships:
   manager:
     role: supervisor
     engine: opencode
@@ -154,13 +154,13 @@ Migrating to native execution does **not** invalidate or discard any existing pr
 - In native mode, checkouts are created directly on the host filesystem without Docker volume mounts.
 
 ### Engine Homes (`.pluton/engine-homes/`)
-- Cached engine states, authentication tokens, and configuration files under `.pluton/engine-homes/<muse>` are reused directly by native engine processes.
+- Cached engine states, authentication tokens, and configuration files under `.pluton/engine-homes/<ship>` are reused directly by native engine processes.
 
 ---
 
 ## 4. Terminal Handling & Attach
 
-Pluton supports interactive terminal inspection via `pluton attach <muse>` in both Docker and native modes. However, the transport mechanism differs:
+Pluton supports interactive terminal inspection via `pluton attach <ship>` in both Docker and native modes. However, the transport mechanism differs:
 
 ### Docker Mode vs Native Mode Attach
 
@@ -168,7 +168,7 @@ Pluton supports interactive terminal inspection via `pluton attach <muse>` in bo
 |---|---|---|
 | **Tmux Host** | Runs inside the worker Linux container | Runs on the host OS |
 | **Command Spawned** | `docker exec -it <container> tmux attach-session -t =<session>` | `tmux attach-session -t =<session>` |
-| **Container Dependency** | Requires Docker daemon and running Muse container | None; attaches directly to host tmux |
+| **Container Dependency** | Requires Docker daemon and running Ship container | None; attaches directly to host tmux |
 | **Missing Tmux Handling** | Fails if container is stopped or missing | Fails with `TerminalUnavailableError` and install instructions |
 | **Disconnection Safety** | Detaching (`Ctrl-B d`) leaves worker running | Detaching (`Ctrl-B d`) leaves worker running |
 
@@ -201,7 +201,7 @@ After switching to `sandbox.kind: native`, CLI commands adapt to native executio
 | `pluton run` | Spawns worker containers, bridges network via `0.0.0.0` | Spawns host child processes, bridges tool server via `127.0.0.1` |
 | `pluton chat` | Connects to containerized engine via `docker exec` | Connects directly to host engine process via stdio ACP |
 | `pluton attach` | Spawns `docker exec -it` into container tmux | Spawns `tmux attach-session` into host tmux |
-| `pluton approvals` | Provisions specialist container if `muse.create` approved | Configures native session dynamically with zero container calls |
+| `pluton approvals` | Provisions specialist container if `ship.create` approved | Configures native session dynamically with zero container calls |
 
 ---
 
@@ -277,7 +277,7 @@ supported real engine; the deterministic `mock` adapter remains for tests/develo
 
 ### What changed
 
-- `engine: qwen` is no longer accepted by the engine registry. Every Muse must use
+- `engine: qwen` is no longer accepted by the engine registry. Every Ship must use
   `engine: opencode` (or `engine: mock` in an explicitly dev/test configuration).
 - Qwen-specific session modes, `allow_once` approval grants, model-value conversion and
   `QWEN_DIR` state redirection were removed. OpenCode sessions use the same fail-closed policy
@@ -291,14 +291,14 @@ supported real engine; the deterministic `mock` adapter remains for tests/develo
 ### Migration steps
 
 1. In `pluton.yaml`, change every `engine: qwen` to `engine: opencode`.
-2. Replace each Qwen model id with an OpenCode model id. Discover the ids available to a Muse:
+2. Replace each Qwen model id with an OpenCode model id. Discover the ids available to a Ship:
    ```bash
-   pluton muse model list <muse>
+   pluton ship model list <ship>
    # or query the engine directly:
    opencode models --standalone
    ```
    Template examples use `opencode/deepseek-v4.1-flash-free`.
-3. Re-authenticate OpenCode in each Muse's private engine home if the old home only contained
+3. Re-authenticate OpenCode in each Ship's private engine home if the old home only contained
    Qwen credentials. Credentials are never copied between engines.
 4. Remove `PLUTON_QWEN_BIN` from shell profiles/CI and remove Qwen-only `OPENAI_*` /
    `DASHSCOPE_*` variables unless your OpenCode provider actually needs them.

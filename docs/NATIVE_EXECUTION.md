@@ -42,7 +42,7 @@ Pluton adheres to a strict **honesty constraint**: native execution does not cla
 1. **Filesystem confinement**: Host processes run under the operating system account of the current user. They can read or write any file accessible to that user account.
 2. **Network confinement**: Host processes share the host network stack. Pluton cannot isolate network egress without containerization or kernel sandboxing.
 3. **Resource limits**: CPU and memory limits defined in configuration are recorded for planning and diagnostic budgets, but are **not** cgroup-enforced.
-4. **Terminal attach**: Supported via host native `tmux` (`pluton attach <muse>`); requires `tmux` installed on the host OS.
+4. **Terminal attach**: Supported via host native `tmux` (`pluton attach <ship>`); requires `tmux` installed on the host OS.
 
 ---
 
@@ -81,7 +81,7 @@ runtime:
   network_policy: open
   max_concurrent_workers: 2
 
-muses:
+ships:
   manager:
     display_name: Manager
     role: supervisor
@@ -97,7 +97,7 @@ muses:
       - task.cancel
       - result.collect
       - diff.inspect
-      - muse.propose_create
+      - ship.propose_create
       - approval.request
       - run.stop
   worker-a:
@@ -117,7 +117,7 @@ muses:
 If any of the following conditions are violated, Pluton refuses to start:
 - `sandbox.native.acknowledge_partial_enforcement` is `false`: fails with `SandboxUnavailableError`.
 - `sandbox.native.acknowledge_host_network` is `false`: fails with `SandboxUnavailableError`.
-- `runtime.network_policy` (or any Muse's `network_policy`) is `restricted` or `none`: fails with `SandboxUnavailableError` (host processes cannot enforce network boundaries).
+- `runtime.network_policy` (or any Ship's `network_policy`) is `restricted` or `none`: fails with `SandboxUnavailableError` (host processes cannot enforce network boundaries).
 
 ---
 
@@ -130,7 +130,7 @@ If any of the following conditions are violated, Pluton refuses to start:
 | `pluton doctor` | Checks host native execution provider probe and reports `enforcement: partial`. Does not check Docker or worker images. |
 | `pluton sandbox probe` | Probes native provider capabilities: reports `provider: native`, `backend: process-policy`, `enforcement: partial`. |
 | `pluton sandbox build-image` | Rejects with `ValidationError`: native execution runs host engine processes and does not use container images. |
-| `pluton attach` | Attaches to host native tmux session (`=pluton_<proj>_<muse>`); fails closed with `TerminalUnavailableError` if host tmux is not installed. |
+| `pluton attach` | Attaches to host native tmux session (`=pluton_<proj>_<ship>`); fails closed with `TerminalUnavailableError` if host tmux is not installed. |
 
 ---
 

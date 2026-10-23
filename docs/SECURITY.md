@@ -39,7 +39,7 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   host process for every call (`src/tools/handlers.ts`); the engine cannot grant
   itself a permission, and tool names are deliberately not permission names
   (e.g. `task.wait` is gated by `result.collect`).
-- **Identity is fixed at launch.** The caller Muse and task scope are set when
+- **Identity is fixed at launch.** The caller Ship and task scope are set when
   the bridge starts (`src/cli/commands/mcp.ts`) and cannot be changed by tool
   arguments. A task-scoped session that is not the task's assignee fails closed
   with a typed error and exit code 1.
@@ -60,7 +60,7 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   from the handle itself, closing the stat/read TOCTOU window; directory
   listings are capped at 200 entries.
 - `.pluton`, `.git` and `node_modules` are refused areas for every read.
-- **Muses never write into the user's tree.** A Muse with an
+- **Ships never write into the user's tree.** A Ship with an
   isolated-checkout policy works in a `git clone --local` under
   `.pluton/workspaces/` on a `pluton/<run>/<slug>` branch
   (`src/workspace/manager.ts`; ADR-0005). Removal guards refuse to delete
@@ -96,7 +96,7 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   `sandbox.native.acknowledge_host_network: true`, and configures
   `runtime.network_policy: open`.
 - **Docker isolation** (`sandbox.kind: docker` — legacy opt-in container provider; ADR-0004).
-  Each Muse runs in a dedicated Linux container. When the Docker daemon or the
+  Each Ship runs in a dedicated Linux container. When the Docker daemon or the
   worker image is unavailable, Pluton **fails closed** with `SandboxUnavailableError`
   and an exact fix — it never silently degrades to unsandboxed execution.
 - **Local process development mode** (`sandbox.kind: local-process`).
@@ -138,7 +138,7 @@ Stated plainly so nobody over-reads the guarantees above:
 
 1. **Container-mode live evidence is Windows-Docker-Desktop-only.** A host-mode
    live run executed 2026-10-16/17, and a full container-mode live run (engines
-   image, per-Muse containers, `docker exec` spawns, real worker edit closed by
+   image, per-Ship containers, `docker exec` spawns, real worker edit closed by
    the verification gate) executed 2026-10-17 — both in
    `docs/smoke-live-run.md`. That smoke found and fixed one engine-session leak
    (`ba68557`). Linux-host container behavior (mount ownership, uid alignment)
@@ -156,11 +156,12 @@ Stated plainly so nobody over-reads the guarantees above:
 4. **Container hardening is Docker's defaults plus the configured resource
    limits.** No custom seccomp/AppArmor profile, no read-only root filesystem
    guarantee for the worker image beyond what the Dockerfile sets.
-5. **Network policy supports per-Muse overrides and internal network binding.**
+5. **Network policy supports per-Ship overrides and internal network binding.**
    The runtime default is configured in `runtime.network_policy` (`restricted` | `none` | `open`).
-   Individual Muses can override this via `network_policy: 'none' | 'restricted' | 'open'` in `muses.<id>`.
+   Individual Ships can override this via `network_policy: 'none' | 'restricted' | 'open'` in `ships.<id>`
+   (the legacy `muses.<id>` key is accepted as an alias).
    When `restricted`, Pluton binds to `runtime.internal_network_name` when specified (e.g. an egress-filtered
-   or internal Docker bridge), and `--network none` disconnects egress completely for offline Muses.
+   or internal Docker bridge), and `--network none` disconnects egress completely for offline Ships.
 6. **The operator's terminal is trusted.** `pluton attach`-style inspection and
    human commands are not sandboxed against the host.
 7. **Deny lists are conservative blocklists**, not capability systems. They
