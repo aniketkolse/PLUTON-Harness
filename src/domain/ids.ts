@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto'
  */
 export const ID_PREFIXES = [
   'project',
-  'muse',
+  'ship',
   'run',
   'task',
   'attempt',

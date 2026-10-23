@@ -204,7 +204,7 @@ export class ExecutionTimeoutError extends ExecutionError {
   }
 }
 
-/** tmux (or the transport to the Muse container) is unavailable — terminals are an honest gap. */
+/** tmux (or the transport to the Ship container) is unavailable — terminals are an honest gap. */
 export class TerminalUnavailableError extends PlutonError {
   constructor(message: string, options: FixableErrorOptions = {}) {
     super('terminal_unavailable', options.fix ? `${message} Fix: ${options.fix}` : message, options)

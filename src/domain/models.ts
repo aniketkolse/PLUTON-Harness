@@ -7,7 +7,7 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [k: s
 // Identity & roles
 // ---------------------------------------------------------------------------
 
-export const MUSE_ROLES = [
+export const SHIP_ROLES = [
   'supervisor',
   'researcher',
   'coder',
@@ -15,17 +15,25 @@ export const MUSE_ROLES = [
   'reviewer',
   'custom',
 ] as const
-export type MuseRole = (typeof MUSE_ROLES)[number]
+export type ShipRole = (typeof SHIP_ROLES)[number]
+/** @deprecated Use `ShipRole`; kept for backward compatibility. */
+export type MuseRole = ShipRole
+/** @deprecated Use `SHIP_ROLES`; kept for backward compatibility. */
+export const MUSE_ROLES = SHIP_ROLES
 
 /** Canonical five persistent roles for ship workers. */
-export const PERSISTENT_MUSE_ROLES = [
+export const PERSISTENT_SHIP_ROLES = [
   'supervisor',
   'tester',
   'researcher',
   'coder',
   'reviewer',
 ] as const
-export type PersistentMuseRole = (typeof PERSISTENT_MUSE_ROLES)[number]
+export type PersistentShipRole = (typeof PERSISTENT_SHIP_ROLES)[number]
+/** @deprecated Use `PERSISTENT_SHIP_ROLES`; kept for backward compatibility. */
+export const PERSISTENT_MUSE_ROLES = PERSISTENT_SHIP_ROLES
+/** @deprecated Use `PersistentShipRole`; kept for backward compatibility. */
+export type PersistentMuseRole = PersistentShipRole
 
 export const WORKSPACE_POLICIES = [
   'coordinator-read-only',
@@ -34,7 +42,7 @@ export const WORKSPACE_POLICIES = [
 ] as const
 export type WorkspacePolicy = (typeof WORKSPACE_POLICIES)[number]
 
-export const ROLE_DEFAULT_WORKSPACE_POLICIES: Readonly<Record<MuseRole, WorkspacePolicy>> = {
+export const ROLE_DEFAULT_WORKSPACE_POLICIES: Readonly<Record<ShipRole, WorkspacePolicy>> = {
   supervisor: 'coordinator-read-only',
   researcher: 'read-only',
   coder: 'isolated-task-checkout',
@@ -64,12 +72,12 @@ export interface ProjectRecord {
   updatedAt: string
 }
 
-export interface MuseRecord {
+export interface ShipRecord {
   id: string
   projectId: string
   slug: string
   displayName: string
-  role: MuseRole
+  role: ShipRole
   engineKind: string
   /** Exact provider-qualified model id as the engine reports it (never normalized). */
   model: string
@@ -77,12 +85,15 @@ export interface MuseRecord {
   workspacePolicy: WorkspacePolicy
   permissions: string[]
   approvalMode: ApprovalMode
-  /** Relative path under .pluton/engine-homes/ for this Muse's private engine config. */
+  /** Relative path under .pluton/engine-homes/ for this Ship's private engine config. */
   engineHome: string
   enabled: boolean
   createdAt: string
   updatedAt: string
 }
+
+/** @deprecated Use `ShipRecord`; kept for backward compatibility. */
+export type MuseRecord = ShipRecord
 
 export interface RunRecord {
   id: string
@@ -92,8 +103,10 @@ export interface RunRecord {
   requestedBy: string
   state: RunState
   acceptanceCriteria: string[]
-  /** The Manager Muse authorized to coordinate this run. */
-  managerMuseId: string
+  /** The Manager Ship authorized to coordinate this run. */
+  managerShipId: string
+  /** @deprecated Use `managerShipId`; kept for backward compatibility. */
+  managerMuseId?: string
   budget: RunBudget
   /** Supervisor process that owns the live run loop (PID), for stop/status. */
   supervisorPid: number | null
@@ -125,7 +138,9 @@ export interface TaskRecord {
   brief: string
   acceptanceCriteria: string[]
   writeScope?: string[]
-  assigneeMuseId: string | null
+  assigneeShipId: string | null
+  /** @deprecated Use `assigneeShipId`; kept for backward compatibility. */
+  assigneeMuseId?: string | null
   state: TaskState
   attempt: number
   /** Workspace (checkout) id once provisioned. */
@@ -137,8 +152,8 @@ export interface TaskRecord {
   /** Last failure/uncertainty classification, bounded JSON. */
   failure: JsonValue | null
   /**
-   * Bounded JSON snapshot `{museId, role, engine, model}` captured when the task
-   * is claimed, so history survives later muse config edits.
+   * Bounded JSON snapshot `{shipId, role, engine, model}` captured when the task
+   * is claimed, so history survives later Ship config edits.
    */
   assignment: JsonValue | null
   createdAt: string
@@ -158,7 +173,9 @@ export interface WorkspaceRecord {
   projectId: string
   runId: string | null
   taskId: string | null
-  museId: string | null
+  shipId: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   kind: 'task-checkout' | 'integration-checkout'
   path: string
   branch: string
@@ -172,7 +189,9 @@ export interface WorkspaceRecord {
 export interface SandboxRecord {
   id: string
   projectId: string
-  museId: string | null
+  shipId: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   kind: 'docker' | 'local-process'
   containerName: string | null
   containerId: string | null
@@ -186,7 +205,9 @@ export interface SandboxRecord {
 export interface TerminalRecord {
   id: string
   projectId: string
-  museId: string
+  shipId: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
   sandboxId: string | null
   tmuxSessionName: string
   state: 'present' | 'absent' | 'recreated' | 'unknown'
@@ -200,8 +221,8 @@ export type RequestTargetKind =
   | 'task.retry'
   | 'task.cancel'
   | 'run.stop'
-  | 'muse.create'
-  | 'muse.propose-create'
+  | 'ship.create'
+  | 'ship.propose-create'
   | 'approval.decide'
   | 'verification.run'
   | 'integration.apply'
@@ -229,7 +250,9 @@ export interface EventRecord {
   projectId: string
   runId: string | null
   taskId: string | null
-  museId: string | null
+  shipId: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   type: string
   /** Bounded, redacted structured payload. */
   payload: JsonValue
@@ -244,7 +267,9 @@ export interface ApprovalRecord {
   projectId: string
   runId: string | null
   taskId: string | null
-  requestedByMuseId: string | null
+  requestedByShipId: string | null
+  /** @deprecated Use `requestedByShipId`; kept for backward compatibility. */
+  requestedByMuseId?: string | null
   action: string
   reason: string
   /** Bounded JSON scope: what exactly would happen if approved. */
@@ -285,7 +310,9 @@ export type ChatSessionState = (typeof CHAT_SESSION_STATES)[number]
 export interface ChatSessionRecord {
   id: string
   projectId: string
-  museId: string
+  shipId: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
   title: string | null
   state: ChatSessionState
   /** Engine-native session id for resume, when the engine exposes one. */
