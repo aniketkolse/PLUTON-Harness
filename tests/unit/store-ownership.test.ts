@@ -623,8 +623,8 @@ describe('migration v7', () => {
 
     const result = migrate(db)
     expect(result.from).toBe(6)
-    expect(result.to).toBe(7)
-    expect(result.applied).toEqual(['v7:run-supervisor-ownership'])
+    expect(result.to).toBe(8)
+    expect(result.applied).toEqual(['v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology'])
 
     const store = new Store(db)
     const run = store.getRun('run_v6')

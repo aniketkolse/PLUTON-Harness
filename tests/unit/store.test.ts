@@ -90,6 +90,7 @@ describe('migrations', () => {
       'v5:multi-agent-reliability',
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
+      'v8:muse-to-ship-terminology',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -137,14 +138,20 @@ describe('migrations', () => {
       'v5:multi-agent-reliability',
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
+      'v8:muse-to-ship-terminology',
     ])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
     const terminalIds = db.prepare('SELECT id FROM terminals ORDER BY id').all().map((r) => r['id'])
     expect(terminalIds).toEqual(['tm_new'])
     // The index now rejects a duplicate that the v1 schema would have accepted.
+    const insertUpgradedSandbox = db.prepare(
+      `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
+                              created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'docker', NULL, NULL, NULL, 'running', 'legacy', ?, ?)`,
+    )
     expect(() =>
-      insertSandbox.run('sb_dup', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z'),
+      insertUpgradedSandbox.run('sb_dup', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z'),
     ).toThrow(/UNIQUE constraint failed/)
   })
 
@@ -187,8 +194,8 @@ describe('migrations', () => {
     const result = migrate(db)
     expect(result.from).toBe(5)
     expect(result.to).toBe(SCHEMA_VERSION)
-    expect(SCHEMA_VERSION).toBe(7)
-    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership'])
+    expect(SCHEMA_VERSION).toBe(8)
+    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology'])
 
     const store = new Store(db)
     const task = store.getTask('task_v5')
@@ -882,7 +889,7 @@ describe('workspace / sandbox / terminal registry (Phase 5)', () => {
     expect(second.createdBy).toBe('tester')
     expect(second.createdAt).toBe(first.createdAt)
     const count = store.db
-      .prepare('SELECT COUNT(*) AS n FROM sandboxes WHERE project_id = ? AND muse_id IS NULL')
+      .prepare('SELECT COUNT(*) AS n FROM sandboxes WHERE project_id = ? AND ship_id IS NULL')
       .get(projectId)
     expect(count?.['n']).toBe(1)
   })
@@ -909,7 +916,7 @@ describe('workspace / sandbox / terminal registry (Phase 5)', () => {
     expect(second.state).toBe('present')
     expect(second.createdAt).toBe(first.createdAt)
     const count = store.db
-      .prepare('SELECT COUNT(*) AS n FROM terminals WHERE project_id = ? AND muse_id = ?')
+      .prepare('SELECT COUNT(*) AS n FROM terminals WHERE project_id = ? AND ship_id = ?')
       .get(projectId, 'worker-a')
     expect(count?.['n']).toBe(1)
   })
@@ -918,14 +925,14 @@ describe('workspace / sandbox / terminal registry (Phase 5)', () => {
     const { store } = freshStore('sandbox-index')
     const projectId = seedProject(store)
     const createdAt = '2024-01-01T00:00:00.000Z'
-    const rawSandbox = (id: string, museId: string | null): void => {
+    const rawSandbox = (id: string, shipId: string | null): void => {
       store.db
         .prepare(
-          `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
+          `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
                                   created_by, created_at, updated_at)
            VALUES (?, ?, ?, 'docker', NULL, NULL, NULL, 'running', 'raw', ?, ?)`,
         )
-        .run(id, projectId, museId, createdAt, createdAt)
+        .run(id, projectId, shipId, createdAt, createdAt)
     }
     store.upsertSandbox({
       projectId,
@@ -961,7 +968,7 @@ describe('workspace / sandbox / terminal registry (Phase 5)', () => {
     expect(() =>
       store.db
         .prepare(
-          `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+          `INSERT INTO terminals (id, project_id, ship_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
            VALUES ('terminal_dup', ?, 'worker-a', NULL, 'pluton_test_raw', 'absent', ?, ?)`,
         )
         .run(projectId, createdAt, createdAt),

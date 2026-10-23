@@ -72,8 +72,8 @@ describe('chat migrations', () => {
     const db = openDatabase(path)
     openDbs.push(db)
     const result = migrate(db)
-    expect(SCHEMA_VERSION).toBe(7)
-    expect(result.to).toBe(7)
+    expect(SCHEMA_VERSION).toBe(8)
+    expect(result.to).toBe(8)
     expect(result.applied).toEqual([
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
@@ -82,6 +82,7 @@ describe('chat migrations', () => {
       'v5:multi-agent-reliability',
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
+      'v8:muse-to-ship-terminology',
     ])
     const tables = (
       db
@@ -111,6 +112,7 @@ describe('chat sessions', () => {
     expect(created).toEqual({
       id: created.id,
       projectId,
+      shipId: 'operator',
       museId: 'operator',
       title: 'first chat',
       state: 'active',

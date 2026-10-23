@@ -27,7 +27,7 @@ import {
   type ChatSessionState,
   type EventRecord,
   type JsonValue,
-  type MuseRecord,
+  type ShipRecord,
   type ProjectRecord,
   type RequestReceiptRecord,
   type RequestTargetKind,
@@ -131,7 +131,7 @@ export interface NewProjectSpec {
   defaultBranch: string
 }
 
-export interface MuseSyncSpec {
+export interface ShipSyncSpec {
   id: string
   slug: string
   displayName: string
@@ -145,13 +145,18 @@ export interface MuseSyncSpec {
   engineHome: string
 }
 
+/** @deprecated Use `ShipSyncSpec`; kept for backward compatibility. */
+export type MuseSyncSpec = ShipSyncSpec
+
 export interface NewRunSpec {
   projectId: string
   goal: string
   origin: 'cli' | 'api'
   requestedBy: string
   acceptanceCriteria: string[]
-  managerMuseId: string
+  managerShipId?: string
+  /** @deprecated Use `managerShipId`; kept for backward compatibility. */
+  managerMuseId?: string
   budget: RunBudget
 }
 
@@ -162,6 +167,8 @@ export interface NewTaskSpec {
   title: string
   brief: string
   acceptanceCriteria: string[]
+  assigneeShipId?: string | null
+  /** @deprecated Use `assigneeShipId`; kept for backward compatibility. */
   assigneeMuseId?: string | null
   writeScope?: string[]
 }
@@ -170,6 +177,8 @@ export interface AppendEventInput {
   projectId: string
   runId?: string | null
   taskId?: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
   museId?: string | null
   type: string
   payload?: JsonValue
@@ -196,7 +205,9 @@ export interface NewWorkspaceSpec {
   projectId: string
   runId: string | null
   taskId: string | null
-  museId: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   kind: WorkspaceRecord['kind']
   path: string
   branch: string
@@ -216,7 +227,9 @@ export interface NewVerificationCheckSpec {
 
 export interface UpsertSandboxSpec {
   projectId: string
-  museId: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   kind: SandboxRecord['kind']
   containerName: string | null
   containerId: string | null
@@ -227,7 +240,9 @@ export interface UpsertSandboxSpec {
 
 export interface UpsertTerminalSpec {
   projectId: string
-  museId: string
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   sandboxId: string | null
   tmuxSessionName: string
   state: TerminalRecord['state']
@@ -237,7 +252,9 @@ export interface NewApprovalSpec {
   projectId: string
   runId: string | null
   taskId: string | null
-  requestedByMuseId: string | null
+  requestedByShipId?: string | null
+  /** @deprecated Use `requestedByShipId`; kept for backward compatibility. */
+  requestedByMuseId?: string | null
   action: string
   reason: string
   /** Bounded JSON scope: what exactly would happen if approved. */
@@ -299,7 +316,7 @@ export class Store {
     this.db.close()
   }
 
-  // -- project / muses -------------------------------------------------------
+  // -- project / ships -------------------------------------------------------
 
   ensureProject(spec: NewProjectSpec): ProjectRecord {
     const existing = this.db.prepare('SELECT * FROM projects WHERE root_path = ?').get(spec.rootPath) as Row | undefined
@@ -326,29 +343,29 @@ export class Store {
     return row ? rowToProject(row) : null
   }
 
-  listMuses(): MuseRecord[] {
-    return (this.db.prepare('SELECT * FROM muses ORDER BY id').all() as Row[]).map(rowToMuse)
+  listShips(): ShipRecord[] {
+    return (this.db.prepare('SELECT * FROM ships ORDER BY id').all() as Row[]).map(rowToShip)
   }
 
-  getMuse(id: string): MuseRecord | null {
-    const row = this.db.prepare('SELECT * FROM muses WHERE id = ?').get(id) as Row | undefined
-    return row ? rowToMuse(row) : null
+  getShip(id: string): ShipRecord | null {
+    const row = this.db.prepare('SELECT * FROM ships WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToShip(row) : null
   }
 
-  updateMuseModel(id: string, model: string): void {
+  updateShipModel(id: string, model: string): void {
     const now = nowIso()
-    const res = this.db.prepare('UPDATE muses SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
+    const res = this.db.prepare('UPDATE ships SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
     if (res.changes === 0) {
-      throw new NotFoundError('muse', id)
+      throw new NotFoundError('ship', id)
     }
   }
 
-  /** Upsert all configured muses; rows absent from the config are disabled (never deleted). */
-  syncMuses(projectId: string, specs: MuseSyncSpec[]): { upserted: number; disabled: number } {
+  /** Upsert all configured ships; rows absent from the config are disabled (never deleted). */
+  syncShips(projectId: string, specs: ShipSyncSpec[]): { upserted: number; disabled: number } {
     return withTx(this.db, () => {
       const now = nowIso()
       const upsert = this.db.prepare(
-        `INSERT INTO muses (id, project_id, slug, display_name, role, engine_kind, model, instructions_file,
+        `INSERT INTO ships (id, project_id, slug, display_name, role, engine_kind, model, instructions_file,
                             workspace_policy, permissions_json, approval_mode, engine_home, enabled, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
@@ -386,12 +403,12 @@ export class Store {
       }
       let disabled = 0
       if (specs.length === 0) {
-        const r = this.db.prepare('UPDATE muses SET enabled = 0, updated_at = ? WHERE enabled = 1').run(now)
+        const r = this.db.prepare('UPDATE ships SET enabled = 0, updated_at = ? WHERE enabled = 1').run(now)
         disabled = Number(r.changes)
       } else {
         const placeholders = specs.map(() => '?').join(',')
         const r = this.db
-          .prepare(`UPDATE muses SET enabled = 0, updated_at = ? WHERE enabled = 1 AND id NOT IN (${placeholders})`)
+          .prepare(`UPDATE ships SET enabled = 0, updated_at = ? WHERE enabled = 1 AND id NOT IN (${placeholders})`)
           .run(now, ...specs.map((s) => s.id))
         disabled = Number(r.changes)
       }
@@ -399,14 +416,46 @@ export class Store {
     })
   }
 
+  /** @deprecated Use `listShips`; kept for backward compatibility. */
+  listMuses(): ShipRecord[] {
+    return this.listShips()
+  }
+
+  /** @deprecated Use `getShip`; kept for backward compatibility. */
+  getMuse(id: string): ShipRecord | null {
+    return this.getShip(id)
+  }
+
+  /** @deprecated Use `updateShipModel`; kept for backward compatibility. */
+  updateMuseModel(id: string, model: string): void {
+    this.updateShipModel(id, model)
+  }
+
+  /** @deprecated Use `syncShips`; kept for backward compatibility. */
+  syncMuses(projectId: string, specs: ShipSyncSpec[]): { upserted: number; disabled: number } {
+    return this.syncShips(projectId, specs)
+  }
+
+  /** @deprecated Use `getSandboxForShip`; kept for backward compatibility. */
+  getSandboxForMuse(projectId: string, shipId: string | null): SandboxRecord | null {
+    return this.getSandboxForShip(projectId, shipId)
+  }
+
+  /** @deprecated Use `getTerminalForShip`; kept for backward compatibility. */
+  getTerminalForMuse(projectId: string, shipId: string): TerminalRecord | null {
+    return this.getTerminalForShip(projectId, shipId)
+  }
+
   // -- runs ------------------------------------------------------------------
 
   createRun(spec: NewRunSpec): RunRecord {
     const id = newId('run')
     const now = nowIso()
+    const managerShipId = spec.managerShipId ?? spec.managerMuseId
+    if (!managerShipId) throw new ValidationError('run requires managerShipId')
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json, manager_muse_id,
+        `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json, manager_ship_id,
                            budget_json, supervisor_pid, created_at, started_at, completed_at, final_summary)
          VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, NULL, NULL, NULL)`,
       )
@@ -417,7 +466,7 @@ export class Store {
         spec.origin,
         spec.requestedBy,
         stringifyJson(spec.acceptanceCriteria),
-        spec.managerMuseId,
+        managerShipId,
         stringifyJson(spec.budget),
         now,
       )
@@ -557,11 +606,12 @@ export class Store {
     }
     const id = spec.id ?? newId('task')
     const now = nowIso()
+    const assigneeShipId = spec.assigneeShipId !== undefined ? spec.assigneeShipId : (spec.assigneeMuseId ?? null)
     try {
       this.db
         .prepare(
           `INSERT INTO tasks (id, run_id, parent_task_id, root_task_id, depth, title, brief, acceptance_json,
-                              write_scope_json, assignee_muse_id, state, attempt, workspace_id, engine_session_id,
+                              write_scope_json, assignee_ship_id, state, attempt, workspace_id, engine_session_id,
                               result_json, failure_json, created_at, started_at, completed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', 0, NULL, NULL, NULL, NULL, ?, NULL, NULL)`,
         )
@@ -575,7 +625,7 @@ export class Store {
           spec.brief,
           stringifyJson(spec.acceptanceCriteria),
           stringifyJson(spec.writeScope ?? []),
-          spec.assigneeMuseId ?? null,
+          assigneeShipId,
           now,
         )
     } catch (e) {
@@ -754,11 +804,12 @@ export class Store {
     const id = newId('workspace')
     const now = nowIso()
     const guard = fence ? fenceClause(fence) : null
+    const shipId = spec.shipId !== undefined ? spec.shipId : (spec.museId ?? null)
     // INSERT ... SELECT + fence: zero rows inserted is a missed fence (the
     // columns always carry a value), never a legitimate no-op.
     const res = this.db
       .prepare(
-        `INSERT INTO workspaces (id, project_id, run_id, task_id, muse_id, kind, path, branch, base_commit,
+        `INSERT INTO workspaces (id, project_id, run_id, task_id, ship_id, kind, path, branch, base_commit,
                                  head_commit, state, created_at, updated_at)
          ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`}`,
       )
@@ -767,7 +818,7 @@ export class Store {
         spec.projectId,
         spec.runId,
         spec.taskId,
-        spec.museId,
+        shipId,
         spec.kind,
         spec.path,
         spec.branch,
@@ -832,23 +883,24 @@ export class Store {
     return this.getWorkspace(id)
   }
 
-  // -- sandboxes (one long-lived container per Muse, ADR-0004) --------------
+  // -- sandboxes (one long-lived container per Ship, ADR-0004) --------------
 
   /**
-   * One sandbox row per (project, muse), re-upserting keeps the same record id.
-   * Backed by the NULL-safe unique index `idx_sandboxes_project_muse` (v2): the
+   * One sandbox row per (project, ship), re-upserting keeps the same record id.
+   * Backed by the NULL-safe unique index `idx_sandboxes_project_ship` (v2, renamed from `idx_sandboxes_project_muse` in v8): the
    * insert and the conflicting update are one atomic statement, so two
    * concurrent writers cannot both insert — the loser updates the winner's row
    * (excluded.id is never assigned, so id/created_by/created_at stay stable).
    */
   upsertSandbox(spec: UpsertSandboxSpec): SandboxRecord {
     const now = nowIso()
+    const shipId = spec.shipId !== undefined ? spec.shipId : (spec.museId ?? null)
     this.db
       .prepare(
-        `INSERT INTO sandboxes (id, project_id, muse_id, kind, container_name, container_id, image, state,
+        `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
                                 created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, IFNULL(muse_id,'')) DO UPDATE SET
+         ON CONFLICT(project_id, IFNULL(ship_id,'')) DO UPDATE SET
            kind = excluded.kind,
            container_name = excluded.container_name,
            container_id = excluded.container_id,
@@ -859,7 +911,7 @@ export class Store {
       .run(
         newId('sandbox'),
         spec.projectId,
-        spec.museId,
+        shipId,
         spec.kind,
         spec.containerName,
         spec.containerId,
@@ -869,7 +921,7 @@ export class Store {
         now,
         now,
       )
-    const saved = this.getSandboxForMuse(spec.projectId, spec.museId)
+    const saved = this.getSandboxForShip(spec.projectId, shipId)
     if (!saved) throw new InternalError('sandbox row disappeared inside upsert')
     return saved
   }
@@ -885,10 +937,10 @@ export class Store {
     return row ? rowToSandbox(row) : null
   }
 
-  getSandboxForMuse(projectId: string, museId: string | null): SandboxRecord | null {
+  getSandboxForShip(projectId: string, shipId: string | null): SandboxRecord | null {
     const row = this.db
-      .prepare('SELECT * FROM sandboxes WHERE project_id = ? AND muse_id IS ? ORDER BY created_at DESC LIMIT 1')
-      .get(projectId, museId) as Row | undefined
+      .prepare('SELECT * FROM sandboxes WHERE project_id = ? AND ship_id IS ? ORDER BY created_at DESC LIMIT 1')
+      .get(projectId, shipId) as Row | undefined
     return row ? rowToSandbox(row) : null
   }
 
@@ -920,20 +972,21 @@ export class Store {
     return this.getSandbox(id)
   }
 
-  // -- terminals (tmux per Muse, ADR-0005) -----------------------------------
+  // -- terminals (tmux per Ship, ADR-0005) -----------------------------------
 
   /**
-   * One terminal row per (project, muse), re-upserting keeps the same record id.
+   * One terminal row per (project, ship), re-upserting keeps the same record id.
    * Same atomic single-statement upsert shape as upsertSandbox, backed by the
-   * NULL-safe unique index `idx_terminals_project_muse` (v2).
+   * NULL-safe unique index `idx_terminals_project_ship` (v2, renamed from `idx_terminals_project_muse` in v8).
    */
   upsertTerminal(spec: UpsertTerminalSpec): TerminalRecord {
     const now = nowIso()
+    const shipId = spec.shipId ?? spec.museId ?? 'unknown'
     this.db
       .prepare(
-        `INSERT INTO terminals (id, project_id, muse_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+        `INSERT INTO terminals (id, project_id, ship_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, IFNULL(muse_id,'')) DO UPDATE SET
+         ON CONFLICT(project_id, IFNULL(ship_id,'')) DO UPDATE SET
            sandbox_id = excluded.sandbox_id,
            tmux_session_name = excluded.tmux_session_name,
            state = excluded.state,
@@ -942,14 +995,14 @@ export class Store {
       .run(
         newId('terminal'),
         spec.projectId,
-        spec.museId,
+        shipId,
         spec.sandboxId,
         spec.tmuxSessionName,
         spec.state,
         now,
         now,
       )
-    const saved = this.getTerminalForMuse(spec.projectId, spec.museId)
+    const saved = this.getTerminalForShip(spec.projectId, shipId)
     if (!saved) throw new InternalError('terminal row disappeared inside upsert')
     return saved
   }
@@ -965,10 +1018,10 @@ export class Store {
     return row ? rowToTerminal(row) : null
   }
 
-  getTerminalForMuse(projectId: string, museId: string): TerminalRecord | null {
+  getTerminalForShip(projectId: string, shipId: string): TerminalRecord | null {
     const row = this.db
-      .prepare('SELECT * FROM terminals WHERE project_id = ? AND muse_id = ? ORDER BY created_at DESC LIMIT 1')
-      .get(projectId, museId) as Row | undefined
+      .prepare('SELECT * FROM terminals WHERE project_id = ? AND ship_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(projectId, shipId) as Row | undefined
     return row ? rowToTerminal(row) : null
   }
 
@@ -990,13 +1043,14 @@ export class Store {
     const id = newId('approval')
     const now = nowIso()
     const guard = fence ? fenceClause(fence) : null
+    const requestedByShipId = spec.requestedByShipId !== undefined ? spec.requestedByShipId : (spec.requestedByMuseId ?? null)
     // Persistence boundary: approval text is model/engine-authored. Strip
     // terminal control bytes and bidi controls here — the single choke point
     // every writer (tool bridge, engine channel, gate) goes through — so no
     // stored string can drive a terminal when a CLI/TUI/SPA later renders it.
     const res = this.db
       .prepare(
-        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
+        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_ship_id, action, reason, scope_json,
                                  status, decided_by, decided_at, expires_at, created_at)
          ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`}`,
       )
@@ -1005,7 +1059,7 @@ export class Store {
         spec.projectId,
         spec.runId,
         spec.taskId,
-        spec.requestedByMuseId,
+        requestedByShipId,
         stripControlChars(spec.action),
         stripControlChars(spec.reason),
         stringifyJson(stripControlDeep(spec.scope)),
@@ -1229,9 +1283,10 @@ export class Store {
     const id = newId('event')
     const now = nowIso()
     const guard = fence ? fenceClause(fence) : null
+    const shipId = input.shipId !== undefined ? input.shipId : (input.museId ?? null)
     const res = this.db
       .prepare(
-        `INSERT INTO events (id, project_id, run_id, task_id, muse_id, type, payload_json, created_at)
+        `INSERT INTO events (id, project_id, run_id, task_id, ship_id, type, payload_json, created_at)
          ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
@@ -1239,7 +1294,7 @@ export class Store {
         input.projectId,
         input.runId ?? null,
         input.taskId ?? null,
-        input.museId ?? null,
+        shipId,
         input.type,
         payloadJson,
         now,
@@ -1253,7 +1308,7 @@ export class Store {
       projectId: input.projectId,
       runId: input.runId ?? null,
       taskId: input.taskId ?? null,
-      museId: input.museId ?? null,
+      shipId: input.shipId ?? null,
       type: input.type,
       payload,
       createdAt: now,
@@ -1288,16 +1343,24 @@ export class Store {
 
   // -- chat (operator conversation, ADR-0012) --------------------------------
 
-  createChatSession(spec: { projectId: string; museId: string; title?: string | null }): ChatSessionRecord {
+  createChatSession(spec: {
+    projectId: string
+    shipId?: string
+    /** @deprecated Use `shipId`; kept for backward compatibility. */
+    museId?: string
+    title?: string | null
+  }): ChatSessionRecord {
     const id = newId('chat')
     const now = nowIso()
+    const shipId = spec.shipId ?? spec.museId
+    if (!shipId) throw new ValidationError('createChatSession requires shipId')
     this.db
       .prepare(
-        `INSERT INTO chat_sessions (id, project_id, muse_id, title, state, native_session_id, resume_token,
+        `INSERT INTO chat_sessions (id, project_id, ship_id, title, state, native_session_id, resume_token,
                                     engine_session_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
       )
-      .run(id, spec.projectId, spec.museId, spec.title ?? null, now, now)
+      .run(id, spec.projectId, shipId, spec.title ?? null, now, now)
     return this.getChatSession(id)
   }
 
@@ -1352,13 +1415,13 @@ export class Store {
     return this.getChatSession(id)
   }
 
-  /** Newest session for (project, muse) by updated_at (ties broken by id DESC); null when none. */
-  getLatestChatSession(projectId: string, museId: string): ChatSessionRecord | null {
+  /** Newest session for (project, ship) by updated_at (ties broken by id DESC); null when none. */
+  getLatestChatSession(projectId: string, shipId: string): ChatSessionRecord | null {
     const row = this.db
       .prepare(
-        'SELECT * FROM chat_sessions WHERE project_id = ? AND muse_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1',
+        'SELECT * FROM chat_sessions WHERE project_id = ? AND ship_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1',
       )
-      .get(projectId, museId) as Row | undefined
+      .get(projectId, shipId) as Row | undefined
     return row ? rowToChatSession(row) : null
   }
 
@@ -1592,7 +1655,9 @@ export class Store {
       id: string
       runId: string
       taskId: string
-      museId: string
+      shipId?: string
+      /** @deprecated Use `shipId`; kept for backward compatibility. */
+      museId?: string
       path: string
       symbols?: string[]
       acquiredAt?: string
@@ -1600,20 +1665,21 @@ export class Store {
     },
     fence?: SupervisorFence,
   ): void {
+    const shipId = lease.shipId ?? lease.museId ?? ''
     const now = nowIso()
     const guard = fence ? fenceClause(fence) : null
     // Advisory/accounting write: a missed fence skips silently (callers live in
     // finally blocks and engine event pumps — they must never throw from here).
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO file_leases (id, run_id, task_id, muse_id, path, symbols_json, acquired_at, state)
+        `INSERT OR REPLACE INTO file_leases (id, run_id, task_id, ship_id, path, symbols_json, acquired_at, state)
          ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
         lease.id,
         lease.runId,
         lease.taskId,
-        lease.museId,
+        shipId,
         lease.path,
         stringifyJson(lease.symbols ?? []),
         lease.acquiredAt ?? now,
@@ -1636,7 +1702,9 @@ export class Store {
     id: string
     runId: string
     taskId: string
-    museId: string
+    shipId: string
+    /** @deprecated Use `shipId`; kept for backward compatibility. */
+    museId?: string
     path: string
     symbols: string[]
     acquiredAt: string
@@ -1645,16 +1713,20 @@ export class Store {
     const rows = this.db
       .prepare(`SELECT * FROM file_leases WHERE run_id = ? AND state = 'active' ORDER BY acquired_at ASC`)
       .all(runId) as Row[]
-    return rows.map((r) => ({
-      id: str(r, 'id'),
-      runId: str(r, 'run_id'),
-      taskId: str(r, 'task_id'),
-      museId: str(r, 'muse_id'),
-      path: str(r, 'path'),
-      symbols: parseJsonText<string[]>(nstr(r, 'symbols_json'), []),
-      acquiredAt: str(r, 'acquired_at'),
-      state: str(r, 'state') as 'active' | 'released',
-    }))
+    return rows.map((r) => {
+      const shipId = str(r, 'ship_id')
+      return {
+        id: str(r, 'id'),
+        runId: str(r, 'run_id'),
+        taskId: str(r, 'task_id'),
+        shipId,
+        museId: shipId,
+        path: str(r, 'path'),
+        symbols: parseJsonText<string[]>(nstr(r, 'symbols_json'), []),
+        acquiredAt: str(r, 'acquired_at'),
+        state: str(r, 'state') as 'active' | 'released',
+      }
+    })
   }
 
   reapOrphanedLeases(activeTaskIds: Set<string>, fence?: SupervisorFence): void {
@@ -1682,7 +1754,9 @@ export class Store {
     input: {
       id?: string
       runId: string
-      museId: string
+      shipId?: string
+      /** @deprecated Use `shipId`; kept for backward compatibility. */
+      museId?: string
       taskId?: string | null
       inputTokens?: number
       outputTokens?: number
@@ -1692,17 +1766,18 @@ export class Store {
     fence?: SupervisorFence,
   ): void {
     const id = input.id ?? newId('attempt')
+    const shipId = input.shipId ?? input.museId ?? 'unknown'
     const guard = fence ? fenceClause(fence) : null
     // Advisory/accounting write: a missed fence skips silently.
     this.db
       .prepare(
-        `INSERT INTO run_usage (id, run_id, muse_id, task_id, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)
+        `INSERT INTO run_usage (id, run_id, ship_id, task_id, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)
          ${guard ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}` : `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`}`,
       )
       .run(
         id,
         input.runId,
-        input.museId,
+        shipId,
         input.taskId ?? null,
         input.inputTokens ?? 0,
         input.outputTokens ?? 0,
@@ -1718,19 +1793,20 @@ export class Store {
     totalOutputTokens: number
     totalCachedTokens: number
     totalCostUsd: number
+    perShip: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }>
     perMuse: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }>
   } {
     const rows = this.db
-      .prepare(`SELECT muse_id, input_tokens, output_tokens, cached_tokens, cost_usd FROM run_usage WHERE run_id = ?`)
+      .prepare(`SELECT ship_id, input_tokens, output_tokens, cached_tokens, cost_usd FROM run_usage WHERE run_id = ?`)
       .all(runId) as Row[]
     let totalInputTokens = 0
     let totalOutputTokens = 0
     let totalCachedTokens = 0
     let totalCostUsd = 0
-    const perMuse: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }> = {}
+    const perShip: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number }> = {}
 
     for (const r of rows) {
-      const museId = str(r, 'muse_id')
+      const shipId = str(r, 'ship_id')
       const inTok = num(r, 'input_tokens')
       const outTok = num(r, 'output_tokens')
       const cacheTok = num(r, 'cached_tokens')
@@ -1741,15 +1817,15 @@ export class Store {
       totalCachedTokens += cacheTok
       totalCostUsd += cost
 
-      const entry = perMuse[museId] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 }
+      const entry = perShip[shipId] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 }
       entry.inputTokens += inTok
       entry.outputTokens += outTok
       entry.cachedTokens += cacheTok
       entry.costUsd += cost
-      perMuse[museId] = entry
+      perShip[shipId] = entry
     }
 
-    return { totalInputTokens, totalOutputTokens, totalCachedTokens, totalCostUsd, perMuse }
+    return { totalInputTokens, totalOutputTokens, totalCachedTokens, totalCostUsd, perShip, perMuse: perShip }
   }
 
   // --- Verifications ---
@@ -1827,7 +1903,7 @@ function rowToProject(r: Row): ProjectRecord {
   }
 }
 
-function rowToMuse(r: Row): MuseRecord {
+function rowToShip(r: Row): ShipRecord {
   const role = str(r, 'role')
   const workspacePolicy = str(r, 'workspace_policy')
   const approvalMode = str(r, 'approval_mode')
@@ -1836,13 +1912,13 @@ function rowToMuse(r: Row): MuseRecord {
     projectId: str(r, 'project_id'),
     slug: str(r, 'slug'),
     displayName: str(r, 'display_name'),
-    role: role as MuseRecord['role'],
+    role: role as ShipRecord['role'],
     engineKind: str(r, 'engine_kind'),
     model: str(r, 'model'),
     instructionsFile: nstr(r, 'instructions_file'),
-    workspacePolicy: workspacePolicy as MuseRecord['workspacePolicy'],
+    workspacePolicy: workspacePolicy as ShipRecord['workspacePolicy'],
     permissions: parseJsonText<string[]>(nstr(r, 'permissions_json'), []),
-    approvalMode: approvalMode as MuseRecord['approvalMode'],
+    approvalMode: approvalMode as ShipRecord['approvalMode'],
     engineHome: str(r, 'engine_home'),
     enabled: num(r, 'enabled') === 1,
     createdAt: str(r, 'created_at'),
@@ -1855,6 +1931,7 @@ function rowToRun(r: Row): RunRecord {
   if (!isRunState(state)) throw new InternalError(`db row: invalid run state '${state}'`)
   const origin = str(r, 'origin')
   if (origin !== 'cli' && origin !== 'api') throw new InternalError(`db row: invalid run origin '${origin}'`)
+  const managerShipId = str(r, 'manager_ship_id')
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
@@ -1863,7 +1940,8 @@ function rowToRun(r: Row): RunRecord {
     requestedBy: str(r, 'requested_by'),
     state,
     acceptanceCriteria: parseJsonText<string[]>(nstr(r, 'acceptance_json'), []),
-    managerMuseId: str(r, 'manager_muse_id'),
+    managerShipId,
+    managerMuseId: managerShipId,
     budget: parseJsonText<RunBudget>(nstr(r, 'budget_json'), {
       maxConcurrentWorkers: 1,
       maxTasks: 1,
@@ -1884,6 +1962,7 @@ function rowToRun(r: Row): RunRecord {
 function rowToTask(r: Row): TaskRecord {
   const state = str(r, 'state')
   if (!isTaskState(state)) throw new InternalError(`db row: invalid task state '${state}'`)
+  const assigneeShipId = nstr(r, 'assignee_ship_id')
   return {
     id: str(r, 'id'),
     runId: str(r, 'run_id'),
@@ -1894,7 +1973,8 @@ function rowToTask(r: Row): TaskRecord {
     brief: str(r, 'brief'),
     acceptanceCriteria: parseJsonText<string[]>(nstr(r, 'acceptance_json'), []),
     writeScope: parseJsonText<string[]>(nstr(r, 'write_scope_json'), []),
-    assigneeMuseId: nstr(r, 'assignee_muse_id'),
+    assigneeShipId,
+    assigneeMuseId: assigneeShipId,
     state,
     attempt: num(r, 'attempt'),
     workspaceId: nstr(r, 'workspace_id'),
@@ -1917,12 +1997,14 @@ function rowToWorkspace(r: Row): WorkspaceRecord {
   if (state !== 'active' && state !== 'archived' && state !== 'removed') {
     throw new InternalError(`db row: invalid workspace state '${state}'`)
   }
+  const shipId = nstr(r, 'ship_id')
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
     runId: nstr(r, 'run_id'),
     taskId: nstr(r, 'task_id'),
-    museId: nstr(r, 'muse_id'),
+    shipId,
+    museId: shipId,
     kind,
     path: str(r, 'path'),
     branch: str(r, 'branch'),
@@ -1943,10 +2025,12 @@ function rowToSandbox(r: Row): SandboxRecord {
   if (!(SANDBOX_STATES as readonly string[]).includes(state)) {
     throw new InternalError(`db row: invalid sandbox state '${state}'`)
   }
+  const shipId = nstr(r, 'ship_id')
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
-    museId: nstr(r, 'muse_id'),
+    shipId,
+    museId: shipId,
     kind,
     containerName: nstr(r, 'container_name'),
     containerId: nstr(r, 'container_id'),
@@ -1963,10 +2047,12 @@ function rowToTerminal(r: Row): TerminalRecord {
   if (state !== 'present' && state !== 'absent' && state !== 'recreated' && state !== 'unknown') {
     throw new InternalError(`db row: invalid terminal state '${state}'`)
   }
+  const shipId = str(r, 'ship_id')
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
-    museId: str(r, 'muse_id'),
+    shipId,
+    museId: shipId,
     sandboxId: nstr(r, 'sandbox_id'),
     tmuxSessionName: str(r, 'tmux_session_name'),
     state,
@@ -1986,13 +2072,15 @@ function rowToApproval(r: Row): ApprovalRecord {
   const selectedOption =
     scopeObj && typeof scopeObj.selectedOption === 'string' ? scopeObj.selectedOption : null
   const answer = scopeObj && typeof scopeObj.answer === 'string' ? scopeObj.answer : null
+  const requestedByShipId = nstr(r, 'requested_by_ship_id')
 
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
     runId: nstr(r, 'run_id'),
     taskId: nstr(r, 'task_id'),
-    requestedByMuseId: nstr(r, 'requested_by_muse_id'),
+    requestedByShipId,
+    requestedByMuseId: requestedByShipId,
     action: str(r, 'action'),
     reason: str(r, 'reason'),
     scope,
@@ -2048,13 +2136,15 @@ function rowToVerificationCheck(r: Row): VerificationCheckRecord {
 }
 
 function rowToEvent(r: Row): EventRecord {
+  const shipId = nstr(r, 'ship_id')
   return {
     seq: num(r, 'seq'),
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
     runId: nstr(r, 'run_id'),
     taskId: nstr(r, 'task_id'),
-    museId: nstr(r, 'muse_id'),
+    shipId,
+    museId: shipId,
     type: str(r, 'type'),
     payload: parseJsonText<JsonValue>(nstr(r, 'payload_json'), {}),
     createdAt: str(r, 'created_at'),
@@ -2066,10 +2156,12 @@ function rowToChatSession(r: Row): ChatSessionRecord {
   if (!(CHAT_SESSION_STATES as readonly string[]).includes(state)) {
     throw new InternalError(`db row: invalid chat session state '${state}'`)
   }
+  const shipId = str(r, 'ship_id')
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
-    museId: str(r, 'muse_id'),
+    shipId,
+    museId: shipId,
     title: nstr(r, 'title'),
     state: state as ChatSessionState,
     nativeSessionId: nstr(r, 'native_session_id'),

@@ -334,6 +334,35 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE runs ADD COLUMN supervisor_heartbeat_at INTEGER`,
     ],
   },
+  {
+    version: 8,
+    name: 'muse-to-ship-terminology',
+    // Rename the `muses` table to `ships` and all `muse_id`-style columns to
+    // `ship_id`-style. SQLite's ALTER TABLE ... RENAME TABLE automatically updates
+    // internal FK references that point to the renamed table. Column renames are
+    // explicit via ALTER TABLE ... RENAME COLUMN. Unique indexes that referenced
+    // the old column name are dropped and recreated.
+    statements: [
+      // 1. Rename the ships table
+      `ALTER TABLE muses RENAME TO ships`,
+      // 2. Rename columns across tables that carry the old muse_id naming
+      `ALTER TABLE runs RENAME COLUMN manager_muse_id TO manager_ship_id`,
+      `ALTER TABLE tasks RENAME COLUMN assignee_muse_id TO assignee_ship_id`,
+      `ALTER TABLE events RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE workspaces RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE sandboxes RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE terminals RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE approvals RENAME COLUMN requested_by_muse_id TO requested_by_ship_id`,
+      `ALTER TABLE file_leases RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE run_usage RENAME COLUMN muse_id TO ship_id`,
+      `ALTER TABLE chat_sessions RENAME COLUMN muse_id TO ship_id`,
+      // 3. Recreate unique indexes that referenced the old column name
+      `DROP INDEX IF EXISTS idx_sandboxes_project_muse`,
+      `CREATE UNIQUE INDEX idx_sandboxes_project_ship ON sandboxes(project_id, IFNULL(ship_id, ''))`,
+      `DROP INDEX IF EXISTS idx_terminals_project_muse`,
+      `CREATE UNIQUE INDEX idx_terminals_project_ship ON terminals(project_id, IFNULL(ship_id, ''))`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version
