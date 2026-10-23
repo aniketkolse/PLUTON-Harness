@@ -5,7 +5,7 @@
  * 1. The engine gets a *sanitized allowlist* of the host environment — never
  *    the operator's full environment (tokens in unrelated variables, cloud
  *    credentials, etc. must not leak into an engine process).
- * 2. Per-Muse state directories (engine homes) are redirected into the Muse's
+ * 2. Per-Ship state directories (engine homes) are redirected into the Ship's
  *    private config dir so engines cannot read the user's global config and
  *    authentication is per-Muse.
  *

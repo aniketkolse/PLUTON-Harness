@@ -71,7 +71,9 @@ export interface EngineApprovalChannelOptions {
   projectId: string
   runId: string | null
   taskId: string | null
-  museId: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   /** runtime.approval_timeout_minutes; 0 = the record never expires. */
   ttlMinutes?: number
   now?: () => number
@@ -198,6 +200,7 @@ function boundedScope(requestId: string | null, scope: JsonValue): JsonValue {
 
 export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions): EnginePermissionChannel {
   const store = opts.store
+  const shipId = opts.shipId !== undefined ? opts.shipId : (opts.museId ?? null)
   const nowFn = opts.now ?? Date.now
   const timers = opts.timers ?? defaultTimers
   const ttlMinutes = opts.ttlMinutes ?? DEFAULT_ENGINE_APPROVAL_TTL_MINUTES
@@ -222,7 +225,7 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
           projectId: opts.projectId,
           runId: opts.runId,
           taskId: opts.taskId,
-          requestedByMuseId: opts.museId,
+          requestedByShipId: shipId,
           action: ENGINE_PERMISSION_ACTION,
           reason: boundedReason(req.description),
           scope: boundedScope(req.requestId, req.scope),
@@ -235,7 +238,7 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
           projectId: opts.projectId,
           runId: opts.runId,
           taskId: opts.taskId,
-          museId: opts.museId,
+          shipId,
           type: 'approval.requested',
           payload: { approvalId: approval.id, action: approval.action, source: 'engine' },
         },
@@ -321,7 +324,7 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
               projectId: opts.projectId,
               runId: opts.runId,
               taskId: opts.taskId,
-              museId: opts.museId,
+              shipId,
               type: 'approval.expired',
               payload: { approvalId: id, action: ENGINE_PERMISSION_ACTION, reason: 'timeout' },
             })
@@ -364,7 +367,7 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
           projectId: opts.projectId,
           runId: opts.runId,
           taskId: opts.taskId,
-          museId: opts.museId,
+          shipId,
           type: 'approval.expired',
           payload: { approvalId: id, action: ENGINE_PERMISSION_ACTION, reason },
         })

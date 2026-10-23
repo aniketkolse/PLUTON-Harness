@@ -8,10 +8,10 @@ import { getEngineAdapter, type EngineCreateOptions } from './registry.ts'
  * Pluton approval mode → engine permission policy.
  *
  * Host-mode smoke lesson (2026-10-16, run_mvb95krv38bcb72a): nothing wired the
- * Muse's approval mode into engine session construction, so the adapter's
+ * Ship's approval mode into engine session construction, so the adapter's
  * default `deny` policy rejected a worker's edit fail-closed while the task
  * still recorded "success". These mappings are the fix; every adapter
- * constructed for a Muse must go through {@link engineAdapterForMuse} so the
+ * constructed for a Ship must go through {@link engineAdapterForShip} so the
  * recorded mode is never ignored.
  *
  * OpenCode has no session-side auto-approval mode. Therefore:
@@ -29,17 +29,17 @@ import { getEngineAdapter, type EngineCreateOptions } from './registry.ts'
  * upgrade a mode to a broader grant.
  */
 
-/** How a given engine answers permission requests under a Muse's approval mode. */
+/** How a given engine answers permission requests under a Ship's approval mode. */
 export type EngineApprovalPolicy = 'deny' | 'allow_once' | 'allow_always' | 'interactive'
 
-/** Runtime-proven session isolation. Never inferred from a Muse mode name. */
+/** Runtime-proven session isolation. Never inferred from a Ship mode name. */
 export interface EngineIsolationFacts {
   /** True only when the session's workdir is a Pluton-owned throwaway checkout. */
   isolatedCheckout: boolean
 }
 
 /**
- * Permission requests that reach Pluton for a Muse approval mode.
+ * Permission requests that reach Pluton for a Ship approval mode.
  *
  * - `autonomous-bounded` → fail-closed `deny` (no blanket engine consent).
  * - ask-* modes → `interactive`: the request becomes a durable operator
@@ -58,7 +58,7 @@ export function engineApprovalPolicy(
     case 'ask-always':
       return 'interactive'
     default:
-      // Muse rows are read from the store with a blind cast: an unrecognised
+      // Ship rows are read from the store with a blind cast: an unrecognised
       // stored mode must fail loudly rather than silently becoming a deny that
       // looks like "nothing happened".
       throw new ValidationError(
@@ -68,24 +68,27 @@ export function engineApprovalPolicy(
 }
 
 /**
- * The per-Muse engine adapter the run supervisor builds sessions from: engine
- * session settings come from the Muse's recorded approval mode plus the
+ * The per-Ship engine adapter the run supervisor builds sessions from: engine
+ * session settings come from the Ship's recorded approval mode plus the
  * caller-proven isolation fact (`opts.isolatedCheckout`), never from an
  * adapter default. `opts` also carries container-mode pins (spawn, in-image
  * binary) and test seams.
  */
-export function engineAdapterForMuse(
-  muse: { engineKind: string; approvalMode: ApprovalMode },
+export function engineAdapterForShip(
+  ship: { engineKind: string; approvalMode: ApprovalMode },
   opts: EngineCreateOptions = {},
 ): EngineAdapter {
-  const policy = engineApprovalPolicy(muse.engineKind, muse.approvalMode, {
+  const policy = engineApprovalPolicy(ship.engineKind, ship.approvalMode, {
     isolatedCheckout: opts.isolatedCheckout === true,
   })
-  if (muse.engineKind === 'opencode') {
+  if (ship.engineKind === 'opencode') {
     return new OpenCodeEngineAdapter({
       ...opts,
       approvalPolicy: policy === 'interactive' ? 'interactive' : 'deny',
     })
   }
-  return getEngineAdapter(muse.engineKind, opts)
+  return getEngineAdapter(ship.engineKind, opts)
 }
+
+/** @deprecated Use `engineAdapterForShip`; kept for backward compatibility. */
+export const engineAdapterForMuse = engineAdapterForShip

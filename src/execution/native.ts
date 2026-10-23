@@ -37,7 +37,9 @@ export interface ExecutionLimits {
 
 export interface ExecutionSessionSpec {
   projectId: string
-  museId: string | null
+  shipId?: string | null
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string | null
   engineKind: string
   /** Absolute host working directory for the engine process. */
   hostWorkdir: string
@@ -75,7 +77,7 @@ export interface ExecutionSessionFacts {
   enforcement: 'partial'
   sessionId: string
   projectId: string
-  museId: string | null
+  shipId: string | null
   engineKind: string
   pid: number | null
   pids: number[]
@@ -103,7 +105,7 @@ export interface ExecutionEvent {
   provider: ExecutionProviderKind
   sessionId: string
   projectId: string
-  museId: string | null
+  shipId: string | null
   engineKind: string
   pid?: number
   code?: number | null
@@ -518,7 +520,7 @@ export class NativeExecutionProvider implements ExecutionProvider {
     if (spec.network !== 'open') {
       throw new PolicyDeniedError(
         `native execution cannot enforce network_policy '${spec.network}': host processes share the host network. ` +
-          'Set runtime.network_policy (or the Muse override) to open explicitly and acknowledge host networking; ' +
+          'Set runtime.network_policy (or the Ship override) to open explicitly and acknowledge host networking; ' +
           'use sandbox.kind: docker when network isolation is required.',
       )
     }
@@ -583,6 +585,7 @@ export class NativeExecutionProvider implements ExecutionProvider {
 
     return {
       ...spec,
+      shipId: spec.shipId !== undefined ? spec.shipId : (spec.museId ?? null),
       hostWorkdir: workdir,
       hostEngineHome: engineHome,
       allowedRoots: roots,
@@ -619,7 +622,7 @@ class NativeExecutionSession implements ExecutionSession {
       enforcement: 'partial',
       sessionId: this.id,
       projectId: this.spec.projectId,
-      museId: this.spec.museId,
+      shipId: this.spec.shipId ?? null,
       engineKind: this.spec.engineKind,
       pid: pids[0] ?? null,
       pids,
@@ -829,12 +832,12 @@ class NativeExecutionSession implements ExecutionSession {
   }
 
   /** @internal */
-  emit(event: Omit<ExecutionEvent, 'at' | 'provider' | 'sessionId' | 'projectId' | 'museId' | 'engineKind'>): void {
+  emit(event: Omit<ExecutionEvent, 'at' | 'provider' | 'sessionId' | 'projectId' | 'shipId' | 'engineKind'>): void {
     this.provider.emit({
       ...event,
       sessionId: this.id,
       projectId: this.spec.projectId,
-      museId: this.spec.museId,
+      shipId: this.spec.shipId ?? null,
       engineKind: this.spec.engineKind,
     })
   }

@@ -75,7 +75,15 @@ export type McpServerSpec =
     }
 
 export interface StartSessionRequest {
-  muse: {
+  ship?: {
+    id: string
+    slug: string
+    role: string
+    /** Exact provider-qualified model id. */
+    model: string
+  }
+  /** @deprecated Use `ship`; kept for backward compatibility. */
+  muse?: {
     id: string
     slug: string
     role: string
@@ -86,7 +94,7 @@ export interface StartSessionRequest {
   workdir: string
   /** Sanitized, explicit env allowlist for the engine process. */
   env: Record<string, string>
-  /** Engine-specific config directory (the Muse's private home). */
+  /** Engine-specific config directory (the Ship's private home). */
   configDir: string
   /** Role instructions (file contents, already loaded by the caller). */
   instructions?: string

@@ -11,7 +11,7 @@ import type { EngineEvent, EngineSession, EngineSessionInfo, PromptRequest } fro
  * Turn lifecycle shared by every ACP-speaking engine session.
  *
  * Behavior contract (verified against opencode v2.0.29):
- * - one prompt at a time; overlapping prompts are refused (per-Muse
+ * - one prompt at a time; overlapping prompts are refused (per-Ship
  *   serialization is the runtime's job; the adapter refuses to interleave)
  * - `session/cancel` is a notification; a cancelled turn must end as
  *   'cancelled'/'unknown', never silently 'success'
@@ -128,7 +128,7 @@ export abstract class AcpEngineSessionBase implements EngineSession {
     if (this.poisoned) throw this.poisoned
     if (this.busy) {
       throw new EngineProtocolError(
-        `session ${this.info.id} already has an in-flight prompt; per-Muse serialization is the runtime's job and the adapter refuses to overlap turns`,
+        `session ${this.info.id} already has an in-flight prompt; per-Ship serialization is the runtime's job and the adapter refuses to overlap turns`,
       )
     }
     if (typeof req.text !== 'string' || req.text.trim() === '') {

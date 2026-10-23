@@ -476,7 +476,11 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
   }
 
   async startSession(req: StartSessionRequest): Promise<EngineSession> {
-    assertNonEmptyModel(req.muse.model)
+    const targetShip = req.ship ?? req.muse
+    if (!targetShip) {
+      throw new ValidationError('startSession requires ship or muse spec')
+    }
+    assertNonEmptyModel(targetShip.model)
     const resolved = this.resolveBinary()
     if (!resolved.ok) throw new EngineMissingError(this.kind, resolved.fix)
     const invocation = this.spawnInvocation(resolved.binary.path)
@@ -560,12 +564,12 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
         configOptions = created['configOptions']
       }
 
-      await this.applyModel(client, sessionId, configOptions, req.muse.model)
+      await this.applyModel(client, sessionId, configOptions, targetShip.model)
 
       const session = new OpenCodeEngineSession({
         client,
         sessionId,
-        pinnedModel: req.muse.model,
+        pinnedModel: targetShip.model,
         instructions: req.resumeToken ? null : (req.instructions ?? null),
         cancelGraceMs: this.opts.cancelGraceMs ?? CANCEL_GRACE_MS,
         approvalPolicy: this.opts.approvalPolicy ?? 'deny',

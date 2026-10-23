@@ -1,5 +1,5 @@
-import type { MuseRecord } from '../domain/models.ts'
-import { engineAdapterForMuse } from '../engines/approval.ts'
+import type { ShipRecord } from '../domain/models.ts'
+import { engineAdapterForShip } from '../engines/approval.ts'
 import type {
   EngineAdapter,
   EngineSession,
@@ -20,7 +20,7 @@ import type {
  * it after the engine session closes (or after a failed start).
  */
 export function nativeAdapterFor(
-  muse: MuseRecord,
+  ship: ShipRecord,
   args: {
     provider: ExecutionProvider
     isolatedCheckout: boolean
@@ -34,7 +34,7 @@ export function nativeAdapterFor(
     isolatedCheckout: args.isolatedCheckout,
     ...(args.engineOptions ?? {}),
   }
-  const base = engineAdapterForMuse(muse, baseOptions)
+  const base = engineAdapterForShip(ship, baseOptions)
 
   const adapter: EngineAdapter = {
     kind: base.kind,
@@ -46,7 +46,7 @@ export function nativeAdapterFor(
       const execution = await args.provider.prepare(args.specFor(req))
       let session: EngineSession
       try {
-        const inner = engineAdapterForMuse(muse, {
+        const inner = engineAdapterForShip(ship, {
           ...baseOptions,
           spawnFn: (command, spawnArgs, options) =>
             execution.spawn(command, spawnArgs, options),

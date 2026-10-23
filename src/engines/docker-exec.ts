@@ -135,7 +135,7 @@ function dockerCliBaseEnv(): Record<string, string> {
 }
 
 /**
- * Build the `AcpSpawnFn` for one Muse container. The returned function spawns
+ * Build the `AcpSpawnFn` for one Ship container. The returned function spawns
  * `docker exec` with the engine command; the spawn's cwd/env describe the
  * docker CLI on the host, while the argv describes the command inside the
  * container.

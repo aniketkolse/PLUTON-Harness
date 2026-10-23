@@ -99,7 +99,7 @@ export function toAcpMcpServers(specs: McpServerSpec[] | undefined): unknown[] {
 export function assertNonEmptyModel(model: string): void {
   if (typeof model !== 'string' || model.trim() === '') {
     throw new ValidationError(
-      "muse.model must be a non-empty engine model id (e.g. 'opencode/deepseek-v4.1-flash-free')",
+      "ship.model must be a non-empty engine model id (e.g. 'opencode/deepseek-v4.1-flash-free')",
     )
   }
 }

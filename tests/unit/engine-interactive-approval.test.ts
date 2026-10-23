@@ -74,6 +74,16 @@ function makeProject(): { ctx: ProjectContext; store: Store; projectId: string }
         },
       },
       git: { protected_paths: [], require_approval_for_main_branch_integration: false },
+      ships: {
+        worker: {
+          display_name: 'Worker',
+          role: 'coder',
+          engine: 'mock',
+          model: 'mock/model',
+          workspace_policy: 'isolated-task-checkout',
+          approval_mode: 'ask-for-sensitive-actions',
+        },
+      },
       muses: {
         worker: {
           display_name: 'Worker',

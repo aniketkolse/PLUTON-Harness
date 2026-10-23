@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { engineHomesDir, workspaceDir } from '../config/load.ts'
 import type { PlutonConfig } from '../config/schema.ts'
 import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../domain/errors.ts'
-import type { JsonValue, MuseRecord } from '../domain/models.ts'
+import type { JsonValue, ShipRecord } from '../domain/models.ts'
 import { copyAllowlistedEnv } from '../engines/acp/env.ts'
 import type { Store } from '../store/store.ts'
 import {
@@ -70,8 +70,9 @@ export function assertNativeSandboxConfig(config: PlutonConfig): void {
   }
 
   const policies: Array<{ id: string; policy: ExecutionNetworkPolicy }> = []
-  for (const [id, muse] of Object.entries(config.muses)) {
-    policies.push({ id, policy: muse.network_policy ?? config.runtime.network_policy })
+  const ships = config.ships ?? config.muses ?? {}
+  for (const [id, ship] of Object.entries(ships)) {
+    policies.push({ id, policy: ship.network_policy ?? config.runtime.network_policy })
   }
   if (policies.length === 0) {
     policies.push({ id: '(runtime)', policy: config.runtime.network_policy })
@@ -82,7 +83,7 @@ export function assertNativeSandboxConfig(config: PlutonConfig): void {
         `native execution cannot enforce network_policy '${policy}' for ${id}: host processes share the host network`,
         {
           fix:
-            'set runtime.network_policy: open (and remove per-Muse restricted/none overrides) and ' +
+            'set runtime.network_policy: open (and remove per-Ship restricted/none overrides) and ' +
             'sandbox.native.acknowledge_host_network: true, or use sandbox.kind: docker',
         },
       )
@@ -118,18 +119,20 @@ export function createNativeExecutionProvider(args: {
 }
 
 /**
- * Build the per-session native policy for a Muse.
+ * Build the per-session native policy for a Ship.
  *
  * The mode is a hard ceiling, not a hint: chat and coordinator sessions are
  * read-only, and only a worker with a proven isolated task checkout receives
  * workspace-write. The provider cannot enforce writes, so reporting the
  * narrower mode is deliberate and the facts still say `partial`.
  */
-export function nativeSpecForMuse(args: {
+export function nativeSpecForShip(args: {
   config: PlutonConfig
   rootDir: string
   projectId: string
-  muse: Pick<MuseRecord, 'id' | 'engineKind' | 'workspacePolicy'>
+  ship?: Pick<ShipRecord, 'id' | 'engineKind' | 'workspacePolicy'>
+  /** @deprecated Use `ship`; kept for backward compatibility. */
+  muse?: Pick<ShipRecord, 'id' | 'engineKind' | 'workspacePolicy'>
   workdir: string
   engineHome: string
   isolatedCheckout: boolean
@@ -137,25 +140,29 @@ export function nativeSpecForMuse(args: {
   hostEnv?: Record<string, string | undefined>
 }): ExecutionSessionSpec {
   if (args.config.sandbox.kind !== 'native') {
-    throw new ValidationError('nativeSpecForMuse requires sandbox.kind: native')
+    throw new ValidationError('nativeSpecForShip requires sandbox.kind: native')
+  }
+  const ship = args.ship ?? args.muse
+  if (!ship) {
+    throw new ValidationError('nativeSpecForShip requires ship or muse')
   }
   const native = args.config.sandbox.native
-  const museConfig = args.config.muses[args.muse.id]
+  const shipConfig = args.config.ships[ship.id]
   const network: ExecutionNetworkPolicy =
-    museConfig?.network_policy ?? args.config.runtime.network_policy
+    shipConfig?.network_policy ?? args.config.runtime.network_policy
   if (network !== 'open') {
     throw new PolicyDeniedError(
-      `native execution cannot run muse '${args.muse.id}' with network_policy '${network}'; ` +
+      `native execution cannot run ship '${ship.id}' with network_policy '${network}'; ` +
         'host processes share the host network. Set runtime.network_policy: open and ' +
         'sandbox.native.acknowledge_host_network: true, or use sandbox.kind: docker.',
     )
   }
 
   const requiresIsolatedCheckout =
-    args.sessionKind === 'run' && args.muse.workspacePolicy === 'isolated-task-checkout'
+    args.sessionKind === 'run' && ship.workspacePolicy === 'isolated-task-checkout'
   if (requiresIsolatedCheckout && !args.isolatedCheckout) {
     throw new PolicyDeniedError(
-      `isolated worker '${args.muse.id}' must run in an isolated task checkout; ` +
+      `isolated worker '${ship.id}' must run in an isolated task checkout; ` +
         'the caller reported isolatedCheckout: false',
     )
   }
@@ -165,7 +172,7 @@ export function nativeSpecForMuse(args: {
       ? 'read-only'
       : args.sessionKind === 'chat'
         ? 'read-only'
-        : args.isolatedCheckout && args.muse.workspacePolicy === 'isolated-task-checkout'
+        : args.isolatedCheckout && ship.workspacePolicy === 'isolated-task-checkout'
           ? 'workspace-write'
           : 'read-only'
 
@@ -184,15 +191,15 @@ export function nativeSpecForMuse(args: {
     const rel = relative(workspacesRoot, workdir)
     if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new PolicyDeniedError(
-        `isolated worker '${args.muse.id}' must run inside a task checkout under '${workspacesRoot}', got '${workdir}'`,
+        `isolated worker '${ship.id}' must run inside a task checkout under '${workspacesRoot}', got '${workdir}'`,
       )
     }
   }
 
   return {
     projectId: args.projectId,
-    museId: args.muse.id,
-    engineKind: args.muse.engineKind,
+    shipId: ship.id,
+    engineKind: ship.engineKind,
     hostWorkdir: args.workdir,
     hostEngineHome: args.engineHome,
     allowedRoots: [
@@ -204,12 +211,15 @@ export function nativeSpecForMuse(args: {
     network,
     env: copyAllowlistedEnv(native.env_allowlist, args.hostEnv ?? process.env),
     limits: {
-      cpus: museConfig?.limits?.cpu ?? args.config.runtime.default_cpu_limit,
-      memoryMb: museConfig?.limits?.memory_mb ?? args.config.runtime.default_memory_mb,
-      pids: museConfig?.limits?.pids ?? NATIVE_PIDS_LIMIT,
+      cpus: shipConfig?.limits?.cpu ?? args.config.runtime.default_cpu_limit,
+      memoryMb: shipConfig?.limits?.memory_mb ?? args.config.runtime.default_memory_mb,
+      pids: shipConfig?.limits?.pids ?? NATIVE_PIDS_LIMIT,
     },
   }
 }
+
+/** @deprecated Use `nativeSpecForShip`; kept for backward compatibility. */
+export const nativeSpecForMuse = nativeSpecForShip
 
 /**
  * Persist execution facts through the existing durable event log. Payloads
@@ -234,7 +244,7 @@ export function appendExecutionEvent(
   store.appendEvent({
     projectId,
     runId,
-    museId: event.museId,
+    shipId: event.shipId,
     type: event.type,
     payload,
   })

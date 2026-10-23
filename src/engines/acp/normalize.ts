@@ -18,7 +18,7 @@ export interface NormalizedUpdate {
 }
 
 export interface NormalizeContext {
-  /** The model this Muse is pinned to; a model change is surfaced as an error. */
+  /** The model this Ship is pinned to; a model change is surfaced as an error. */
   pinnedModel?: string
 }
 
@@ -214,7 +214,7 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
           {
             kind: 'error',
             code: 'engine_model_changed',
-            message: `engine changed the session model from '${ctx.pinnedModel}' to '${now}' during the turn; Pluton pins models per Muse and does not accept silent switches`,
+            message: `engine changed the session model from '${ctx.pinnedModel}' to '${now}' during the turn; Pluton pins models per Ship and does not accept silent switches`,
           },
         ],
         kind,
