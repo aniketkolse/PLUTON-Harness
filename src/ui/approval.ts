@@ -11,7 +11,7 @@ export interface ApprovalCardProps {
   action: string
   reason: string
   target?: string
-  requestedByMuse?: string
+  requestedByShip?: string
   pendingIndex?: number
   pendingTotal?: number
 }
@@ -47,9 +47,9 @@ export function renderActionableApprovalCard(
   const topLine = `${theme.paint('warn', titlePrefix)}${paintedTitle} ${theme.paint('warn', hz.repeat(remainingTop))}${theme.paint('warn', tr)}`
 
   // Row 1: Reason and reference
-  const musePart = props.requestedByMuse ? `[${props.requestedByMuse}] ` : ''
+  const shipPart = props.requestedByShip ? `[${props.requestedByShip}] ` : ''
   const targetPart = props.target ? ` on ${props.target}` : ''
-  const descRaw = `  ${musePart}${props.reason}${targetPart} ${theme.paint('dim', `(ref: ${props.id})`)}`
+  const descRaw = `  ${shipPart}${props.reason}${targetPart} ${theme.paint('dim', `(ref: ${props.id})`)}`
   const descTrunc = truncateToWidth(descRaw, innerWidth)
   const descPad = ' '.repeat(Math.max(0, innerWidth - displayWidth(descTrunc)))
   const row1 = `${theme.paint('warn', vt)}  ${descTrunc}${descPad}  ${theme.paint('warn', vt)}`

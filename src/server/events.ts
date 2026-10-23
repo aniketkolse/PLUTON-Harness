@@ -159,6 +159,7 @@ export class ServerEventBroadcaster extends EventEmitter {
           projectId: effectiveProjectId,
           runId: finalEvent.runId,
           taskId: finalEvent.taskId,
+          shipId: finalEvent.role,
           museId: finalEvent.role,
           type: finalEvent.type,
           payload: {

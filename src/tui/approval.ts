@@ -19,6 +19,8 @@ export interface ApprovalViewData {
   reason: string
   /** Only set when the request scope names a concrete target. */
   target?: string
+  requestedByShip?: string
+  /** @deprecated Use `requestedByShip`; kept for backward compatibility. */
   requestedByMuse?: string
   /** Bounded JSON scope from the record: what exactly would happen if approved. */
   scope?: unknown
@@ -111,8 +113,9 @@ export function renderApprovalCard(
     )
   }
 
-  if (data.requestedByMuse) {
-    addRow('Muse', theme.paint('accent', data.requestedByMuse))
+  const requestedBy = data.requestedByShip ?? data.requestedByMuse
+  if (requestedBy) {
+    addRow('Ship', theme.paint('accent', requestedBy))
   }
   addRow('Action', theme.paint('input', safeText(data.action)))
   if (data.target) {
@@ -184,7 +187,7 @@ export function renderApprovalDetails(
 
   addBody('Ref', data.id, 'focus')
   addBody('Status', data.status ?? 'pending')
-  if (data.requestedByMuse) addBody('Muse', data.requestedByMuse)
+  if (data.requestedByShip) addBody('Ship', data.requestedByShip)
   addBody('Action', data.action)
   if (data.target) addBody('Target', safeText(data.target))
   addBody('Reason', safeText(data.reason))

@@ -55,7 +55,7 @@ describe('Docked InputBox and Live StatusBar (Phase 7 & 8)', () => {
       mode: 'chat',
       model: 'anthropic/claude-3-7-sonnet',
       contextPct: 42,
-      museCount: 3,
+      shipCount: 3,
       cost: 0.04,
     }
 
@@ -67,9 +67,19 @@ describe('Docked InputBox and Live StatusBar (Phase 7 & 8)', () => {
     expect(plain).toContain('Mode: chat')
     expect(plain).toContain('anthropic/claude-3-7-sonnet')
     expect(plain).toContain('Context: 42%')
-    expect(plain).toContain('Muses: 3')
+    expect(plain).toContain('Ships: 3')
     expect(plain).toContain('$0.04')
     expect(plain).toContain('/help')
+  })
+
+  it('renders the deprecated museCount prop as the Ships segment (backward compatibility)', () => {
+    const props: StatusBarProps = {
+      state: 'ready',
+      mode: 'chat',
+      model: 'model-a',
+      museCount: 2,
+    }
+    expect(stripAnsi(renderStatusBar(props, 120, theme))).toContain('Ships: 2')
   })
 
   it('colors context usage yellow at 75% and red at 90%', () => {

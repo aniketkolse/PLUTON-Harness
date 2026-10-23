@@ -9,7 +9,7 @@ import type {
   ChatMessageRecord,
   ChatSessionRecord,
   JsonValue,
-  MuseRecord,
+  ShipRecord,
   RunRecord,
   TaskEdgeRecord,
   TaskRecord,
@@ -30,7 +30,17 @@ export interface WorkspaceSummary {
   rootDir: string
   projectId: string
   defaultBranch: string
-  muses: Array<{
+  ships: Array<{
+    id: string
+    slug: string
+    displayName: string
+    role: string
+    engine: string
+    model: string
+    state: string
+  }>
+  /** @deprecated Use `ships`; kept for backward compatibility. */
+  muses?: Array<{
     id: string
     slug: string
     displayName: string
@@ -46,7 +56,7 @@ export interface WorkspaceSummary {
 export interface SessionDetailView {
   session: ChatSessionRecord
   messages: ChatMessageRecord[]
-  activeMuse: {
+  activeShip: {
     id: string
     slug: string
     displayName: string
@@ -78,7 +88,7 @@ export interface RunDetailView {
     totalInputTokens: number
     totalOutputTokens: number
     totalCostUsd: number
-    perMuse: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>
+    perShip: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>
   }
   /**
    * True on a non-terminal run whose supervisor heartbeat is stale far beyond
@@ -160,8 +170,8 @@ export interface McpServerStatus {
   detail: string
   /** Chat session that owns this MCP server, when it is session-scoped. */
   sessionId: string | null
-  museId: string | null
-  museName: string | null
+  shipId: string | null
+  shipName: string | null
   engineKind: string | null
 }
 

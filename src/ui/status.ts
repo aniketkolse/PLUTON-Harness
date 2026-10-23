@@ -1,6 +1,6 @@
 /**
  * Live single-line StatusBar component for Pluton TUI 2.0 (Phase 8).
- * Renders real-time execution state, mode, model, context usage, muses, cost,
+ * Renders real-time execution state, mode, model, context usage, ships, cost,
  * and right-aligned shortcuts.
  */
 
@@ -14,6 +14,9 @@ export interface StatusBarProps {
   engine?: string
   /** Percent used, or null when no real context window is known (renders "unknown"). */
   contextPct?: number | null
+  /** Enabled Ship count shown as "Ships: N" (omit when unknown). */
+  shipCount?: number
+  /** @deprecated Use `shipCount`; kept for backward compatibility. */
   museCount?: number
   /** Cost in USD, only when an engine actually reported one (never estimated). */
   cost?: number | null
@@ -66,8 +69,9 @@ export function renderStatusBar(props: StatusBarProps, width: number, theme: UIT
     }
   }
 
-  if (props.museCount !== undefined) {
-    segments.push(`${theme.paint('textMuted', 'Muses:')} ${theme.paint('textPrimary', String(props.museCount))}`)
+  const shipCount = props.shipCount ?? props.museCount
+  if (shipCount !== undefined) {
+    segments.push(`${theme.paint('textMuted', 'Ships:')} ${theme.paint('textPrimary', String(shipCount))}`)
   }
 
   if (typeof props.cost === 'number') {

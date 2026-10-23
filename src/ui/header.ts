@@ -13,7 +13,9 @@ export interface HeaderProps {
   engine: string
   model: string
   rootDir: string
-  museSlug: string
+  shipSlug?: string
+  /** @deprecated Use `shipSlug`; kept for backward compatibility. */
+  museSlug?: string
   projectName?: string
 }
 
@@ -43,8 +45,9 @@ export function renderHeader(
   const projectSuffix = props.projectName ? ` · ${props.projectName}` : ''
   const rightLine1 = `${theme.paint('accentLight', 'PLUTON')} ${theme.paint('textMuted', `v${props.version}${projectSuffix}`)}`
   const engineLabel = props.engine.charAt(0).toUpperCase() + props.engine.slice(1)
-  const museSuffix = props.museSlug && props.museSlug !== 'manager' ? ` (${props.museSlug})` : ''
-  const rightLine2 = `${theme.paint('textPrimary', 'Agentic Coding Harness')} ${theme.paint('textMuted', '·')} ${theme.paint('info', engineLabel)}${theme.paint('dim', museSuffix)}`
+  const shipSlug = props.shipSlug ?? props.museSlug
+  const shipSuffix = shipSlug && shipSlug !== 'manager' ? ` (${shipSlug})` : ''
+  const rightLine2 = `${theme.paint('textPrimary', 'Agentic Coding Harness')} ${theme.paint('textMuted', '·')} ${theme.paint('info', engineLabel)}${theme.paint('dim', shipSuffix)}`
   const rightLine3 = theme.paint('link', props.rootDir)
 
   const rightLines = [rightLine1, rightLine2, rightLine3]

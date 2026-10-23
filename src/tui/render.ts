@@ -18,7 +18,9 @@ import { renderInputBox } from '../ui/input.ts'
 import { getUITheme } from '../ui/theme.ts'
 
 export interface StatusView {
-  museSlug: string
+  shipSlug?: string
+  /** @deprecated Use `shipSlug`; kept for backward compatibility. */
+  museSlug?: string
   engine: string
   model: string
   busy: boolean
@@ -30,9 +32,10 @@ export interface StatusView {
 export function renderStatusLine(view: StatusView, width: number, theme: Theme): string {
   const parts: string[] = []
 
-  // Left: Muse and engine/model
+  // Left: Ship and engine/model
+  const slug = view.shipSlug ?? view.museSlug ?? ''
   const stateLabel = view.busy ? theme.paint('warn', '[busy]') : theme.paint('dim', '[idle]')
-  parts.push(`${theme.paint('accent', view.museSlug)} (${view.engine}/${view.model}) ${stateLabel}`)
+  parts.push(`${theme.paint('accent', slug)} (${view.engine}/${view.model}) ${stateLabel}`)
 
   // Active run
   if (view.run) {
@@ -140,7 +143,9 @@ export function renderHeader(
   info: {
     projectName: string
     rootDir: string
-    museSlug: string
+    shipSlug?: string
+    /** @deprecated Use `shipSlug`; kept for backward compatibility. */
+    museSlug?: string
     engine: string
     model: string
     mode: string
@@ -158,9 +163,10 @@ export function renderHeader(
   while (cleanModel.startsWith(prefix)) {
     cleanModel = cleanModel.slice(prefix.length)
   }
+  const slug = info.shipSlug ?? info.museSlug ?? ''
   const right = theme.paint(
     'dim',
-    `${info.museSlug} · ${info.engine}/${cleanModel} · session ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`,
+    `${slug} · ${info.engine}/${cleanModel} · session ${info.sessionId} (${sessStatus}, ${info.messageCount} messages)`,
   )
   return `${left} ${theme.paint('dim', '·')} ${right}`
 }
@@ -193,7 +199,9 @@ export interface FullScreenFrameOptions {
   header: {
     projectName: string
     rootDir: string
-    museSlug: string
+    shipSlug?: string
+    /** @deprecated Use `shipSlug`; kept for backward compatibility. */
+    museSlug?: string
     engine: string
     model: string
     runState?: string
@@ -213,7 +221,9 @@ export interface FullScreenFrameOptions {
   approvalDetails?: ApprovalViewData | null
   /** Composer placeholder shown when the draft is empty. */
   placeholder?: string
-  /** Enabled Muse count for the footer (omit when unknown). */
+  /** Enabled Ship count for the footer (omit when unknown). */
+  shipCount?: number
+  /** @deprecated Use `shipCount`; kept for backward compatibility. */
   museCount?: number
   scrollOffset?: number
   columns: number
@@ -300,6 +310,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
 
   // 1. Header: brand banner when brandHeader is requested,
   // or compact brand row — ship mark, wordmark, project — with muse/engine on right.
+  const headerShipSlug = opts.header.shipSlug ?? opts.header.museSlug ?? ''
   if (opts.brandHeader) {
     const hLines = renderUIHeader(
       {
@@ -307,7 +318,8 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
         engine: opts.header.engine,
         model: opts.header.model,
         rootDir: opts.header.rootDir,
-        museSlug: opts.header.museSlug,
+        shipSlug: headerShipSlug,
+        museSlug: headerShipSlug,
         projectName: opts.header.projectName,
       },
       columns,
@@ -339,7 +351,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
     const ship = theme.icon('ship')
     const leftHeader =
       ` ${theme.paint('focus', ship)} ${theme.paint('header', 'PLUTON')}  ${theme.paint('accent', opts.header.projectName)}`
-    const rightHeader = `${opts.header.museSlug} · ${opts.header.engine} `
+    const rightHeader = `${headerShipSlug} · ${opts.header.engine} `
     const headerLeftW = displayWidth(leftHeader)
     const headerRightW = displayWidth(rightHeader)
     if (headerLeftW + headerRightW + 2 <= columns) {
@@ -530,7 +542,7 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
         model: opts.statusView.model,
         engine: opts.statusView.engine,
         contextPct: opts.contextPct,
-        museCount: opts.museCount,
+        shipCount: opts.shipCount ?? opts.museCount,
         cost: opts.cost,
         busy: opts.statusView.busy,
       },
@@ -559,8 +571,9 @@ export function renderFullScreenFrame(opts: FullScreenFrameOptions): {
       : ''
 
     const rightParts: string[] = [opts.statusView.model]
-    if (opts.museCount !== undefined) {
-      rightParts.push(`${String(opts.museCount)} muse${opts.museCount === 1 ? '' : 's'}`)
+    const effectiveShipCount = opts.shipCount ?? opts.museCount
+    if (effectiveShipCount !== undefined) {
+      rightParts.push(`${String(effectiveShipCount)} ship${effectiveShipCount === 1 ? '' : 's'}`)
     }
     if (opts.statusView.usage) {
       rightParts.push(

@@ -9,9 +9,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
 import { NotFoundError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
-import type { ApprovalRecord, MuseRecord, RunRecord } from '../domain/models.ts'
+import type { ApprovalRecord, ShipRecord, RunRecord } from '../domain/models.ts'
 import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
-import { engineAdapterForMuse } from '../engines/approval.ts'
+import { engineAdapterForShip } from '../engines/approval.ts'
 import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
 import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
@@ -20,7 +20,7 @@ import { nativeAdapterFor } from '../execution/adapter.ts'
 import {
   appendExecutionEvent,
   createNativeExecutionProvider,
-  nativeSpecForMuse,
+  nativeSpecForShip,
 } from '../execution/factory.ts'
 import type { NativeExecutionProvider } from '../execution/native.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
@@ -79,8 +79,8 @@ interface McpRegistration {
   name: string
   kind: 'http' | 'stdio'
   sessionId: string
-  museId: string
-  museName: string
+  shipId: string
+  shipName: string
   engineKind: string
   /** Bearer token of the registered transport session (never leaves the process). */
   token: string
@@ -135,6 +135,10 @@ export class ApiRouter {
     registerBuiltinEngines()
   }
 
+  private getStoreShips(): ShipRecord[] {
+    return this.ctx.store.listShips?.() ?? this.ctx.store.listMuses?.() ?? []
+  }
+
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const parsedUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
     const pathname = parsedUrl.pathname
@@ -164,7 +168,7 @@ export class ApiRouter {
       if (method === 'GET' && pathname === '/api/workspace') {
         const store = this.ctx.store
         const project = store.getProject(this.ctx.projectId)
-        const muses = store.listMuses()
+        const ships = this.getStoreShips()
         const runs = store.listRuns(50)
         // listRuns is newest-first: the workspace's active run is the newest
         // non-terminal one. Terminal run states are excluded rather than
@@ -178,7 +182,16 @@ export class ApiRouter {
           rootDir: this.ctx.loaded.rootDir,
           projectId: this.ctx.projectId,
           defaultBranch: project?.defaultBranch ?? this.ctx.loaded.config.project.default_branch,
-          muses: muses.map((m) => ({
+          ships: ships.map((m) => ({
+            id: m.id,
+            slug: m.slug,
+            displayName: m.displayName,
+            role: m.role,
+            engine: m.engineKind,
+            model: m.model,
+            state: m.enabled ? 'ready' : 'disabled',
+          })),
+          muses: ships.map((m) => ({
             id: m.id,
             slug: m.slug,
             displayName: m.displayName,
@@ -258,16 +271,16 @@ export class ApiRouter {
           return true
         }
         if (method === 'POST') {
-          const payload = await this.readJsonBody<{ museId?: string; title?: string }>(req)
-          const muses = this.ctx.store.listMuses()
-          const museId = payload.museId ?? muses[0]?.id
-          if (!museId) {
-            this.sendJson(res, 400, { ok: false, error: 'no muse available for session' })
+          const payload = await this.readJsonBody<{ shipId?: string; museId?: string; title?: string }>(req)
+          const ships = this.getStoreShips()
+          const shipId = payload.shipId ?? payload.museId ?? ships[0]?.id
+          if (!shipId) {
+            this.sendJson(res, 400, { ok: false, error: 'no ship available for session' })
             return true
           }
           const session = this.ctx.store.createChatSession({
             projectId: this.ctx.projectId,
-            museId,
+            shipId,
             title: payload.title ?? 'New Session',
           })
           this.sendJson(res, 201, { ok: true, session })
@@ -285,21 +298,21 @@ export class ApiRouter {
           return true
         }
         const messages = this.ctx.store.listChatMessages(sessionId)
-        const muse = this.ctx.store.getMuse(session.museId)
-        if (!muse) {
-          this.sendJson(res, 404, { ok: false, error: `muse '${session.museId}' not found` })
+        const ship = this.ctx.store.getShip(session.shipId)
+        if (!ship) {
+          this.sendJson(res, 404, { ok: false, error: `ship '${session.shipId}' not found` })
           return true
         }
         const detail: SessionDetailView = {
           session,
           messages,
-          activeMuse: {
-            id: muse.id,
-            slug: muse.slug,
-            displayName: muse.displayName,
-            role: muse.role,
-            engine: muse.engineKind,
-            model: muse.model,
+          activeShip: {
+            id: ship.id,
+            slug: ship.slug,
+            displayName: ship.displayName,
+            role: ship.role,
+            engine: ship.engineKind,
+            model: ship.model,
           },
           busy: this.activeEngineSessions.get(sessionId)?.busy === true,
         }
@@ -333,7 +346,7 @@ export class ApiRouter {
         this.sendJson(res, 202, { ok: true, status: 'streaming', sessionId, mode: payload.mode ?? 'chat' })
 
         // Fire-and-forget prompt turn execution with real SSE streaming
-        void this.executePromptTurn(sessionId, session.museId, userText, payload.mode)
+        void this.executePromptTurn(sessionId, session.shipId, userText, payload.mode)
         return true
       }
 
@@ -369,16 +382,16 @@ export class ApiRouter {
           return true
         }
         if (method === 'POST') {
-          const payload = await this.readJsonBody<{ goal?: string; managerMuseId?: string }>(req)
+          const payload = await this.readJsonBody<{ goal?: string; managerShipId?: string; managerMuseId?: string }>(req)
           const goal = payload.goal?.trim()
           if (!goal) {
             this.sendJson(res, 400, { ok: false, error: 'goal is required' })
             return true
           }
-          const muses = this.ctx.store.listMuses()
-          const manager = muses.find((m) => m.role === 'supervisor') ?? muses[0]
+          const ships = this.getStoreShips()
+          const manager = ships.find((m) => m.role === 'supervisor') ?? ships[0]
           if (!manager) {
-            this.sendJson(res, 400, { ok: false, error: 'no manager muse configured' })
+            this.sendJson(res, 400, { ok: false, error: 'no manager ship configured' })
             return true
           }
           const run = this.ctx.store.createRun({
@@ -386,7 +399,7 @@ export class ApiRouter {
             goal,
             origin: 'api',
             requestedBy: 'operator:ui',
-            managerMuseId: payload.managerMuseId ?? manager.id,
+            managerShipId: payload.managerShipId ?? payload.managerMuseId ?? manager.id,
             acceptanceCriteria: ['Task executed via graphical workspace'],
             budget: {
               maxConcurrentWorkers: 3,
@@ -432,9 +445,13 @@ export class ApiRouter {
           // Read-only roles run in the project root, so they have no per-task
           // workspace row. Report that effective path instead of leaving the
           // partition blank after a reload (live events already carry it).
-          const assignedMuseId =
-            assignment !== null && typeof assignment['museId'] === 'string' ? assignment['museId'] : undefined
-          const policy = assignedMuseId !== undefined ? this.ctx.loaded.config.muses[assignedMuseId]?.workspace_policy : undefined
+          const assignedShipId =
+            assignment !== null && typeof assignment['shipId'] === 'string'
+              ? assignment['shipId']
+              : assignment !== null && typeof assignment['museId'] === 'string'
+                ? assignment['museId']
+                : undefined
+          const policy = assignedShipId !== undefined ? this.ctx.loaded.config.ships[assignedShipId]?.workspace_policy : undefined
           const workspace =
             workspacePathByTask.get(task.id) ??
             (policy === 'read-only' || policy === 'coordinator-read-only' ? this.ctx.loaded.rootDir : undefined)
@@ -695,17 +712,17 @@ export class ApiRouter {
         return true
       }
 
-      // 17. Muses list
-      if (pathname === '/api/muses' && method === 'GET') {
-        const muses = this.ctx.store.listMuses()
-        this.sendJson(res, 200, { ok: true, muses })
+      // 17. Ships list (backward-compatible: /api/muses is a deprecated alias)
+      if ((pathname === '/api/ships' || pathname === '/api/muses') && method === 'GET') {
+        const ships = this.getStoreShips()
+        this.sendJson(res, 200, { ok: true, ships, muses: ships })
         return true
       }
 
       // 18. Models list
       if (pathname === '/api/models' && method === 'GET') {
-        const muses = this.ctx.store.listMuses()
-        const engineKinds = new Set(muses.map((m) => m.engineKind))
+        const ships = this.getStoreShips()
+        const engineKinds = new Set(ships.map((m) => m.engineKind))
         engineKinds.add('opencode')
 
         const modelsByEngine: Record<string, unknown[]> = {}
@@ -722,11 +739,11 @@ export class ApiRouter {
               }))
             }
           } catch (err) {
-            const matchingMuse = muses.find((m) => m.engineKind === engineKind)
-            if (matchingMuse) {
+            const matchingShip = ships.find((m) => m.engineKind === engineKind)
+            if (matchingShip) {
               modelsByEngine[engineKind] = [
                 {
-                  id: matchingMuse.model,
+                  id: matchingShip.model,
                   source: 'static',
                   available: false,
                   reason: err instanceof Error ? err.message : String(err),
@@ -755,51 +772,52 @@ export class ApiRouter {
         return true
       }
 
-      // 20. Switch a Muse's model (persisted; restarts the live engine session)
-      const modelMatch = pathname.match(/^\/api\/muses\/([^/]+)\/model$/)
+      // 20. Switch a Ship's model (backward-compatible: /api/muses/<id>/model is a deprecated alias)
+      const modelMatch = pathname.match(/^\/api\/(?:ships|muses)\/([^/]+)\/model$/)
       if (modelMatch && method === 'POST') {
-        const museId = modelMatch[1]!
+        const shipId = modelMatch[1]!
         const payload = await this.readJsonBody<{ model?: string }>(req)
         const requested = payload.model?.trim()
         if (!requested) {
           this.sendJson(res, 400, { ok: false, error: 'model is required' })
           return true
         }
-        const muse = this.ctx.store.getMuse(museId)
-        if (!muse) {
-          this.sendJson(res, 404, { ok: false, error: `muse '${museId}' not found` })
+        const ship = this.ctx.store.getShip(shipId)
+        if (!ship) {
+          this.sendJson(res, 404, { ok: false, error: `ship '${shipId}' not found` })
           return true
         }
         const isCustom = this.customModels.some((m) => m.id === requested)
-        const adapter = this.adapterForMuse(muse)
+        const adapter = this.adapterForShip(ship)
         if (!isCustom && adapter.capabilities().modelList) {
           const available = await adapter.listModels()
           const known = available.some((m) => m.id === requested || m.label === requested)
           if (!known && available.length > 0) {
             this.sendJson(res, 400, {
               ok: false,
-              error: `model '${requested}' is not offered by engine '${muse.engineKind}'`,
+              error: `model '${requested}' is not offered by engine '${ship.engineKind}'`,
               available: available.map((m) => m.id),
             })
             return true
           }
         }
-        // Persisted on the Muse record (the same store write `pluton chat`'s
+        // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
-        this.ctx.store.updateMuseModel(muse.id, requested)
-        const restarted = await this.restartEngineSessionForMuse(muse.id, requested)
-        if (muse.id === 'coder' || muse.role === 'coder') {
-          const allMuses = this.ctx.store.listMuses()
-          for (const m of allMuses) {
-            if (m.id !== muse.id && (m.role === 'coder' || m.id.startsWith('worker-'))) {
-              this.ctx.store.updateMuseModel(m.id, requested)
-              await this.restartEngineSessionForMuse(m.id, requested)
+        this.ctx.store.updateShipModel(ship.id, requested)
+        const restarted = await this.restartEngineSessionForShip(ship.id, requested)
+        if (ship.id === 'coder' || ship.role === 'coder') {
+          const allShips = this.getStoreShips()
+          for (const m of allShips) {
+            if (m.id !== ship.id && (m.role === 'coder' || m.id.startsWith('worker-'))) {
+              this.ctx.store.updateShipModel(m.id, requested)
+              await this.restartEngineSessionForShip(m.id, requested)
             }
           }
         }
         this.sendJson(res, 200, {
           ok: true,
-          museId: muse.id,
+          shipId: ship.id,
+          museId: ship.id,
           model: requested,
           engineSessionRestarted: restarted,
         })
@@ -825,7 +843,7 @@ export class ApiRouter {
         }
         // Drive the EXISTING run through the manager-planning supervisor — the
         // same path `pluton run --resume` uses, with skipManager off so the
-        // manager Muse actually plans the run. Progress reaches the SPA over
+        // manager Ship actually plans the run. Progress reaches the SPA over
         // the existing run_state/task_state SSE frames.
         this.activeRunTasks.set(runId, runId)
         void resumeRun(this.projectContext(), runId, { skipManager: false }, this.runDeps()).then(
@@ -1097,7 +1115,7 @@ export class ApiRouter {
    */
   private async mcpServersForSession(
     sessionId: string,
-    muse: MuseRecord,
+    ship: ShipRecord,
     adapter: { capabilities(): { mcpServers: boolean } },
   ): Promise<McpServerSpec[]> {
     if (!adapter.capabilities().mcpServers) return []
@@ -1118,7 +1136,7 @@ export class ApiRouter {
         store: this.ctx.store,
         projectId: this.ctx.projectId,
         rootDir: this.ctx.loaded.rootDir,
-        callerMuseId: muse.id,
+        callerShipId: ship.id,
         limits: toolBridgeLimitsFromRuntime(this.ctx.loaded.config.runtime),
         startRun: async (input) => {
           const started = startRunInBackground(
@@ -1133,13 +1151,13 @@ export class ApiRouter {
         },
       })
     } catch {
-      // A bridge the Muse may not use (disabled, wrong project) must not break
+      // A bridge the Ship may not use (disabled, wrong project) must not break
       // the chat turn: the engine simply runs without Pluton tools.
       return []
     }
 
     const { token } = http.register(bridge, {
-      museId: muse.id,
+      shipId: ship.id,
       taskId: null,
       runId: null,
       label: 'spa-operator',
@@ -1148,9 +1166,9 @@ export class ApiRouter {
       name: 'pluton',
       kind: 'http',
       sessionId,
-      museId: muse.id,
-      museName: muse.displayName,
-      engineKind: muse.engineKind,
+        shipId: ship.id,
+        shipName: ship.displayName,
+      engineKind: ship.engineKind,
       token,
     })
     return [
@@ -1187,8 +1205,8 @@ export class ApiRouter {
           ? 'Pluton tool bridge served over loopback HTTP; the engine-side MCP handshake is not reported by the engine protocol.'
           : 'The engine session that owned this bridge is closed.',
         sessionId: reg.sessionId,
-        museId: reg.museId,
-        museName: reg.museName,
+        shipId: reg.shipId,
+        shipName: reg.shipName,
         engineKind: reg.engineKind,
       })
     }
@@ -1207,9 +1225,9 @@ export class ApiRouter {
    * native wraps real engine spawns in the native provider so SPA chat cannot
    * bypass the execution policy through a host adapter.
    */
-  private adapterForMuse(muse: MuseRecord): EngineAdapter {
+  private adapterForShip(ship: ShipRecord): EngineAdapter {
     if (this.ctx.loaded.config.sandbox.kind !== 'native') {
-      return engineAdapterForMuse(muse)
+      return engineAdapterForShip(ship)
     }
     if (this.nativeProvider === null) {
       this.nativeProvider = createNativeExecutionProvider({
@@ -1221,15 +1239,15 @@ export class ApiRouter {
       })
     }
     const provider = this.nativeProvider
-    return nativeAdapterFor(muse, {
+    return nativeAdapterFor(ship, {
       provider,
       isolatedCheckout: false,
       specFor: (req) =>
-        nativeSpecForMuse({
+        nativeSpecForShip({
           config: this.ctx.loaded.config,
           rootDir: this.ctx.loaded.rootDir,
           projectId: this.ctx.projectId,
-          muse,
+          ship,
           workdir: req.workdir,
           engineHome: req.configDir,
           isolatedCheckout: false,
@@ -1239,16 +1257,16 @@ export class ApiRouter {
   }
 
   /**
-   * Apply a new model to a Muse's live engine session.
+   * Apply a new model to a Ship's live engine session.
    *
    * Mirrors `ChatSession.switchModel` (`src/chat/session.ts:232-259`): the old
    * engine session is closed and a fresh one starts on the new model, because
    * the engine pins its model per session.
    */
-  private async restartEngineSessionForMuse(museId: string, model: string): Promise<boolean> {
+  private async restartEngineSessionForShip(shipId: string, model: string): Promise<boolean> {
     for (const [sessionId, entry] of this.activeEngineSessions) {
       const session = this.ctx.store.getChatSessionOrNull(sessionId)
-      if (session === null || session.museId !== museId) continue
+      if (session === null || session.shipId !== shipId) continue
       try {
         await entry.session.close()
       } catch {
@@ -1256,15 +1274,15 @@ export class ApiRouter {
       }
       this.activeEngineSessions.delete(sessionId)
       this.dropMcpRegistration(sessionId)
-      const muse = this.ctx.store.getMuse(museId)
-      if (muse === null) continue
-      const adapter = this.adapterForMuse(muse)
+      const ship = this.ctx.store.getShip(shipId)
+      if (ship === null) continue
+      const adapter = this.adapterForShip(ship)
       const approvals = createEngineApprovalChannel({
         store: this.ctx.store,
         projectId: this.ctx.projectId,
         runId: null,
         taskId: null,
-        museId: muse.id,
+        shipId: ship.id,
         ttlMinutes: this.ctx.loaded.config.runtime.approval_timeout_minutes,
         onRequested: (approval) => {
           this.ctx.broadcaster.broadcast({ type: 'approval_requested', approval })
@@ -1276,13 +1294,13 @@ export class ApiRouter {
         },
       })
       try {
-        const mcpServers = await this.mcpServersForSession(sessionId, muse, adapter)
+      const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter)
         const next = await adapter.startSession({
-          muse: { id: muse.id, slug: muse.slug, role: muse.role, model },
+          ship: { id: ship.id, slug: ship.slug, role: ship.role, model },
           workdir: this.ctx.loaded.rootDir,
           env: {},
-          configDir: muse.engineHome,
-          instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          configDir: ship.engineHome,
+          instructions: `You are ${ship.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
@@ -1313,7 +1331,7 @@ export class ApiRouter {
 
   private async executePromptTurn(
     sessionId: string,
-    museId: string,
+    shipId: string,
     userText: string,
     mode?: string,
   ): Promise<void> {
@@ -1328,18 +1346,18 @@ export class ApiRouter {
     })
     broadcaster.broadcast({ type: 'turn_start', sessionId, userText, mode: mode ?? 'chat' })
 
-    const muse = store.getMuse(museId)
-    if (!muse) {
-      broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: Muse '${museId}' not found]` })
+    const ship = store.getShip(shipId)
+    if (!ship) {
+      broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: Ship '${shipId}' not found]` })
       broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
       return
     }
 
-    const adapter = this.adapterForMuse(muse)
+    const adapter = this.adapterForShip(ship)
 
     let entry = this.activeEngineSessions.get(sessionId)
     if (!entry) {
-      // Interactive engine policies (ask-* Muse modes) forward permission
+      // Interactive engine policies (ask-* Ship modes) forward permission
       // requests to the operator: the request becomes a durable approval the
       // operator decides in the TUI or the SPA, and the SPA hears about it
       // live over SSE. Decisions from the SPA's own route are broadcast there;
@@ -1349,7 +1367,7 @@ export class ApiRouter {
         projectId: this.ctx.projectId,
         runId: null,
         taskId: null,
-        museId: muse.id,
+        shipId: ship.id,
         ttlMinutes: this.ctx.loaded.config.runtime.approval_timeout_minutes,
         onRequested: (approval) => {
           broadcaster.broadcast({ type: 'approval_requested', approval })
@@ -1362,18 +1380,18 @@ export class ApiRouter {
       })
       let session: EngineSession
       try {
-        const mcpServers = await this.mcpServersForSession(sessionId, muse, adapter)
+      const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter)
         session = await adapter.startSession({
-          muse: {
-            id: muse.id,
-            slug: muse.slug,
-            role: muse.role,
-            model: muse.model,
+          ship: {
+            id: ship.id,
+            slug: ship.slug,
+            role: ship.role,
+            model: ship.model,
           },
           workdir: this.ctx.loaded.rootDir,
           env: {},
-          configDir: muse.engineHome,
-          instructions: `You are ${muse.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          configDir: ship.engineHome,
+          instructions: `You are ${ship.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
@@ -1728,7 +1746,7 @@ export async function handleQuestionDecision(
       projectId: opts.projectId ?? 'test-project',
       runId: 'test-run',
       taskId: 'task-qa',
-      requestedByMuseId: 'qa',
+      requestedByShipId: 'qa',
       action: 'qa.question',
       reason: 'Question resolution',
       scope: { selectedOption: opts.selectedOption ?? null, answer: opts.answer ?? null },
@@ -1757,7 +1775,7 @@ export async function handleQuestionDecision(
         projectId: opts.projectId ?? 'default-project',
         runId: 'run-qa-1',
         taskId: 'task-qa',
-        requestedByMuseId: 'qa',
+        requestedByShipId: 'qa',
         action: 'qa.question',
         reason: 'QA question escalation',
         scope: { selectedOption: opts.selectedOption ?? null, answer: opts.answer ?? null },

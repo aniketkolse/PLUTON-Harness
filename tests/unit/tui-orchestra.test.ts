@@ -10,9 +10,9 @@ describe('renderOrchestraInspector', () => {
   const plain = createTheme({ color: false })
   const colored = createTheme({ color: true })
 
-  it('renders Muses, Task list, Pending approvals, and Recent events', () => {
+  it('renders Ships, Task list, Pending approvals, and Recent events', () => {
     const data: OrchestraInspectorData = {
-      muses: [
+      ships: [
         {
           id: 'm1',
           slug: 'manager',
@@ -31,8 +31,8 @@ describe('renderOrchestraInspector', () => {
         },
       ],
       tasks: [
-        { id: 't1', title: 'research auth', state: 'completed', ownerMuseSlug: 'researcher' },
-        { id: 't2', title: 'implement fix', state: 'running', ownerMuseSlug: 'worker-a' },
+        { id: 't1', title: 'research auth', state: 'completed', ownerShipSlug: 'researcher' },
+        { id: 't2', title: 'implement fix', state: 'running', ownerShipSlug: 'worker-a' },
       ],
       approvals: [{ id: 'app_1', action: 'shell', reason: 'run test script' }],
       events: [{ seq: 1, type: 'task.started', summary: 'Task t2 started' }],
@@ -43,7 +43,7 @@ describe('renderOrchestraInspector', () => {
 
     const fullText = lines.join('\n')
     expect(fullText).toContain('ORCHESTRA')
-    expect(fullText).toContain('Muses')
+    expect(fullText).toContain('Ships')
     expect(fullText).toContain('manager')
     expect(fullText).toContain('working')
     expect(fullText).toContain('Task graph')

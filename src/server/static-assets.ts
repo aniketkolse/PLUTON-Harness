@@ -3179,7 +3179,7 @@ select.mini-select {
     var action = el('approvalAction');
     var reason = el('approvalReason');
     if (action) action.textContent = 'Approval required: ' + (approval.action || 'Execute action');
-    if (reason) reason.textContent = approval.reason || ('Requested by ' + (approval.requestedByMuse || 'agent'));
+    if (reason) reason.textContent = approval.reason || ('Requested by ' + (approval.requestedByShip || 'agent'));
     if (banner) banner.classList.remove('is-hidden');
     var okCont = el('btnBannerApproveContinue');
     var ok = el('btnBannerApprove');

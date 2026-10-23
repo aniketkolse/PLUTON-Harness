@@ -1,12 +1,12 @@
 /**
  * Orchestra Inspector renderer for the Pluton TUI.
- * Displays real Muses state, task graph/list, pending approvals, and recent lifecycle events.
+ * Displays real Ships state, task graph/list, pending approvals, and recent lifecycle events.
  */
 
 import type { Theme } from './theme.ts'
 import { displayWidth, truncateToWidth } from './width.ts'
 
-export interface MuseInspectorItem {
+export interface ShipInspectorItem {
   id: string
   slug: string
   role: string
@@ -20,6 +20,8 @@ export interface TaskInspectorItem {
   id: string
   title: string
   state: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'verifying'
+  ownerShipSlug?: string
+  /** @deprecated Use `ownerShipSlug`; kept for backward compatibility. */
   ownerMuseSlug?: string
   dependencies?: string[]
   writeScope?: string[]
@@ -35,7 +37,9 @@ export interface EventInspectorItem {
 }
 
 export interface OrchestraInspectorData {
-  muses: MuseInspectorItem[]
+  ships?: ShipInspectorItem[]
+  /** @deprecated Use `ships`; kept for backward compatibility. */
+  muses?: ShipInspectorItem[]
   tasks: TaskInspectorItem[]
   approvals: Array<{ id: string; action: string; reason: string }>
   events: EventInspectorItem[]
@@ -75,12 +79,13 @@ export function renderOrchestraInspector(
   addLine(theme.paint('header', 'ORCHESTRA'))
   addEmpty()
 
-  // 1. Muses Section
-  addLine(theme.paint('accent', 'Muses'))
-  if (data.muses.length === 0) {
-    addLine(theme.paint('dim', '  (no muses configured)'))
+  // 1. Ships Section
+  addLine(theme.paint('accent', 'Ships'))
+  const ships = data.ships ?? data.muses ?? []
+  if (ships.length === 0) {
+    addLine(theme.paint('dim', '  (no ships configured)'))
   } else {
-    for (const m of data.muses) {
+    for (const m of ships) {
       let icon = theme.icon('idle')
       let stateLabel = theme.paint('dim', m.state)
 
@@ -125,7 +130,8 @@ export function renderOrchestraInspector(
       else if (t.state === 'failed') stateBadge = theme.icon('cross')
       else if (t.state === 'blocked') stateBadge = '[!]'
 
-      const owner = t.ownerMuseSlug ? ` (${t.ownerMuseSlug})` : ''
+      const ownerSlug = t.ownerShipSlug ?? t.ownerMuseSlug
+      const owner = ownerSlug ? ` (${ownerSlug})` : ''
       const line = `  ${theme.paint('border', branch)} ${t.title}${theme.paint('dim', owner)} ${stateBadge}`
       addLine(line)
       if (t.dependencies && t.dependencies.length > 0) {
