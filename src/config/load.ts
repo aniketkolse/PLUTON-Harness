@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { ConfigError } from '../domain/errors.ts'
-import { CONFIG_VERSION, plutonConfigSchema, type PlutonConfig, type MuseConfig } from './schema.ts'
+import { CONFIG_VERSION, plutonConfigSchema, type PlutonConfig, type ShipConfig } from './schema.ts'
 
 export const CONFIG_FILENAME = 'pluton.yaml'
 export const PLUTON_DIR = '.pluton'
@@ -50,7 +50,7 @@ export function validateConfig(raw: unknown, rootDir: string, configPath: string
     if (v !== CONFIG_VERSION) {
       throw new ConfigError(
         `unsupported config version ${JSON.stringify(v)} (this build supports version ${CONFIG_VERSION}). ` +
-          'Migration guidance: see docs/MUSE_CONFIGURATION.md#versioning.',
+          'Migration guidance: see docs/SHIPS_CONFIGURATION.md#versioning.',
         { details: { found: v, supported: CONFIG_VERSION } },
       )
     }
@@ -66,9 +66,9 @@ export function validateConfig(raw: unknown, rootDir: string, configPath: string
   }
   const config = parsed.data
   assertInside(rootDir, config.project.repository, 'project.repository')
-  for (const [museId, muse] of Object.entries(config.muses)) {
-    if (muse.instructions_file) {
-      assertInside(rootDir, muse.instructions_file, `muses.${museId}.instructions_file`)
+  for (const [shipId, ship] of Object.entries(config.ships)) {
+    if (ship.instructions_file) {
+      assertInside(rootDir, ship.instructions_file, `ships.${shipId}.instructions_file`)
     }
   }
   return { config, rootDir: resolve(rootDir), configPath }
@@ -87,12 +87,15 @@ export function assertInside(rootDir: string, p: string, what: string): void {
   }
 }
 
-export function museConfigsSorted(config: PlutonConfig): Array<[string, MuseConfig]> {
-  return Object.entries(config.muses).sort(([a], [b]) => a.localeCompare(b))
+export function shipConfigsSorted(config: PlutonConfig): Array<[string, ShipConfig]> {
+  return Object.entries(config.ships).sort(([a], [b]) => a.localeCompare(b))
 }
 
-export function findManager(config: PlutonConfig): [string, MuseConfig] | null {
-  for (const entry of museConfigsSorted(config)) {
+/** @deprecated Use `shipConfigsSorted`; kept for backward compatibility. */
+export const museConfigsSorted = shipConfigsSorted
+
+export function findManager(config: PlutonConfig): [string, ShipConfig] | null {
+  for (const entry of shipConfigsSorted(config)) {
     if (entry[1].role === 'supervisor') return entry
   }
   return null
