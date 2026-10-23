@@ -19,7 +19,7 @@ export { wakeupChannelFor } from './handlers.ts'
 
 /**
  * The authorization core of the Pluton tool bridge (ADR-0007, ADR-0012). Identity is
- * server-side: the caller Muse, its task/run scope and its permissions are bound
+ * server-side: the caller Ship, its task/run scope and its permissions are bound
  * when the bridge is constructed for one engine session — nothing the model
  * says can widen them. Every call is validated, executed inside the run's (or operator's)
  * budget/graph rules, and audited as an event; failures are typed results, not
@@ -98,7 +98,9 @@ export interface PlutonToolBridgeOptions {
   projectId: string
   rootDir: string
   runId?: string | null
-  callerMuseId: string
+  callerShipId?: string
+  /** @deprecated Use `callerShipId`; kept for backward compatibility. */
+  callerMuseId?: string
   /** The caller's own task when its session is task-scoped (null for the manager or operator). */
   callerTaskId?: string | null
   limits: ToolBridgeLimits
@@ -126,7 +128,7 @@ export class PlutonToolBridge implements McpToolHost {
   private readonly store: Store
   private readonly projectId: string
   private readonly rootDir: string
-  private readonly callerMuseId: string
+  private readonly callerShipId: string
   private readonly now: () => number
   private readonly permissions: readonly string[]
   private readonly maxToolResultChars: number
@@ -135,20 +137,24 @@ export class PlutonToolBridge implements McpToolHost {
   private readonly operatorEnv: OperatorToolEnv | null
 
   constructor(opts: PlutonToolBridgeOptions) {
-    const muse = opts.store.getMuse(opts.callerMuseId)
-    if (!muse || !muse.enabled) {
-      throw new PolicyDeniedError(`caller muse '${opts.callerMuseId}' is not an enabled Muse of this project`)
+    const callerShipId = opts.callerShipId ?? opts.callerMuseId
+    if (!callerShipId) {
+      throw new PolicyDeniedError('callerShipId is required')
     }
-    if (muse.projectId !== opts.projectId) {
-      throw new InternalError(`muse '${muse.id}' belongs to project ${muse.projectId}, not ${opts.projectId}`)
+    const ship = opts.store.getShip(callerShipId)
+    if (!ship || !ship.enabled) {
+      throw new PolicyDeniedError(`caller ship '${callerShipId}' is not an enabled Ship of this project`)
+    }
+    if (ship.projectId !== opts.projectId) {
+      throw new InternalError(`ship '${ship.id}' belongs to project ${ship.projectId}, not ${opts.projectId}`)
     }
 
     this.store = opts.store
     this.projectId = opts.projectId
     this.rootDir = opts.rootDir
-    this.callerMuseId = opts.callerMuseId
+    this.callerShipId = callerShipId
     this.now = opts.now ?? Date.now
-    this.permissions = muse.permissions
+    this.permissions = ship.permissions
     this.maxToolResultChars = opts.limits.maxToolResultChars
 
     if (opts.runId === undefined || opts.runId === null) {
@@ -162,7 +168,7 @@ export class PlutonToolBridge implements McpToolHost {
         store: opts.store,
         projectId: opts.projectId,
         rootDir: opts.rootDir,
-        callerMuseId: opts.callerMuseId,
+        callerShipId,
         now: this.now,
         startRun: opts.startRun,
       }
@@ -180,7 +186,7 @@ export class PlutonToolBridge implements McpToolHost {
         projectId: opts.projectId,
         rootDir: opts.rootDir,
         runId: opts.runId,
-        callerMuseId: opts.callerMuseId,
+        callerShipId,
         callerTaskId: opts.callerTaskId ?? null,
         limits: opts.limits,
         leaseManager: opts.leaseManager,
@@ -219,7 +225,7 @@ export class PlutonToolBridge implements McpToolHost {
         this.audit('tool.denied', { tool: def.name, reason: 'permission_missing', permission: def.permission })
         return this.failure(
           'policy_denied',
-          `muse '${this.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
+          `ship '${this.callerShipId}' lacks permission '${def.permission}' for tool '${def.name}'`,
         )
       }
       const env: OperatorToolEnv = opts?.signal !== undefined ? { ...this.operatorEnv!, signal: opts.signal } : this.operatorEnv!
@@ -262,7 +268,7 @@ export class PlutonToolBridge implements McpToolHost {
       this.audit('tool.denied', { tool: def.name, reason: 'permission_missing', permission: def.permission })
       return this.failure(
         'policy_denied',
-        `muse '${this.runEnv!.callerMuseId}' lacks permission '${def.permission}' for tool '${def.name}'`,
+        `ship '${this.runEnv!.callerShipId}' lacks permission '${def.permission}' for tool '${def.name}'`,
       )
     }
     try {
@@ -314,7 +320,7 @@ export class PlutonToolBridge implements McpToolHost {
       projectId: this.projectId,
       runId: this.runEnv?.runId ?? null,
       taskId: this.runEnv?.callerTaskId ?? null,
-      museId: this.callerMuseId,
+      shipId: this.callerShipId,
       type,
       payload,
     })

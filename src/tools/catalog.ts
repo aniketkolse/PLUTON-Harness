@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import { MUSE_ROLES } from '../domain/models.ts'
+import { SHIP_ROLES } from '../domain/models.ts'
 import type { Permission } from '../domain/permissions.ts'
 import type { McpToolInfo } from './mcp-server.ts'
 
 /**
- * The restricted Pluton tool surface (ADR-0007). The Manager Muse (and, where
- * their permissions allow, worker Muses) affects the run ONLY through these
+ * The restricted Pluton tool surface (ADR-0007). The Manager Ship (and, where
+ * their permissions allow, worker Ships) affects the run ONLY through these
  * tools: every call is validated server-side against the caller's identity,
  * its configured permissions, the run budget and the live graph state.
  *
@@ -26,21 +26,33 @@ export const TOOL_SCHEMAS = {
       title,
       brief,
       acceptanceCriteria,
-      assigneeMuseId: z.string().min(1).max(64),
+      assigneeShipId: z.string().min(1).max(64).optional(),
+      /** @deprecated Use `assigneeShipId`; accepted for backward compatibility. */
+      assigneeMuseId: z.string().min(1).max(64).optional(),
       dependsOn: dependsOn.optional(),
       writeScope: writeScope.optional(),
     })
-    .strict(),
+    .strict()
+    .refine(
+      (data) => data.assigneeShipId !== undefined || data.assigneeMuseId !== undefined,
+      { message: 'either assigneeShipId or assigneeMuseId is required' },
+    ),
   'task.delegate': z
     .object({
       title,
       brief,
       acceptanceCriteria,
-      assigneeMuseId: z.string().min(1).max(64),
+      assigneeShipId: z.string().min(1).max(64).optional(),
+      /** @deprecated Use `assigneeShipId`; accepted for backward compatibility. */
+      assigneeMuseId: z.string().min(1).max(64).optional(),
       dependsOn: dependsOn.optional(),
       writeScope: writeScope.optional(),
     })
-    .strict(),
+    .strict()
+    .refine(
+      (data) => data.assigneeShipId !== undefined || data.assigneeMuseId !== undefined,
+      { message: 'either assigneeShipId or assigneeMuseId is required' },
+    ),
   'scope.declare': z
     .object({
       paths: z.array(z.string().min(1).max(500)).min(1).max(100),
@@ -80,6 +92,21 @@ export const TOOL_SCHEMAS = {
       feedback: z.string().min(1).max(2_000),
     })
     .strict(),
+  'ship.propose_create': z
+    .object({
+      shipId: z
+        .string()
+        .min(1)
+        .max(48)
+        .regex(/^[a-z][a-z0-9-]*$/, 'shipId must be a lowercase slug (letters, digits, dashes)'),
+      displayName: z.string().min(1).max(80),
+      role: z.enum(SHIP_ROLES),
+      engine: z.string().min(1).max(40),
+      model: z.string().min(1).max(200),
+      reason: z.string().min(1).max(2_000),
+    })
+    .strict(),
+  /** @deprecated Use `ship.propose_create`; kept for backward compatibility with engines that still file under the old name. */
   'muse.propose_create': z
     .object({
       museId: z
@@ -88,7 +115,7 @@ export const TOOL_SCHEMAS = {
         .max(48)
         .regex(/^[a-z][a-z0-9-]*$/, 'museId must be a lowercase slug (letters, digits, dashes)'),
       displayName: z.string().min(1).max(80),
-      role: z.enum(MUSE_ROLES),
+      role: z.enum(SHIP_ROLES),
       engine: z.string().min(1).max(40),
       model: z.string().min(1).max(200),
       reason: z.string().min(1).max(2_000),
@@ -134,13 +161,13 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'task.create',
     mutating: true,
     description:
-      'Create a top-level task in this run and assign it to a Muse. Use this for the first level of work; to split work under YOUR OWN task use task.delegate. The brief must state objective, inputs, done criteria and required evidence. The runtime validates budgets, team size, dependencies and graph rules before recording anything.',
+      'Create a top-level task in this run and assign it to a Ship. Use this for the first level of work; to split work under YOUR OWN task use task.delegate. The brief must state objective, inputs, done criteria and required evidence. The runtime validates budgets, team size, dependencies and graph rules before recording anything.',
   },
   'task.delegate': {
     permission: 'task.delegate',
     mutating: true,
     description:
-      'Create a child task under YOUR current task and assign it to a different Muse. Rejected for delegation-depth, fan-out, dependency-cycle and budget overflows, and for any assignee that already owns an ancestor of your task (delegation can never cycle back up its own chain).',
+      'Create a child task under YOUR current task and assign it to a different Ship. Rejected for delegation-depth, fan-out, dependency-cycle and budget overflows, and for any assignee that already owns an ancestor of your task (delegation can never cycle back up its own chain).',
   },
   'task.inspect': {
     permission: 'task.inspect',
@@ -172,11 +199,18 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     description:
       'Manager-only: send a FAILED task back for one more attempt. Only a `failed` task is eligible; your feedback (bounded, sanitized) is recorded on the task and reaches the next attempt’s prompt, and the task is requeued with its attempt counter advanced. Rejected once the configured revision cap (runtime.max_revisions_per_task) is exhausted.',
   },
+  'ship.propose_create': {
+    permission: 'ship.propose_create',
+    mutating: true,
+    description:
+      'Propose a new specialist Ship. Validated against team-size and policy limits, then recorded as a pending operator approval — nothing is instantiated until the operator decides. Especially relevant when the proposal would introduce a new engine.',
+  },
+  /** @deprecated Use `ship.propose_create` def; kept for backward compatibility with engines that still call the old name. */
   'muse.propose_create': {
     permission: 'muse.propose_create',
     mutating: true,
     description:
-      'Propose a new specialist Muse. Validated against team-size and policy limits, then recorded as a pending operator approval — nothing is instantiated until the operator decides. Especially relevant when the proposal would introduce a new engine.',
+      'Propose a new specialist Ship. Validated against team-size and policy limits, then recorded as a pending operator approval — nothing is instantiated until the operator decides. Especially relevant when the proposal would introduce a new engine.',
   },
   'approval.request': {
     permission: 'approval.request',
@@ -206,13 +240,13 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     permission: 'scope.declare',
     mutating: true,
     description:
-      'Declare intended file paths and symbols before modifying them. Prohibits conflicting concurrent edits and lockfile corruption across Muses.',
+      'Declare intended file paths and symbols before modifying them. Prohibits conflicting concurrent edits and lockfile corruption across Ships.',
   },
   'scope.release': {
     permission: 'scope.release',
     mutating: true,
     description:
-      'Release declared file paths so other Muses may acquire them after work is completed.',
+      'Release declared file paths so other Ships may acquire them after work is completed.',
   },
 }
 

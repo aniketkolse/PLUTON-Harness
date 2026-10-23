@@ -249,6 +249,7 @@ describe('PlutonToolBridge — identity and permissions', () => {
       'task.get_result',
       'task.cancel',
       'task.request_revision',
+      'ship.propose_create',
       'muse.propose_create',
       'approval.request',
       'diff.inspect',
@@ -277,7 +278,7 @@ describe('PlutonToolBridge — identity and permissions', () => {
 
   it('refuses to construct a bridge for an unknown or disabled caller Muse', () => {
     const fx = makeFixture()
-    expect(() => makeBridge(fx, 'ghost')).toThrowError(/not an enabled Muse/)
+    expect(() => makeBridge(fx, 'ghost')).toThrowError(/not an enabled (Muse|Ship)/)
   })
 
   it('refuses to construct a bridge when runId is an unknown run id string', () => {
@@ -469,6 +470,7 @@ describe('PlutonToolBridge — manager-requested revisions (CS-5)', () => {
     expect(task.failure).toEqual({
       code: 'revision_requested',
       feedback: 'fix thebug', // control characters stripped before persisting
+      requestedByShipId: 'manager',
       requestedByMuseId: 'manager',
       previousFailure: FAILURE,
     })
@@ -539,7 +541,7 @@ describe('PlutonToolBridge — manager-requested revisions (CS-5)', () => {
 
     // (b) Permission granted: the handler itself still refuses a task-scoped session.
     fx.store.db
-      .prepare('UPDATE muses SET permissions_json = ? WHERE id = ?')
+      .prepare('UPDATE ships SET permissions_json = ? WHERE id = ?')
       .run(JSON.stringify([...WORKER_PERMISSIONS, 'task.request_revision']), 'worker-a')
     const granted = await makeBridge(fx, 'worker-a', taskId).call('task.request_revision', {
       taskId,

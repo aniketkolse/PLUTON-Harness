@@ -15,7 +15,7 @@ export interface OperatorToolEnv {
   store: Store
   projectId: string
   rootDir: string
-  callerMuseId: string
+  callerShipId: string
   now: () => number
   signal?: AbortSignal
   /** Injected by `pluton chat`: create + drive a supervised run in the background. */

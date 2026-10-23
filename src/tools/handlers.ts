@@ -1,7 +1,7 @@
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, StateTransitionError, ValidationError, WorkspaceError } from '../domain/errors.ts'
-import type { JsonValue, MuseRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
+import type { JsonValue, ShipRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
 import { wakeupChannelFor, type WakeupRegistry } from '../orchestrator/wakeups.ts'
@@ -25,7 +25,7 @@ export interface ToolEnv {
   projectId: string
   rootDir: string
   runId: string
-  callerMuseId: string
+  callerShipId: string
   callerTaskId: string | null
   limits: ToolBridgeLimits
   wakeups: WakeupRegistry
@@ -62,13 +62,14 @@ const GIT_TIMEOUT_MS = 30_000
 const MAX_PENDING_APPROVALS = 3
 /**
  * Approval actions Pluton's own subsystems consume from approved rows: the
- * integration gate (`integration.apply`), muse instantiation (`muse.create`)
- * and the engine permission channel (`engine.permission`). A Muse filing one
+ * integration gate (`integration.apply`), ship instantiation (`ship.create`)
+ * and the engine permission channel (`engine.permission`). A Ship filing one
  * of these through `approval.request` would forge the provenance those
  * consumers trust, so the tool refuses them outright.
  */
 const HOST_OWNED_APPROVAL_ACTIONS: ReadonlySet<string> = new Set([
   'integration.apply',
+  'ship.create',
   'muse.create',
   'engine.permission',
 ])
@@ -81,7 +82,7 @@ type TaskSummary = {
   state: TaskState
   depth: number
   parentTaskId: string | null
-  assigneeMuseId: string | null
+  assigneeShipId: string | null
   createdAt: string
   completedAt: string | null
 }
@@ -93,7 +94,7 @@ function summarizeTask(t: TaskRecord): TaskSummary {
     state: t.state,
     depth: t.depth,
     parentTaskId: t.parentTaskId,
-    assigneeMuseId: t.assigneeMuseId,
+    assigneeShipId: t.assigneeShipId,
     createdAt: t.createdAt,
     completedAt: t.completedAt,
   }
@@ -197,15 +198,15 @@ function visibleTask(env: ToolEnv, taskId: string): TaskRecord {
   return task
 }
 
-/** Accepts a Muse id or its project slug; anything else is a config-level mistake, not a guess. */
-function resolveMuse(env: ToolEnv, ref: string): MuseRecord {
-  const direct = env.store.getMuse(ref)
+/** Accepts a Ship id or its project slug; anything else is a config-level mistake, not a guess. */
+function resolveShip(env: ToolEnv, ref: string): ShipRecord {
+  const direct = env.store.getShip(ref)
   if (direct && direct.projectId === env.projectId && direct.enabled) return direct
   const bySlug = env.store
-    .listMuses()
+    .listShips()
     .find((m) => m.projectId === env.projectId && m.slug === ref && m.enabled)
   if (bySlug) return bySlug
-  throw new ValidationError(`unknown or disabled Muse '${ref}': use an id or slug from the project's team`)
+  throw new ValidationError(`unknown or disabled Ship '${ref}': use an id or slug from the project's team`)
 }
 
 function assertInsideRoot(rootDir: string, path: string): void {
@@ -229,9 +230,9 @@ function refusedRelativePath(rel: string): string | null {
   return null
 }
 
-function scopeMuseId(scope: JsonValue): string | null {
+function scopeShipId(scope: JsonValue): string | null {
   if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
-  const value = (scope as Record<string, JsonValue>)['museId']
+  const value = (scope as Record<string, JsonValue>)['shipId']
   return typeof value === 'string' ? value : null
 }
 
@@ -301,13 +302,13 @@ function cancelDependentTasks(env: ToolEnv, rootTaskId: string, reason: string):
         projectId: env.projectId,
         runId: env.runId,
         taskId: dependent.id,
-        museId: env.callerMuseId,
+        shipId: env.callerShipId,
         type: 'task.cancelled_by_dependency',
         payload: {
           dependencyTaskId: current.taskId,
           rootTaskId,
           reason,
-          cancelledBy: env.callerMuseId,
+          cancelledBy: env.callerShipId,
         },
       })
       cancelled.push(dependent.id)
@@ -327,10 +328,68 @@ function approvalExpiresAt(nowMs: number, ttlMinutes: number): string | null {
   return new Date(nowMs + ttlMinutes * 60_000).toISOString()
 }
 
+async function proposeNewShip(
+  env: ToolEnv,
+  args: { shipId: string; displayName: string; role: string; engine: string; model: string; reason: string },
+  legacyMuse = false,
+): Promise<JsonValue> {
+  const ships = env.store.listShips().filter((m) => m.projectId === env.projectId)
+  if (ships.some((m) => m.id === args.shipId || m.slug === args.shipId)) {
+    throw new ConflictError(`Ship '${args.shipId}' already exists in this project`, { shipId: args.shipId })
+  }
+  const enabled = ships.filter((m) => m.enabled)
+  if (enabled.length + 1 > env.limits.maxTeamSize) {
+    throw new PolicyDeniedError(
+      `team size limit reached: ${enabled.length} enabled Ships, max_team_size ${env.limits.maxTeamSize}`,
+    )
+  }
+  const pending = env.store.listApprovals(env.runId).filter((x) => x.status === 'pending')
+  const duplicate = pending.find((x) => (x.action === 'ship.create' || x.action === 'muse.create') && (scopeShipId(x.scope) ?? (x.scope as Record<string, JsonValue>)['museId'] as string | null) === args.shipId)
+  if (duplicate) {
+    throw new PolicyDeniedError(
+      `a pending proposal for Ship '${args.shipId}' already exists (${duplicate.id}); wait for the operator decision`,
+    )
+  }
+  if (pending.length >= MAX_PENDING_APPROVALS) {
+    throw new PolicyDeniedError(
+      `run ${env.runId} already has ${String(pending.length)} pending approvals (limit ${String(MAX_PENDING_APPROVALS)}); resolve them before asking for more`,
+    )
+  }
+  const enginesInUse = new Set(enabled.map((m) => m.engineKind))
+  const addsEngine = !enginesInUse.has(args.engine)
+  const approval = env.store.createApproval({
+    projectId: env.projectId,
+    runId: env.runId,
+    taskId: env.callerTaskId,
+    requestedByShipId: env.callerShipId,
+    action: legacyMuse ? 'muse.create' : 'ship.create',
+    reason: args.reason,
+    scope: { shipId: args.shipId, museId: args.shipId, displayName: args.displayName, role: args.role, engine: args.engine, model: args.model },
+    expiresAt: approvalExpiresAt(env.now(), env.limits.approvalTtlMinutes),
+  })
+  env.store.appendEvent({
+    projectId: env.projectId,
+    runId: env.runId,
+    taskId: env.callerTaskId,
+    shipId: env.callerShipId,
+    type: legacyMuse ? 'muse.proposal_recorded' : 'ship.proposal_recorded',
+    payload: { approvalId: approval.id, shipId: args.shipId, museId: args.shipId, engine: args.engine, addsEngine },
+  })
+  return {
+    proposalId: approval.id,
+    status: 'pending_approval',
+    requiresApproval: true,
+    addsEngine,
+    note: 'specialist Ship creation is operator-gated in this build: the proposal is validated and recorded, nothing is instantiated until the operator decides',
+  }
+}
+
 export const TOOL_HANDLERS: ToolHandlers = {
   'task.create': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['task.create'].parse(args)
-    const assignee = resolveMuse(env, a.assigneeMuseId)
+    const assigneeRef = a.assigneeShipId ?? a.assigneeMuseId
+    if (!assigneeRef) throw new ValidationError('either assigneeShipId or assigneeMuseId is required')
+    const assignee = resolveShip(env, assigneeRef)
     assertDependenciesVisible(env, a.dependsOn)
     const task = admitTask(
       env.store,
@@ -340,7 +399,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
         title: a.title,
         brief: a.brief,
         acceptanceCriteria: a.acceptanceCriteria,
-        assigneeMuseId: assignee.id,
+        assigneeShipId: assignee.id,
         dependsOn: a.dependsOn,
         writeScope: a.writeScope,
       },
@@ -352,9 +411,11 @@ export const TOOL_HANDLERS: ToolHandlers = {
   'task.delegate': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['task.delegate'].parse(args)
     if (env.callerTaskId === null) {
-      throw new PolicyDeniedError('task.delegate requires a task-scoped Muse session; use task.create for top-level tasks')
+      throw new PolicyDeniedError('task.delegate requires a task-scoped Ship session; use task.create for top-level tasks')
     }
-    const assignee = resolveMuse(env, a.assigneeMuseId)
+    const assigneeRef = a.assigneeShipId ?? a.assigneeMuseId
+    if (!assigneeRef) throw new ValidationError('either assigneeShipId or assigneeMuseId is required')
+    const assignee = resolveShip(env, assigneeRef)
     const caller = env.store.getTask(env.callerTaskId)
     if (TERMINAL_TASK_STATES.has(caller.state)) {
       throw new PolicyDeniedError(
@@ -364,12 +425,12 @@ export const TOOL_HANDLERS: ToolHandlers = {
     assertDependenciesVisible(env, a.dependsOn)
     const byId = tasksById(env)
     // Delegation must never cycle back up the task chain: reject assigning the
-    // child to any Muse that already owns an ancestor (including the caller's
-    // own task, whose assignee is the calling Muse).
+    // child to any Ship that already owns an ancestor (including the caller's
+    // own task, whose assignee is the calling Ship).
     let ancestor: TaskRecord | undefined = caller
     const seen = new Set<string>()
     while (ancestor) {
-      if (ancestor.assigneeMuseId === assignee.id) {
+      if (ancestor.assigneeShipId === assignee.id) {
         throw new PolicyDeniedError(
           `cannot assign child of '${caller.id}' to '${assignee.id}': it already owns ancestor task '${ancestor.id}' (delegation may never cycle up its own chain)`,
         )
@@ -386,7 +447,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
         title: a.title,
         brief: a.brief,
         acceptanceCriteria: a.acceptanceCriteria,
-        assigneeMuseId: assignee.id,
+        assigneeShipId: assignee.id,
         dependsOn: a.dependsOn,
         writeScope: a.writeScope,
       },
@@ -551,9 +612,9 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: env.runId,
       taskId: task.id,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'task.cancelled_by_tool',
-      payload: { reason: a.reason, cancelledBy: env.callerMuseId },
+      payload: { reason: a.reason, cancelledBy: env.callerShipId },
     })
     const cancelledDependents = cancelDependentTasks(env, task.id, a.reason)
     return {
@@ -569,7 +630,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
   'task.request_revision': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['task.request_revision'].parse(args)
     // Manager scope is the caller's SESSION shape, not its permission set: a
-    // task-scoped session is refused even when its Muse was granted the
+    // task-scoped session is refused even when its Ship was granted the
     // permission, so no worker can ever send a task back.
     if (env.callerTaskId !== null) {
       throw new PolicyDeniedError('task.request_revision is manager-scoped (top-level manager session only)')
@@ -604,7 +665,8 @@ export const TOOL_HANDLERS: ToolHandlers = {
       failure: {
         code: 'revision_requested',
         feedback,
-        requestedByMuseId: env.callerMuseId,
+        requestedByShipId: env.callerShipId,
+        requestedByMuseId: env.callerShipId,
         previousFailure: task.failure,
       },
     })
@@ -617,7 +679,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: task.runId,
       taskId: task.id,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'task.revision_scheduled',
       payload: { attempt: updated.attempt },
     })
@@ -627,63 +689,21 @@ export const TOOL_HANDLERS: ToolHandlers = {
     return { task: summarizeTask(updated) }
   },
 
+  'ship.propose_create': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['ship.propose_create'].parse(args)
+    return proposeNewShip(env, { shipId: a.shipId, displayName: a.displayName, role: a.role, engine: a.engine, model: a.model, reason: a.reason }, false)
+  },
+
+  /** @deprecated Use `ship.propose_create`; kept for backward compatibility with engines that still file under the old name. */
   'muse.propose_create': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['muse.propose_create'].parse(args)
-    const muses = env.store.listMuses().filter((m) => m.projectId === env.projectId)
-    if (muses.some((m) => m.id === a.museId || m.slug === a.museId)) {
-      throw new ConflictError(`Muse '${a.museId}' already exists in this project`, { museId: a.museId })
-    }
-    const enabled = muses.filter((m) => m.enabled)
-    if (enabled.length + 1 > env.limits.maxTeamSize) {
-      throw new PolicyDeniedError(
-        `team size limit reached: ${enabled.length} enabled Muses, max_team_size ${env.limits.maxTeamSize}`,
-      )
-    }
-    const pending = env.store.listApprovals(env.runId).filter((x) => x.status === 'pending')
-    const duplicate = pending.find((x) => x.action === 'muse.create' && scopeMuseId(x.scope) === a.museId)
-    if (duplicate) {
-      throw new PolicyDeniedError(
-        `a pending proposal for Muse '${a.museId}' already exists (${duplicate.id}); wait for the operator decision`,
-      )
-    }
-    if (pending.length >= MAX_PENDING_APPROVALS) {
-      throw new PolicyDeniedError(
-        `run ${env.runId} already has ${String(pending.length)} pending approvals (limit ${String(MAX_PENDING_APPROVALS)}); resolve them before asking for more`,
-      )
-    }
-    const enginesInUse = new Set(enabled.map((m) => m.engineKind))
-    const addsEngine = !enginesInUse.has(a.engine)
-    const approval = env.store.createApproval({
-      projectId: env.projectId,
-      runId: env.runId,
-      taskId: env.callerTaskId,
-      requestedByMuseId: env.callerMuseId,
-      action: 'muse.create',
-      reason: a.reason,
-      scope: { museId: a.museId, displayName: a.displayName, role: a.role, engine: a.engine, model: a.model },
-      expiresAt: approvalExpiresAt(env.now(), env.limits.approvalTtlMinutes),
-    })
-    env.store.appendEvent({
-      projectId: env.projectId,
-      runId: env.runId,
-      taskId: env.callerTaskId,
-      museId: env.callerMuseId,
-      type: 'muse.proposal_recorded',
-      payload: { approvalId: approval.id, museId: a.museId, engine: a.engine, addsEngine },
-    })
-    return {
-      proposalId: approval.id,
-      status: 'pending_approval',
-      requiresApproval: true,
-      addsEngine,
-      note: 'specialist Muse creation is operator-gated in this build: the proposal is validated and recorded, nothing is instantiated until the operator decides',
-    }
+    return proposeNewShip(env, { shipId: a.museId, displayName: a.displayName, role: a.role, engine: a.engine, model: a.model, reason: a.reason }, true)
   },
 
   'approval.request': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['approval.request'].parse(args)
     // Persistence strips control characters (store.createApproval), so the
-    // denylist must compare the stripped value: a raw 'muse.create\u0007'
+    // denylist must compare the stripped value: a raw 'ship.create\u0007'
     // would otherwise pass this check and launder into a host-owned action
     // name on the stored card.
     const action = stripControlChars(a.action)
@@ -692,7 +712,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
     }
     if (HOST_OWNED_APPROVAL_ACTIONS.has(action)) {
       throw new PolicyDeniedError(
-        `action '${action}' is host-owned; muses cannot file it via approval.request (Pluton subsystems create these rows)`,
+        `action '${action}' is host-owned; ships cannot file it via approval.request (Pluton subsystems create these rows)`,
       )
     }
     const record = env.store.getRun(env.runId)
@@ -709,7 +729,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: env.runId,
       taskId: env.callerTaskId,
-      requestedByMuseId: env.callerMuseId,
+      requestedByShipId: env.callerShipId,
       action,
       reason: a.reason,
       scope: a.scope ?? {},
@@ -719,7 +739,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: env.runId,
       taskId: env.callerTaskId,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'approval.requested',
       payload: { approvalId: approval.id, action: approval.action },
     })
@@ -896,9 +916,9 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: record.id,
       taskId: env.callerTaskId,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'run.stop_requested',
-      payload: { reason: a.reason, requestedBy: env.callerMuseId },
+      payload: { reason: a.reason, requestedBy: env.callerShipId },
     })
     return { runId: updated.id, state: updated.state }
   },
@@ -911,14 +931,14 @@ export const TOOL_HANDLERS: ToolHandlers = {
     if (!env.leaseManager) {
       throw new InternalError('leaseManager is not configured on ToolEnv')
     }
-    const res = env.leaseManager.declareScope(env.runId, env.callerTaskId, env.callerMuseId, a.paths, a.symbols)
+    const res = env.leaseManager.declareScope(env.runId, env.callerTaskId, env.callerShipId, a.paths, a.symbols)
     if (res.conflicts.length > 0) {
       const explanation = res.conflicts.map((c) => c.reason).join('; ')
       env.store.appendEvent({
         projectId: env.projectId,
         runId: env.runId,
         taskId: env.callerTaskId,
-        museId: env.callerMuseId,
+        shipId: env.callerShipId,
         type: 'scope.conflict',
         payload: { paths: a.paths, conflicts: res.conflicts as unknown as JsonValue, explanation },
       })
@@ -928,7 +948,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: env.runId,
       taskId: env.callerTaskId,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'scope.declared',
       payload: { acquired: res.acquired, symbols: (a.symbols ?? null) as JsonValue },
     })
@@ -947,7 +967,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
       projectId: env.projectId,
       runId: env.runId,
       taskId: env.callerTaskId,
-      museId: env.callerMuseId,
+      shipId: env.callerShipId,
       type: 'scope.released',
       payload: { released },
     })
