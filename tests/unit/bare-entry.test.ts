@@ -22,6 +22,6 @@ describe('bare pluton CLI execution', () => {
     expect(res.status).toBe(0)
     expect(res.stdout).toContain('Pluton-Harness')
     expect(res.stdout).toContain('Usage: pluton')
-    expect(res.stdout).toContain('chat [options] [muse]')
+    expect(res.stdout).toContain('chat [options] [ship]')
   })
 })

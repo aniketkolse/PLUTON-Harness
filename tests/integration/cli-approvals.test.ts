@@ -174,7 +174,7 @@ describe('approval text terminal boundary (raw CLI output)', () => {
     // bypassing createApproval. The CLI must still never emit driver bytes.
     fx.store.db
       .prepare(
-        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_muse_id, action, reason, scope_json,
+        `INSERT INTO approvals (id, project_id, run_id, task_id, requested_by_ship_id, action, reason, scope_json,
                                  status, decided_by, decided_at, expires_at, created_at)
          VALUES ('approval_legacy_esc', ?, NULL, NULL, 'manager', ?, ?, '{}', 'pending', NULL, NULL, NULL, ?)`,
       )

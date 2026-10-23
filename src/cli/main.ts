@@ -21,14 +21,14 @@ import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { optionalProject, requireProject } from './context.ts'
 import { appRun, type AppCommandOptions } from './commands/app.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
-import { attachMuse } from './commands/attach.ts'
+import { attachShip } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { integrateRun } from './commands/integrate.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
-import { createMuse, editMuse, engineList, listMuses, modelList, showMuse } from './commands/muse.ts'
+import { createShip, editShip, engineList, listShips, modelList, showShip } from './commands/muse.ts'
 import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
 import { workspaceClean } from './commands/workspace.ts'
 import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProfile } from '../sandbox/image.ts'
@@ -51,8 +51,8 @@ registerBuiltinEngines()
 const program = new Command()
   .name('pluton')
   .description(
-    'Pluton-Harness: a local-first control plane coordinating a team of AI coding Muses ' +
-      'with per-Muse models, workspaces and terminals.',
+    'Pluton-Harness: a local-first control plane coordinating a team of AI coding Ships ' +
+      'with per-Ship models, workspaces and terminals.',
   )
   .version(PLUTON_VERSION)
   .option('--json', 'machine-readable output: one JSON document on stdout (also via PLUTON_JSON=1)')
@@ -291,42 +291,45 @@ program
   })
 
 // ---------------------------------------------------------------------------
-// muse
+// ship
 // ---------------------------------------------------------------------------
 
-const museCmd = program.command('muse').description('inspect and configure Muses (team members)')
+const shipCmd = program.command('ship').description('inspect and configure Ships (team members)')
 
-museCmd
+// Backward-compatible: `pluton muse` is a deprecated alias for `pluton ship`
+shipCmd.alias('muse')
+
+shipCmd
   .command('list')
-  .description('list configured Muses')
+  .description('list configured Ships')
   .action(async (_opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const muses = listMuses(ctx.loaded.config)
-      const manager = muses.find((m) => m.role === 'supervisor') ?? null
+      const ships = listShips(ctx.loaded.config)
+      const manager = ships.find((m) => m.role === 'supervisor') ?? null
       const rows: string[][] = [['ID', 'NAME', 'ROLE', 'ENGINE', 'MODEL', 'WORKSPACE']]
-      for (const m of muses) {
+      for (const m of ships) {
         rows.push([m.id, m.displayName, m.role, m.engine, m.model, m.workspacePolicy])
       }
       const human =
-        muses.length === 0
-          ? 'no muses configured — edit pluton.yaml or run `pluton muse create`'
+        ships.length === 0
+          ? 'no ships configured — edit pluton.yaml or run `pluton ship create`'
           : `${table(rows)}\n\nmanager: ${manager ? manager.id : '(none — a run cannot start)'}`
-      emitOk(io, json, human, { muses, manager: manager?.id ?? null, count: muses.length })
+      emitOk(io, json, human, { ships, manager: manager?.id ?? null, count: ships.length })
     })
   })
 
-museCmd
-  .command('show <muse>')
-  .description('show one Muse: config, engine install, auth, instructions file')
-  .action(async (museId: string, _opts: unknown, cmd: Command) => {
+shipCmd
+  .command('show <ship>')
+  .description('show one Ship: config, engine install, auth, instructions file')
+  .action(async (shipId: string, _opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const detail = await showMuse(ctx, museId)
+      const detail = await showShip(ctx, shipId)
       const lines = [
-        `muse:        ${detail.id} (${detail.displayName})`,
+        `ship:        ${detail.id} (${detail.displayName})`,
         `role:        ${detail.role}`,
         `engine:      ${detail.engine}${detail.discovery ? ` — ${detail.discovery.installed ? 'installed' : 'NOT installed'}` : ' — unknown engine kind'}`,
         `model:       ${detail.model}`,
@@ -341,9 +344,9 @@ museCmd
     })
   })
 
-museCmd
+shipCmd
   .command('create <id>')
-  .description('add a Muse to pluton.yaml (validated before the file is touched)')
+  .description('add a Ship to pluton.yaml (validated before the file is touched)')
   .requiredOption('--engine <kind>', 'engine kind (see `pluton engine list`)')
   .requiredOption('--model <model>', 'exact provider-qualified model id for that engine')
   .option('--display-name <name>', 'human display name (default: id)')
@@ -354,7 +357,7 @@ museCmd
   .option('--permission <permission...>', 'grant a permission (repeatable)')
   .action(
     async (
-      museId: string,
+      shipId: string,
       opts: {
         engine: string
         model: string
@@ -370,8 +373,8 @@ museCmd
       const json = jsonMode(cmd)
       await runCommand(io, json, async () => {
         const ctx = requireProject(process.cwd())
-        const result = createMuse(ctx, {
-          id: museId,
+        const result = createShip(ctx, {
+          id: shipId,
           engine: opts.engine,
           model: opts.model,
           ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
@@ -384,16 +387,16 @@ museCmd
         emitOk(
           io,
           json,
-          `created muse '${museId}' in ${result.configPath}\nrun \`pluton doctor\` to verify engine install and auth`,
-          { museId, muse: result.muse, configPath: result.configPath },
+          `created ship '${shipId}' in ${result.configPath}\nrun \`pluton doctor\` to verify engine install and auth`,
+          { shipId, ship: result.ship, configPath: result.configPath },
         )
       })
     },
   )
 
-museCmd
-  .command('edit <muse>')
-  .description('change fields of an existing Muse in pluton.yaml (validated before writing)')
+shipCmd
+  .command('edit <ship>')
+  .description('change fields of an existing Ship in pluton.yaml (validated before writing)')
   .option('--display-name <name>', 'human display name')
   .option('--role <role>', 'supervisor | researcher | coder | tester | reviewer | custom')
   .option('--engine <kind>', 'engine kind (see `pluton engine list`)')
@@ -404,7 +407,7 @@ museCmd
   .option('--permission <permission...>', 'replace the permission list with these values (repeatable)')
   .action(
     async (
-      museId: string,
+      shipId: string,
       opts: {
         displayName?: string
         role?: string
@@ -420,7 +423,7 @@ museCmd
       const json = jsonMode(cmd)
       await runCommand(io, json, async () => {
         const ctx = requireProject(process.cwd())
-        const result = editMuse(ctx, museId, {
+        const result = editShip(ctx, shipId, {
           ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
           ...(opts.role !== undefined ? { role: opts.role } : {}),
           ...(opts.engine !== undefined ? { engine: opts.engine } : {}),
@@ -433,25 +436,25 @@ museCmd
         emitOk(
           io,
           json,
-          `updated muse '${museId}' (${result.changed.join(', ')}) in ${result.configPath}`,
-          { museId, changed: result.changed, muse: result.muse, configPath: result.configPath },
+          `updated ship '${shipId}' (${result.changed.join(', ')}) in ${result.configPath}`,
+          { shipId, changed: result.changed, ship: result.ship, configPath: result.configPath },
         )
       })
     },
   )
 
-museCmd
-  .command('chat <muse>')
-  .description('open an interactive chat TUI with a specific Muse')
+shipCmd
+  .command('chat <ship>')
+  .description('open an interactive chat TUI with a specific Ship')
   .option('--resume <id>', 'resume an existing chat session by id')
-  .option('--continue', 'continue the latest chat session with this Muse')
-  .action(async (museArg: string, opts: { resume?: string; continue?: boolean }, cmd: Command) => {
+  .option('--continue', 'continue the latest chat session with this Ship')
+  .action(async (shipArg: string, opts: { resume?: string; continue?: boolean }, cmd: Command) => {
     const json = jsonMode(cmd)
     if (json) {
       await runCommand(io, json, async () => {
         const ctx = requireProject(process.cwd())
-        const { plan } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue, json: true })
-        emitOk(io, json, `chat plan resolved for muse ${plan.museSlug} (${plan.sessionId})`, plan)
+        const { plan } = await chatRun(ctx, { shipRef: shipArg, resume: opts.resume, continue: opts.continue, json: true })
+        emitOk(io, json, `chat plan resolved for ship ${plan.shipSlug} (${plan.sessionId})`, plan)
         return 0
       })
       return
@@ -459,7 +462,7 @@ museCmd
 
     try {
       const ctx = requireProject(process.cwd())
-      const { exitCode } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue })
+      const { exitCode } = await chatRun(ctx, { shipRef: shipArg, resume: opts.resume, continue: opts.continue })
       process.exitCode = exitCode
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -468,25 +471,25 @@ museCmd
     }
   })
 
-const museModelCmd = museCmd.command('model').description('model catalogue of a Muse\'s engine')
+const shipModelCmd = shipCmd.command('model').description('model catalogue of a Ship\'s engine')
 
-museModelCmd
-  .command('list <muse>')
-  .description('list model ids the Muse\'s engine reports (fails when the engine cannot list models)')
-  .action(async (museId: string, _opts: unknown, cmd: Command) => {
+shipModelCmd
+  .command('list <ship>')
+  .description('list model ids the Ship\'s engine reports (fails when the engine cannot list models)')
+  .action(async (shipId: string, _opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const models = await modelList(ctx, museId)
-      const muse = ctx.loaded.config.muses[museId]
-      const engine = muse ? muse.engine : 'unknown'
+      const models = await modelList(ctx, shipId)
+      const ship = ctx.loaded.config.ships[shipId]
+      const engine = ship ? ship.engine : 'unknown'
       const rows: string[][] = [['MODEL ID', 'LABEL', 'SOURCE']]
       for (const m of models) rows.push([m.id, m.label ?? '', m.source])
       const human =
         models.length === 0
           ? `engine '${engine}' reported no models`
-          : `${table(rows)}\n\nset one with: pluton muse edit ${museId} --model <MODEL ID>`
-      emitOk(io, json, human, { muse: museId, engine, models })
+          : `${table(rows)}\n\nset one with: pluton ship edit ${shipId} --model <MODEL ID>`
+      emitOk(io, json, human, { ship: shipId, engine, models })
     })
   })
 
@@ -606,7 +609,7 @@ program
             `run      ${detail.summary.run.id}`,
             `goal     ${detail.summary.run.goal}`,
             `state    ${detail.summary.run.state}`,
-            `manager  ${detail.summary.run.managerMuseId}`,
+            `manager  ${detail.summary.run.managerShipId}`,
             `budget   max_tasks=${detail.summary.run.budget.maxTasks} depth=${detail.summary.run.budget.maxDelegationDepth} workers=${detail.summary.run.budget.maxConcurrentWorkers}`,
             `tasks    ${detail.summary.totalTasks}${counts ? ` (${counts})` : ''}`,
             `events   ${detail.recentEvents.length} most recent`,
@@ -673,7 +676,7 @@ taskCmd
           `state     ${task.state} (attempt ${task.attempt})`,
           `run       ${task.runId}`,
           `parent    ${task.parentTaskId ?? '(root)'}   depth ${task.depth}`,
-          `assignee  ${task.assigneeMuseId ?? '(unassigned)'}`,
+          `assignee  ${task.assigneeShipId ?? '(unassigned)'}`,
           `workspace ${task.workspaceId ?? '(none)'}`,
           `engine    session ${task.engineSessionId ?? '(none)'}`,
           `created   ${task.createdAt}`,
@@ -730,16 +733,22 @@ const mcpCmd = program
 
 mcpCmd
   .command('serve')
-  .description('serve Pluton tools over stdio for one engine session (--run/--muse, optional --task)')
+  .description('serve Pluton tools over stdio for one engine session (--run/--ship, optional --task)')
   .requiredOption('--run <id>', 'run id (full or unique suffix)')
-  .requiredOption('--muse <id>', 'calling Muse id or slug')
+  .option('--ship <id>', 'calling Ship id or slug')
+  .option('--muse <id>', 'deprecated alias for --ship')
   .option('--task <id>', 'task id for a task-scoped session (omit for manager scope)')
-  .action(async (opts: { run: string; muse: string; task?: string }) => {
+  .action(async (opts: { run: string; ship?: string; task?: string; muse?: string }) => {
     try {
+      const shipRef = opts.ship ?? opts.muse
+      if (!shipRef) {
+        throw new ValidationError("either --ship <id> or legacy --muse <id> is required")
+      }
       const ctx = requireProject(process.cwd())
       await mcpServe(ctx, {
         runRef: opts.run,
-        museRef: opts.muse,
+        shipRef,
+        isLegacyMuse: opts.muse !== undefined && opts.ship === undefined,
         ...(opts.task !== undefined ? { taskRef: opts.task } : {}),
       })
     } catch (e) {
@@ -908,7 +917,7 @@ program
 
 program
   .command('run')
-  .description('start an orchestration run: the Manager Muse plans and delegates through the restricted tool bridge')
+  .description('start an orchestration run: the Manager Ship plans and delegates through the restricted tool bridge')
   .option('--goal <text>', 'what the run must achieve (required for new runs)')
   .option(
     '--acceptance <criterion>',
@@ -916,7 +925,7 @@ program
     (value: string, previous: string[]) => [...previous, value],
     [] as string[],
   )
-  .option('--manager <muse>', 'Muse that coordinates the run (default: the supervisor-role Muse)')
+  .option('--manager <ship>', 'Ship that coordinates the run (default: the supervisor-role Ship)')
   .option('--request-id <id>', 'idempotency key: retrying with the same id never creates a second run')
   .option('--resume <id>', 'resume an existing run (full run id or unique suffix)')
   .action(
@@ -978,12 +987,12 @@ program
 // ---------------------------------------------------------------------------
 
 program
-  .command('chat [muse]')
-  .description('open an interactive chat TUI with an operator Muse (default: supervisor)')
+  .command('chat [ship]')
+  .description('open an interactive chat TUI with an operator Ship (default: supervisor)')
   .option('--resume <id>', 'resume an existing chat session by id')
-  .option('--continue', 'continue the latest chat session with this Muse')
+  .option('--continue', 'continue the latest chat session with this Ship')
   .option('--demo', 'run interactive failed CI build demo scenario')
-  .action(async (museArg: string | undefined, _opts: { resume?: string; continue?: boolean; demo?: boolean }, cmd: Command) => {
+  .action(async (shipArg: string | undefined, _opts: { resume?: string; continue?: boolean; demo?: boolean }, cmd: Command) => {
     // `--demo` is also a root/global option. Commander stores a value parsed
     // before the subcommand on the parent, not in the local action options;
     // optsWithGlobals() is the only view that sees both spellings.
@@ -1008,8 +1017,8 @@ program
     if (json) {
       await runCommand(io, json, async () => {
         const ctx = requireProject(process.cwd())
-        const { plan } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue, json: true })
-        emitOk(io, json, `chat plan resolved for muse ${plan.museSlug} (${plan.sessionId})`, plan)
+        const { plan } = await chatRun(ctx, { shipRef: shipArg, resume: opts.resume, continue: opts.continue, json: true })
+                emitOk(io, json, `chat plan resolved for ship ${plan.shipSlug} (${plan.sessionId})`, plan)
         return 0
       })
       return
@@ -1017,7 +1026,7 @@ program
 
     try {
       const ctx = requireProject(process.cwd())
-      const { exitCode } = await chatRun(ctx, { museRef: museArg, resume: opts.resume, continue: opts.continue })
+      const { exitCode } = await chatRun(ctx, { shipRef: shipArg, resume: opts.resume, continue: opts.continue })
       process.exitCode = exitCode
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1033,24 +1042,24 @@ program
 program
   .command('attach')
   .description(
-    "attach this terminal to a Muse's tmux session (host session in native mode, or container in docker mode; interactive; --json resolves the target without attaching)",
+    "attach this terminal to a Ship's tmux session (host session in native mode, or container in docker mode; interactive; --json resolves the target without attaching)",
   )
-  .argument('<muse>', 'muse id, slug or unique id suffix')
+  .argument('<ship>', 'ship id, slug or unique id suffix')
   .option('--window <name>', 'attach to (or create) a named tmux window')
-  .action(async (museArg: string, opts: { window?: string }, cmd: Command) => {
+  .action(async (shipArg: string, opts: { window?: string }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const result = await attachMuse(
+      const result = await attachShip(
         ctx,
-        { museRef: museArg, ...(opts.window !== undefined ? { windowName: opts.window } : {}) },
+        { shipRef: shipArg, ...(opts.window !== undefined ? { windowName: opts.window } : {}) },
         json ? {} : { spawnAttach: inheritStdioSpawn },
       )
       const containerSession = `${result.containerName}:${result.sessionName}`
       const windowSuffix = result.windowName !== null ? ` (window ${result.windowName})` : ''
       const human = result.attached
         ? [
-            `attached to ${result.museId} → ${containerSession}${windowSuffix}`,
+            `attached to ${result.shipId} → ${containerSession}${windowSuffix}`,
             ...(result.exitCode !== 0 ? [`exit ${String(result.exitCode)}`] : []),
           ].join('\n')
         : `target ${containerSession}${windowSuffix}\nargv: ${result.argv.join(' ')}`
@@ -1183,7 +1192,7 @@ const approvalsCmd = program
   .description('operator approval inbox: list, approve, deny (expiring approvals are fail-closed)')
 
 function approvalLine(a: ApprovalListView['approvals'][number]): string {
-  const by = a.requestedByMuseId ?? 'operator'
+  const by = a.requestedByShipId ?? 'operator'
   const expiry =
     a.expiresInMinutes === null
       ? 'never'
@@ -1229,7 +1238,7 @@ function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string
     `approval ${report.approval.id}  ${terminalSafeLine(report.approval.action)}  → ${report.approval.status} by ${report.approval.decidedBy}`,
   ]
   if (report.applied !== null) {
-    lines.push(`applied muse '${report.applied.museId}' → ${report.applied.configPath}`)
+    lines.push(`applied ship '${report.applied.shipId}' → ${report.applied.configPath}`)
     if (report.applied.container !== null) {
       lines.push(
         `container ${report.applied.container.containerName} (${report.applied.container.created ? 'created' : 'reused'})`,
@@ -1274,7 +1283,7 @@ function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string
 
 approvalsCmd
   .command('approve <approval>')
-  .description('approve a pending approval (applies approved muse.create proposals)')
+  .description('approve a pending approval (applies approved ship.create proposals)')
   .option('--request-id <id>', 'idempotency key: retrying with the same id never decides twice')
   .option('--continue', 'automatically continue execution (e.g. apply integration or resume unparked run)')
   .action(async (approvalRef: string, opts: { requestId?: string; continue?: boolean }, cmd: Command) => {

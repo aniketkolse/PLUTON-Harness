@@ -1,6 +1,6 @@
 /**
  * `pluton chat` command implementation (ADR-0012).
- * Boots the operator session: resolves Muse, session persistence,
+ * Boots the operator session: resolves Ship, session persistence,
  * tool bridge with operator catalog, container / sandbox setup, and TUI loop.
  */
 
@@ -9,9 +9,9 @@ import { join } from 'node:path'
 import { findManager } from '../../config/load.ts'
 import { ConfigError, NotFoundError, StateTransitionError, ValidationError, InternalError } from '../../domain/errors.ts'
 import { isTerminalRunState } from '../../domain/state.ts'
-import type { ChatSessionRecord, MuseRecord } from '../../domain/models.ts'
+import type { ChatSessionRecord, ShipRecord } from '../../domain/models.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
-import { engineAdapterForMuse } from '../../engines/approval.ts'
+import { engineAdapterForShip } from '../../engines/approval.ts'
 import { createEngineApprovalChannel } from '../../engines/interactive-approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { createSandboxManager } from '../../sandbox/factory.ts'
@@ -24,7 +24,7 @@ import { nativeAdapterFor } from '../../execution/adapter.ts'
 import {
   appendExecutionEvent,
   createNativeExecutionProvider,
-  nativeSpecForMuse,
+  nativeSpecForShip,
 } from '../../execution/factory.ts'
 import type { NativeExecutionProvider } from '../../execution/native.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
@@ -35,7 +35,7 @@ import { ChatSession, type ChatSessionDeps } from '../../chat/session.ts'
 import { operatorPreamble } from '../../chat/prompt.ts'
 import type { ProjectContext } from '../context.ts'
 import { decideApproval } from './approvals.ts'
-import { resolveMuseByRef } from './mcp.ts'
+import { resolveShipByRef } from './mcp.ts'
 import { runLine } from './status.ts'
 import { terminalSafeLine } from '../../util/sanitize.ts'
 import { containerAdapterFor, prepareContainerMode, settleRunCrashed, startRunInBackground, type RunDeps } from './run.ts'
@@ -47,6 +47,8 @@ import { runTuiDemo } from '../../ui/demo.ts'
 import { getUITheme } from '../../ui/theme.ts'
 
 export interface ChatCommandOptions {
+  shipRef?: string
+  /** @deprecated Use `shipRef`; kept for backward compatibility. */
   museRef?: string
   resume?: string
   continue?: boolean
@@ -55,7 +57,7 @@ export interface ChatCommandOptions {
 }
 
 export interface ChatDeps {
-  adapterFor?: (muse: MuseRecord) => EngineAdapter
+  adapterFor?: (ship: ShipRecord) => EngineAdapter
   sandboxManager?: SandboxManager
   workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
   dockerSpawn?: AcpSpawnFn
@@ -67,8 +69,12 @@ export interface ChatDeps {
 }
 
 export interface ChatPlan {
-  museId: string
-  museSlug: string
+  shipId: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
+  shipSlug: string
+  /** @deprecated Use `shipSlug`; kept for backward compatibility. */
+  museSlug?: string
   engineKind: string
   model: string
   mode: 'docker' | 'local-process' | 'native'
@@ -79,33 +85,33 @@ export interface ChatPlan {
   bridge: { kind: 'http'; label: 'operator'; url: string } | null
 }
 
-function resolveChatMuse(ctx: ProjectContext, store: Store, museRef: string | undefined, projectId: string): MuseRecord {
-  let muse: MuseRecord
-  if (museRef !== undefined) {
-    muse = resolveMuseByRef(store, museRef)
+function resolveChatShip(ctx: ProjectContext, store: Store, shipRef: string | undefined, projectId: string): ShipRecord {
+  let ship: ShipRecord
+  if (shipRef !== undefined) {
+    ship = resolveShipByRef(store, shipRef)
   } else {
     const found = findManager(ctx.loaded.config)
     if (!found) {
-      throw new ConfigError("no Muse with role 'supervisor' in pluton.yaml — add one or pass a muse ref")
+      throw new ConfigError("no Ship with role 'supervisor' in pluton.yaml — add one or pass a ship ref")
     }
-    const m = store.getMuse(found[0])
-    if (!m) throw new NotFoundError('muse', found[0])
-    muse = m
+    const m = store.getShip(found[0])
+    if (!m) throw new NotFoundError('ship', found[0])
+    ship = m
   }
 
-  if (!muse.enabled) {
-    throw new ValidationError(`muse '${muse.slug}' is disabled in configuration`)
+  if (!ship.enabled) {
+    throw new ValidationError(`ship '${ship.slug}' is disabled in configuration`)
   }
-  if (muse.projectId !== projectId) {
-    throw new ValidationError(`muse '${muse.id}' belongs to another project`)
+  if (ship.projectId !== projectId) {
+    throw new ValidationError(`ship '${ship.id}' belongs to another project`)
   }
-  return muse
+  return ship
 }
 
 function resolveChatSession(
   store: Store,
   projectId: string,
-  museId: string,
+  shipId: string,
   opts: ChatCommandOptions,
 ): { session: ChatSessionRecord; resumed: boolean } {
   if (opts.resume !== undefined) {
@@ -117,13 +123,13 @@ function resolveChatSession(
   }
 
   if (opts.continue === true) {
-    const latest = store.getLatestChatSession(projectId, museId)
+    const latest = store.getLatestChatSession(projectId, shipId)
     if (latest !== null) {
       return { session: latest, resumed: true }
     }
   }
 
-  const session = store.createChatSession({ projectId, museId })
+  const session = store.createChatSession({ projectId, shipId })
   return { session, resumed: false }
 }
 
@@ -136,8 +142,8 @@ export async function chatRun(
   let nativeProvider: NativeExecutionProvider | null = deps.nativeProvider ?? null
 
   try {
-    const muse = resolveChatMuse(ctx, store, opts.museRef, projectId)
-    const { session, resumed } = resolveChatSession(store, projectId, muse.id, opts)
+    const ship = resolveChatShip(ctx, store, opts.shipRef ?? opts.museRef, projectId)
+    const { session, resumed } = resolveChatSession(store, projectId, ship.id, opts)
     const storedMessages = store.listChatMessages(session.id)
     const messageCount = storedMessages.length
 
@@ -145,13 +151,15 @@ export async function chatRun(
     const isDocker = sandboxKind === 'docker'
     const mode: 'docker' | 'local-process' | 'native' =
       sandboxKind === 'docker' ? 'docker' : sandboxKind === 'native' ? 'native' : 'local-process'
-    const containerName = isDocker ? sandboxContainerName(projectId, muse.id) : null
+    const containerName = isDocker ? sandboxContainerName(projectId, ship.id) : null
 
     const basePlan: ChatPlan = {
-      museId: muse.id,
-      museSlug: muse.slug,
-      engineKind: muse.engineKind,
-      model: muse.model,
+      shipId: ship.id,
+      museId: ship.id,
+      shipSlug: ship.slug,
+      museSlug: ship.slug,
+      engineKind: ship.engineKind,
+      model: ship.model,
       mode,
       containerName,
       sessionId: session.id,
@@ -192,12 +200,12 @@ export async function chatRun(
         projectId,
         sandboxManager,
         deps.workerImageProbe,
-        { museIds: [muse.id] },
+        { shipIds: [ship.id] },
       )
-      adapter = deps.adapterFor?.(muse) ?? containerAdapterFor(muse, contexts, deps.dockerSpawn)
+      adapter = deps.adapterFor?.(ship) ?? containerAdapterFor(ship, contexts, deps.dockerSpawn)
     } else if (sandboxKind === 'native') {
       if (deps.adapterFor !== undefined) {
-        adapter = deps.adapterFor(muse)
+        adapter = deps.adapterFor(ship)
       } else {
         nativeProvider =
           deps.nativeProvider ??
@@ -209,15 +217,15 @@ export async function chatRun(
             },
           })
         const provider = nativeProvider
-        adapter = nativeAdapterFor(muse, {
+        adapter = nativeAdapterFor(ship, {
           provider,
           isolatedCheckout: false,
           specFor: (req) =>
-            nativeSpecForMuse({
+            nativeSpecForShip({
               config: ctx.loaded.config,
               rootDir: ctx.rootDir,
               projectId,
-              muse,
+              ship,
               workdir: req.workdir,
               engineHome: req.configDir,
               isolatedCheckout: false,
@@ -227,10 +235,10 @@ export async function chatRun(
       }
     } else {
       createSandboxManager(ctx.loaded.config)
-      adapter = deps.adapterFor?.(muse) ?? engineAdapterForMuse(muse)
+      adapter = deps.adapterFor?.(ship) ?? engineAdapterForShip(ship)
     }
 
-    // Interactive engine policies (ask-* Muse modes) forward engine permission
+    // Interactive engine policies (ask-* Ship modes) forward engine permission
     // requests to the operator: the request becomes a durable approval shown in
     // the TUI approval card (and the SPA), and the engine waits — fail-closed —
     // until the operator decides through the same decision funnel. The chat
@@ -240,7 +248,7 @@ export async function chatRun(
       projectId,
       runId: null,
       taskId: null,
-      museId: muse.id,
+      shipId: ship.id,
       ttlMinutes: ctx.loaded.config.runtime.approval_timeout_minutes,
     })
 
@@ -315,7 +323,7 @@ export async function chatRun(
       store,
       projectId,
       rootDir: ctx.rootDir,
-      callerMuseId: muse.id,
+      callerShipId: ship.id,
       limits,
       startRun: runStarter,
     })
@@ -326,7 +334,7 @@ export async function chatRun(
     })
     const { url } = await httpServer.start()
     const { token } = httpServer.register(bridge, {
-      museId: muse.id,
+      shipId: ship.id,
       taskId: null,
       runId: null,
       label: 'operator',
@@ -342,10 +350,10 @@ export async function chatRun(
       },
     ]
 
-    let instructions = operatorPreamble(muse)
-    if (muse.instructionsFile) {
+    let instructions = operatorPreamble(ship)
+    if (ship.instructionsFile) {
       try {
-        const custom = readFileSync(join(ctx.rootDir, muse.instructionsFile), 'utf8')
+        const custom = readFileSync(join(ctx.rootDir, ship.instructionsFile), 'utf8')
         instructions = `${instructions}\n\n${custom}`
       } catch {
         // file missing or unreadable; proceed with preamble
@@ -387,7 +395,7 @@ export async function chatRun(
         id: a.id,
         action: a.action,
         reason: a.reason,
-        ...(a.requestedByMuseId ? { requestedByMuse: a.requestedByMuseId } : {}),
+        ...(a.requestedByShipId ? { requestedByShip: a.requestedByShipId } : {}),
         scope: a.scope,
         status: a.status,
         runId: a.runId,
@@ -416,14 +424,14 @@ export async function chatRun(
           currentChatSession = store.getChatSession(newId)
         },
       },
-      muse: { id: muse.id, slug: muse.slug },
+      ship: { id: ship.id, slug: ship.slug },
       status: async () => {
         const runs = store.listRuns(1)
         const currentRun = runs.length > 0 && runs[0]!.projectId === projectId ? runs[0]! : null
         const pending = store.listApprovalsByProject(projectId, { status: 'pending', limit: 100 })
         const lines = [
           `Project: ${ctx.loaded.config.project.name} (${projectId})`,
-          `Operator: ${muse.slug} (${muse.model})`,
+          `Operator: ${ship.slug} (${ship.model})`,
           `Chat session: ${currentChatSession.id} (${currentChatSession.state})`,
           currentRun ? `Current run: ${runLine(currentRun)}` : 'No runs recorded yet',
           `Pending approvals: ${pending.length}`,
@@ -445,7 +453,7 @@ export async function chatRun(
         const rows = ['ID                       ACTION          REQUESTED BY     REASON']
         for (const a of pending) {
           rows.push(
-            `${a.id}  ${terminalSafeLine(a.action).padEnd(14)}  ${(a.requestedByMuseId ?? '-').padEnd(15)}  ${terminalSafeLine(a.reason)}`,
+            `${a.id}  ${terminalSafeLine(a.action).padEnd(14)}  ${(a.requestedByShipId ?? '-').padEnd(15)}  ${terminalSafeLine(a.reason)}`,
           )
         }
         return rows.join('\n')
@@ -501,16 +509,16 @@ export async function chatRun(
       models: async () => {
         const caps = adapter.capabilities()
         if (!caps.modelList) {
-          return `Engine '${muse.engineKind}' does not support dynamic model listing. Current model: ${muse.model}`
+          return `Engine '${ship.engineKind}' does not support dynamic model listing. Current model: ${ship.model}`
         }
         try {
           const list = await adapter.listModels()
           if (list.length === 0) {
-            return `No models reported by engine '${muse.engineKind}'. Current model: ${muse.model}`
+            return `No models reported by engine '${ship.engineKind}'. Current model: ${ship.model}`
           }
-          const lines = [`Available models for engine '${muse.engineKind}':`]
+          const lines = [`Available models for engine '${ship.engineKind}':`]
           for (const m of list) {
-            const isCurrent = m.id === muse.model ? ' (current)' : ''
+            const isCurrent = m.id === ship.model ? ' (current)' : ''
             const name = m.label && m.label !== m.id ? ` — ${m.label}` : ''
             lines.push(`  • ${m.id}${name}${isCurrent}`)
           }
@@ -526,10 +534,10 @@ export async function chatRun(
           const currentRun = activeRunId ? store.getRun(activeRunId) : null
           const activeRunInfo = currentRun
             ? `\nActive run (${currentRun.id}) model: ${
-                currentRun.managerMuseId ? store.getMuse(currentRun.managerMuseId)?.model ?? 'unknown' : 'none'
+                currentRun.managerShipId ? store.getShip(currentRun.managerShipId)?.model ?? 'unknown' : 'none'
               }`
             : ''
-          return `Current model for ${muse.slug}: ${muse.model}${activeRunInfo}`
+          return `Current model for ${ship.slug}: ${ship.model}${activeRunInfo}`
         }
 
         const caps = adapter.capabilities()
@@ -539,7 +547,7 @@ export async function chatRun(
             const match = list.find((m) => m.id === trimmed || m.label === trimmed)
             if (!match && list.length > 0) {
               const available = list.map((m) => m.id).join(', ')
-              return `Model '${trimmed}' is not supported by engine '${muse.engineKind}'. Available models: ${available}`
+              return `Model '${trimmed}' is not supported by engine '${ship.engineKind}'. Available models: ${available}`
             }
           } catch {
             // If listing fails at runtime, proceed with requested model
@@ -547,12 +555,12 @@ export async function chatRun(
         }
 
         try {
-          store.updateMuseModel(muse.id, trimmed)
-          muse.model = trimmed
+          store.updateShipModel(ship.id, trimmed)
+          ship.model = trimmed
           if (sessionInstance) {
             await sessionInstance.switchModel(trimmed)
           }
-          return `Switched model for ${muse.slug} to ${trimmed}. Subsequent turns will use this model.`
+          return `Switched model for ${ship.slug} to ${trimmed}. Subsequent turns will use this model.`
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return `Failed to switch model: ${msg}`
@@ -621,7 +629,7 @@ export async function chatRun(
                   title: t.title,
                   brief: t.description || t.title,
                   acceptanceCriteria: t.acceptanceCriteria,
-                  assigneeMuseId: muse.id,
+                  assigneeShipId: ship.id,
                   writeScope: t.writeScope,
                 })
                 idMap.set(t.id, admitted.id)
@@ -812,9 +820,9 @@ export async function chatRun(
           return slashContext.deny(ref)
         }
 
-        const lines = ['Effective Permissions by Muse:']
-        const muses = store.listMuses().filter((m) => m.projectId === projectId)
-        for (const m of muses) {
+        const lines = ['Effective Permissions by Ship:']
+        const ships = store.listShips().filter((m) => m.projectId === projectId)
+        for (const m of ships) {
           lines.push(`  • ${m.slug} (${m.role}): [${m.permissions.join(', ')}]`)
           lines.push(`    Approval mode: ${m.approvalMode}, Policy: ${m.workspacePolicy}`)
         }
@@ -826,7 +834,7 @@ export async function chatRun(
         } else {
           lines.push(`Pending approval requests (${pending.length}):`)
           for (const a of pending) {
-            lines.push(`  • [${a.id}] ${a.action} by ${a.requestedByMuseId ?? 'unknown'}: ${a.reason}`)
+            lines.push(`  • [${a.id}] ${a.action} by ${a.requestedByShipId ?? 'unknown'}: ${a.reason}`)
           }
           lines.push('\nUse /permissions approve <ref> or /permissions deny <ref> to respond.')
         }
@@ -834,7 +842,7 @@ export async function chatRun(
       },
       newSession: async () => {
         store.updateChatSession(currentChatSession.id, { state: 'closed' })
-        const next = store.createChatSession({ projectId, museId: muse.id })
+        const next = store.createChatSession({ projectId, shipId: ship.id })
         currentChatSession = next
         return `closed previous session and started new session ${next.id}`
       },
@@ -845,7 +853,7 @@ export async function chatRun(
     const initialNotices: string[] = []
     if (exposedTools.length === 0) {
       initialNotices.push(
-        `Warning: No Pluton operator tools are exposed to muse '${muse.slug}'. To expose operator tools, configure permissions in pluton.yaml: project.status, run.list, run.inspect, run.start, approvals.list`,
+        `Warning: No Pluton operator tools are exposed to ship '${ship.slug}'. To expose operator tools, configure permissions in pluton.yaml: project.status, run.list, run.inspect, run.start, approvals.list`,
       )
     }
 
@@ -853,7 +861,7 @@ export async function chatRun(
       store,
       projectId,
       rootDir: ctx.rootDir,
-      muse,
+      ship,
       adapter,
       io,
       session,

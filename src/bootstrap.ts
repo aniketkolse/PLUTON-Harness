@@ -4,14 +4,14 @@ import { engineHomesDir, stateDir, type LoadedConfig } from './config/load.ts'
 import { slugify } from './domain/ids.ts'
 import { openDatabase } from './store/db.ts'
 import { migrate } from './store/migrations.ts'
-import { Store, type MuseSyncSpec } from './store/store.ts'
+import { Store, type ShipSyncSpec } from './store/store.ts'
 import { ROLE_DEFAULT_WORKSPACE_POLICIES } from './domain/models.ts'
 import { ROLE_DEFAULT_PERMISSIONS } from './domain/permissions.ts'
 
 /**
  * Opens (creating if needed) the project's durable store:
  * ensure .pluton/state exists → open SQLite → migrate → ensure the project row
- * → mirror the config's muses into the muses table (disabled, not deleted,
+ * → mirror the config's ships into the ships table (disabled, not deleted,
  * when they disappear from config).
  *
  * Every CLI command that needs durable state goes through this single path.
@@ -38,12 +38,12 @@ export function bootstrapStore(loaded: LoadedConfig): Bootstrapped {
     configPath: loaded.configPath,
     defaultBranch: loaded.config.project.default_branch,
   })
-  store.syncMuses(project.id, museSpecs(loaded))
+  store.syncShips(project.id, shipSpecs(loaded))
   return { store, projectId: project.id }
 }
 
-export function museSpecs(loaded: LoadedConfig): MuseSyncSpec[] {
-  return Object.entries(loaded.config.muses).map(([id, m]) => ({
+export function shipSpecs(loaded: LoadedConfig): ShipSyncSpec[] {
+  return Object.entries(loaded.config.ships).map(([id, m]) => ({
     id,
     slug: slugify(id),
     displayName: m.display_name,

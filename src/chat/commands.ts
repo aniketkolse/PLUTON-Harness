@@ -71,7 +71,7 @@ export const COMMAND_REGISTRY: SlashCommandDef[] = [
   {
     name: 'model',
     syntax: '/model [model-id]',
-    description: 'Show current model or switch Muse model',
+    description: 'Show current model or switch Ship model',
     argHint: '[model-id]',
   },
   {
@@ -94,7 +94,7 @@ export const COMMAND_REGISTRY: SlashCommandDef[] = [
   {
     name: 'new',
     syntax: '/new',
-    description: 'Start a fresh chat session with this Muse',
+    description: 'Start a fresh chat session with this Ship',
   },
   {
     name: 'inspector',
@@ -122,7 +122,9 @@ export const COMMAND_REGISTRY: SlashCommandDef[] = [
 
 export interface SlashContext {
   session: { id: string }
-  muse: { id: string; slug: string }
+  ship?: { id: string; slug: string }
+  /** @deprecated Use `ship`; kept for backward compatibility. */
+  muse?: { id: string; slug: string }
   status(): Promise<string>
   runs(limit: number): Promise<string>
   approvalsList(): Promise<string>

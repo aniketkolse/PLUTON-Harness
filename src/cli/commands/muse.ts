@@ -4,13 +4,13 @@ import { parseDocument, parse as parseYaml } from 'yaml'
 import { ConfigError, ValidationError } from '../../domain/errors.ts'
 import { engineHomesDir, validateConfig } from '../../config/load.ts'
 import type { ProjectContext } from '../context.ts'
-import type { MuseConfig, PlutonConfig } from '../../config/schema.ts'
+import type { ShipConfig, PlutonConfig } from '../../config/schema.ts'
 import { getEngineAdapter, listEngineKinds } from '../../engines/registry.ts'
 import type { EngineDiscovery, EngineAuthStatus, EngineModel } from '../../engines/contract/types.ts'
 import { isPermission } from '../../domain/permissions.ts'
-import { MUSE_ROLES } from '../../domain/models.ts'
+import { SHIP_ROLES } from '../../domain/models.ts'
 
-export interface MuseListEntry {
+export interface ShipListEntry {
   id: string
   displayName: string
   role: string
@@ -23,8 +23,8 @@ export interface MuseListEntry {
   source: 'config' | 'dynamic'
 }
 
-export function listMuses(config: PlutonConfig): MuseListEntry[] {
-  return Object.entries(config.muses)
+export function listShips(config: PlutonConfig): ShipListEntry[] {
+  return Object.entries(config.ships)
     .map(([id, m]) => ({
       id,
       displayName: m.display_name,
@@ -40,7 +40,7 @@ export function listMuses(config: PlutonConfig): MuseListEntry[] {
     .sort((a, b) => a.id.localeCompare(b.id))
 }
 
-export interface MuseDetail extends MuseListEntry {
+export interface ShipDetail extends ShipListEntry {
   engineHome: string
   instructionsPath: string | null
   instructionsExists: boolean | null
@@ -48,14 +48,14 @@ export interface MuseDetail extends MuseListEntry {
   auth: EngineAuthStatus | null
 }
 
-export async function showMuse(ctx: ProjectContext, id: string): Promise<MuseDetail> {
-  const m = ctx.loaded.config.muses[id]
+export async function showShip(ctx: ProjectContext, id: string): Promise<ShipDetail> {
+  const m = ctx.loaded.config.ships[id]
   if (!m) {
-    const known = Object.keys(ctx.loaded.config.muses).join(', ') || '(none configured)'
-    throw new ValidationError(`unknown muse '${id}'; configured muses: ${known}`)
+    const known = Object.keys(ctx.loaded.config.ships).join(', ') || '(none configured)'
+    throw new ValidationError(`unknown ship '${id}'; configured ships: ${known}`)
   }
-  const base = listMuses(ctx.loaded.config).find((e) => e.id === id)
-  if (!base) throw new ValidationError(`unknown muse '${id}'`)
+  const base = listShips(ctx.loaded.config).find((e) => e.id === id)
+  if (!base) throw new ValidationError(`unknown ship '${id}'`)
   const engineHome = join(engineHomesDir(ctx.rootDir), id)
   const instructionsPath = m.instructions_file ? join(ctx.rootDir, m.instructions_file) : null
   let discovery: EngineDiscovery | null = null
@@ -96,9 +96,9 @@ export async function engineList(): Promise<EngineListEntry[]> {
   return out
 }
 
-export async function modelList(ctx: ProjectContext, museId: string): Promise<EngineModel[]> {
-  const m = ctx.loaded.config.muses[museId]
-  if (!m) throw new ValidationError(`unknown muse '${museId}'`)
+export async function modelList(ctx: ProjectContext, shipId: string): Promise<EngineModel[]> {
+  const m = ctx.loaded.config.ships[shipId]
+  if (!m) throw new ValidationError(`unknown ship '${shipId}'`)
   const adapter = getEngineAdapter(m.engine)
   const disc = await adapter.discover()
   if (!disc.installed) {
@@ -112,7 +112,7 @@ export async function modelList(ctx: ProjectContext, museId: string): Promise<En
   return adapter.listModels()
 }
 
-export interface CreateMuseSpec {
+export interface CreateShipSpec {
   id: string
   displayName?: string
   role?: string
@@ -124,52 +124,53 @@ export interface CreateMuseSpec {
   permissions?: string[]
 }
 
-export function createMuse(ctx: ProjectContext, spec: CreateMuseSpec): { configPath: string; muse: MuseConfig } {
+export function createShip(ctx: ProjectContext, spec: CreateShipSpec): { configPath: string; ship: ShipConfig } {
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(spec.id)) {
     throw new ValidationError(
-      `invalid muse id '${spec.id}': ids are lowercase slugs (a-z, 0-9, -), starting with a letter`,
+      `invalid ship id '${spec.id}': ids are lowercase slugs (a-z, 0-9, -), starting with a letter`,
     )
   }
-  if (ctx.loaded.config.muses[spec.id]) {
-    throw new ValidationError(`muse '${spec.id}' already exists in pluton.yaml`)
+  if (ctx.loaded.config.ships[spec.id]) {
+    throw new ValidationError(`ship '${spec.id}' already exists in pluton.yaml`)
   }
   // Engine must exist in the registry even before install checks — a typo must fail here.
   getEngineAdapter(spec.engine)
-  if (spec.role !== undefined && !(MUSE_ROLES as readonly string[]).includes(spec.role)) {
-    throw new ValidationError(`unknown role '${spec.role}'; known roles: ${MUSE_ROLES.join(', ')}`)
+  if (spec.role !== undefined && !(SHIP_ROLES as readonly string[]).includes(spec.role)) {
+    throw new ValidationError(`unknown role '${spec.role}'; known roles: ${SHIP_ROLES.join(', ')}`)
   }
   for (const p of spec.permissions ?? []) {
-    if (!isPermission(p)) throw new ValidationError(`unknown permission '${p}' (see docs/MUSE_CONFIGURATION.md)`)
+    if (!isPermission(p)) throw new ValidationError(`unknown permission '${p}' (see docs/SHIPS_CONFIGURATION.md)`)
   }
 
-  const role = (spec.role as MuseConfig['role']) ?? 'custom'
+  const role = (spec.role as ShipConfig['role']) ?? 'custom'
   // Supervisors must never get a checkout policy — keep the default role-aware so
-  // `muse create boss --role supervisor` produces a valid config without extra flags.
-  const defaultWorkspace: MuseConfig['workspace_policy'] =
+  // `ship create boss --role supervisor` produces a valid config without extra flags.
+  const defaultWorkspace: ShipConfig['workspace_policy'] =
     role === 'supervisor' ? 'coordinator-read-only' : 'isolated-task-checkout'
 
-  const muse: MuseConfig = {
+  const ship: ShipConfig = {
     display_name: spec.displayName ?? spec.id,
     role,
     engine: spec.engine,
     model: spec.model,
-    workspace_policy: (spec.workspacePolicy as MuseConfig['workspace_policy']) ?? defaultWorkspace,
-    approval_mode: (spec.approvalMode as MuseConfig['approval_mode']) ?? 'ask-for-sensitive-actions',
+    workspace_policy: (spec.workspacePolicy as ShipConfig['workspace_policy']) ?? defaultWorkspace,
+    approval_mode: (spec.approvalMode as ShipConfig['approval_mode']) ?? 'ask-for-sensitive-actions',
     ...(spec.instructionsFile ? { instructions_file: spec.instructionsFile } : {}),
-    ...(spec.permissions ? { permissions: spec.permissions as MuseConfig['permissions'] } : {}),
+    ...(spec.permissions ? { permissions: spec.permissions as ShipConfig['permissions'] } : {}),
   }
 
   // Edit the YAML document (preserving comments) instead of re-serializing the object model.
   const doc = parseDocument(readFileSync(ctx.configPath, 'utf8'))
-  doc.setIn(['muses', spec.id], muse)
+  const key = doc.has('ships') ? 'ships' : 'muses'
+  doc.setIn([key, spec.id], ship)
   const nextRaw = parseYaml(doc.toString())
   validateConfig(nextRaw, ctx.rootDir, ctx.configPath) // reject before writing anything
   writeFileSync(ctx.configPath, doc.toString({ lineWidth: 0 }))
 
-  return { configPath: ctx.configPath, muse }
+  return { configPath: ctx.configPath, ship }
 }
 
-export interface EditMusePatch {
+export interface EditShipPatch {
   displayName?: string
   role?: string
   engine?: string
@@ -181,31 +182,32 @@ export interface EditMusePatch {
 }
 
 /**
- * Edit fields of an existing Muse in place, preserving YAML comments.
+ * Edit fields of an existing Ship in place, preserving YAML comments.
  * The full resulting document is validated before anything is written, so a
  * failed edit never leaves a half-written config behind.
  */
-export function editMuse(
+export function editShip(
   ctx: ProjectContext,
   id: string,
-  patch: EditMusePatch,
-): { configPath: string; muse: MuseConfig; changed: string[] } {
-  if (!ctx.loaded.config.muses[id]) {
-    const known = Object.keys(ctx.loaded.config.muses).join(', ') || '(none configured)'
-    throw new ValidationError(`unknown muse '${id}'; configured muses: ${known}`)
+  patch: EditShipPatch,
+): { configPath: string; ship: ShipConfig; changed: string[] } {
+  if (!ctx.loaded.config.ships[id]) {
+    const known = Object.keys(ctx.loaded.config.ships).join(', ') || '(none configured)'
+    throw new ValidationError(`unknown ship '${id}'; configured ships: ${known}`)
   }
   if (patch.engine !== undefined) getEngineAdapter(patch.engine)
-  if (patch.role !== undefined && !(MUSE_ROLES as readonly string[]).includes(patch.role)) {
-    throw new ValidationError(`unknown role '${patch.role}'; known roles: ${MUSE_ROLES.join(', ')}`)
+  if (patch.role !== undefined && !(SHIP_ROLES as readonly string[]).includes(patch.role)) {
+    throw new ValidationError(`unknown role '${patch.role}'; known roles: ${SHIP_ROLES.join(', ')}`)
   }
   for (const p of patch.permissions ?? []) {
-    if (!isPermission(p)) throw new ValidationError(`unknown permission '${p}' (see docs/MUSE_CONFIGURATION.md)`)
+    if (!isPermission(p)) throw new ValidationError(`unknown permission '${p}' (see docs/SHIPS_CONFIGURATION.md)`)
   }
 
   const changed: string[] = []
   const doc = parseDocument(readFileSync(ctx.configPath, 'utf8'))
+  const key = doc.has('ships') ? 'ships' : 'muses'
   const setField = (field: string, value: unknown): void => {
-    doc.setIn(['muses', id, field], value)
+    doc.setIn([key, id, field], value)
     changed.push(field)
   }
   if (patch.displayName !== undefined) setField('display_name', patch.displayName)
@@ -219,7 +221,7 @@ export function editMuse(
 
   if (changed.length === 0) {
     throw new ValidationError(
-      'muse edit: nothing to change — pass at least one of --engine, --model, --role, --display-name, ' +
+      'ship edit: nothing to change — pass at least one of --engine, --model, --role, --display-name, ' +
         '--instructions-file, --workspace-policy, --approval-mode, --permission',
     )
   }
@@ -227,9 +229,9 @@ export function editMuse(
   const nextRaw = parseYaml(doc.toString())
   const loaded = validateConfig(nextRaw, ctx.rootDir, ctx.configPath) // reject before writing
   writeFileSync(ctx.configPath, doc.toString({ lineWidth: 0 }))
-  const muse = loaded.config.muses[id]
-  if (!muse) throw new ValidationError(`muse '${id}' disappeared during edit (internal bug)`)
-  return { configPath: ctx.configPath, muse, changed }
+  const ship = loaded.config.ships[id]
+  if (!ship) throw new ValidationError(`ship '${id}' disappeared during edit (internal bug)`)
+  return { configPath: ctx.configPath, ship, changed }
 }
 
 function tryAdapter(kind: string): ReturnType<typeof getEngineAdapter> | null {
@@ -239,3 +241,24 @@ function tryAdapter(kind: string): ReturnType<typeof getEngineAdapter> | null {
     return null
   }
 }
+
+// ---------------------------------------------------------------------------
+// Backward-compatible alias exports — callers can migrate incrementally.
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use `listShips`; kept for backward compatibility. */
+export const listMuses = listShips
+/** @deprecated Use `showShip`; kept for backward compatibility. */
+export const showMuse = showShip
+/** @deprecated Use `createShip`; kept for backward compatibility. */
+export const createMuse = createShip
+/** @deprecated Use `editShip`; kept for backward compatibility. */
+export const editMuse = editShip
+/** @deprecated Use `ShipListEntry`; kept for backward compatibility. */
+export type MuseListEntry = ShipListEntry
+/** @deprecated Use `ShipDetail`; kept for backward compatibility. */
+export type MuseDetail = ShipDetail
+/** @deprecated Use `CreateShipSpec`; kept for backward compatibility. */
+export type CreateMuseSpec = CreateShipSpec
+/** @deprecated Use `EditShipPatch`; kept for backward compatibility. */
+export type EditMusePatch = EditShipPatch

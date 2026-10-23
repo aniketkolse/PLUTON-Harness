@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs'
-import { bootstrapStore, museSpecs } from '../../bootstrap.ts'
+import { bootstrapStore, shipSpecs } from '../../bootstrap.ts'
 import { loadConfig, workspaceDir } from '../../config/load.ts'
 import {
   ConflictError,
@@ -14,7 +14,7 @@ import type {
   ApprovalStatus,
   EventRecord,
   JsonValue,
-  MuseRecord,
+  ShipRecord,
   RunRecord,
 } from '../../domain/models.ts'
 import { isTerminalRunState, type RunState } from '../../domain/state.ts'
@@ -29,8 +29,8 @@ import {
 import type { SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import type { ProjectContext } from '../context.ts'
-import { createMuse } from './muse.ts'
-import { provisionMuseContainer } from './muse-provision.ts'
+import { createShip } from './muse.ts'
+import { provisionShipContainer } from './muse-provision.ts'
 import { runByRef } from './status.ts'
 import { approvalScopeTaskId, integrateRun, type IntegrateCommandOptions, type IntegrateReport } from './integrate.ts'
 import { resumeRun, type ResumeRunOptions, type RunSummary } from './run.ts'
@@ -42,7 +42,7 @@ import { resumeRun, type ResumeRunOptions, type RunSummary } from './run.ts'
  * Fail-closed expiry: every invocation sweeps overdue pendings to `expired`
  * (decided_by `pluton:timeout`) before reading or deciding, so a timeout can
  * never be mistaken for an approval and an expired row is refused with a
- * ConflictError. Decisions are recorded as events; approving a `muse.create`
+ * ConflictError. Decisions are recorded as events; approving a `ship.create`
  * proposal actually instantiates the specialist (pluton.yaml + store sync +
  * container provisioning against a live docker-mode run — a sandbox that
  * cannot come up is surfaced as a warning, never as a failed decision). When a
@@ -65,7 +65,9 @@ export interface ApprovalListView {
     status: ApprovalStatus
     runId: string | null
     taskId: string | null
-    requestedByMuseId: string | null
+    requestedByShipId: string | null
+    /** @deprecated Use `requestedByShipId`; kept for backward compatibility. */
+    requestedByMuseId?: string | null
     reason: string
     scope: JsonValue
     createdAt: string
@@ -102,7 +104,9 @@ export interface ApprovalDecideDeps {
 export interface ApprovalDecideReport {
   approval: { id: string; action: string; status: 'approved' | 'denied'; decidedBy: string; decidedAt: string }
   applied: {
-    museId: string
+    shipId: string
+    /** @deprecated Use `shipId`; kept for backward compatibility. */
+    museId?: string
     configPath: string
     container: { containerName: string; created: boolean } | null
     containerWarning: string | null
@@ -144,7 +148,8 @@ function toView(record: ApprovalRecord, nowMs: number): ApprovalListView['approv
     status: record.status,
     runId: record.runId,
     taskId: record.taskId,
-    requestedByMuseId: record.requestedByMuseId,
+    requestedByShipId: record.requestedByShipId,
+    requestedByMuseId: record.requestedByShipId,
     reason: record.reason,
     scope: record.scope,
     createdAt: record.createdAt,
@@ -199,9 +204,9 @@ function resolveApprovalByRef(store: Store, projectId: string, ref: string): App
   })
 }
 
-/** Strict `muse.create` scope reader — the key set the `muse.propose_create` handler records. */
-function parseMuseCreateScope(approval: ApprovalRecord): {
-  museId: string
+/** Strict `ship.create` scope reader — the key set the `ship.propose_create` (or deprecated `muse.propose_create`) handler records. */
+function parseShipCreateScope(approval: ApprovalRecord): {
+  shipId: string
   displayName: string
   role: string
   engine: string
@@ -213,20 +218,22 @@ function parseMuseCreateScope(approval: ApprovalRecord): {
       : null
   if (record === null) {
     throw new ValidationError(
-      `approval ${approval.id} has a malformed muse.create scope: expected an object with museId, displayName, role, engine, model`,
+      `approval ${approval.id} has a malformed ship.create scope: expected an object with shipId (or legacy museId), displayName, role, engine, model`,
     )
   }
   const field = (key: string): string => {
     const value = record[key]
     if (typeof value !== 'string' || value.length === 0) {
       throw new ValidationError(
-        `approval ${approval.id} has a malformed muse.create scope: '${key}' must be a non-empty string`,
+        `approval ${approval.id} has a malformed ship.create scope: '${key}' must be a non-empty string`,
       )
     }
     return value
   }
+  // Accept both shipId and the deprecated museId for backward compatibility
+  const shipId = (record['shipId'] as string | undefined) ?? field('museId')
   return {
-    museId: field('museId'),
+    shipId,
     displayName: field('displayName'),
     role: field('role'),
     engine: field('engine'),
@@ -246,16 +253,16 @@ function recordedOutcomeFrom(event: EventRecord | undefined): string | null {
 /**
  * Container readiness for an approved specialist, mirroring `prepareContainerMode`
  * (daemon probe → worker-image probe → `dispatchReadiness` with the engines
- * profile required → shared `provisionMuseContainer`). Only ever called for a
+ * profile required → shared `provisionShipContainer`). Only ever called for a
  * live docker-mode run; callers turn `SandboxUnavailableError` into a warning.
  */
 const CONTAINER_PIDS_LIMIT = 512
 
-async function provisionApprovedMuse(
+async function provisionApprovedShip(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
-  muse: MuseRecord,
+  ship: ShipRecord,
   deps: ApprovalDecideDeps,
 ): Promise<{ containerName: string; created: boolean }> {
   const config = ctx.loaded.config
@@ -279,17 +286,17 @@ async function provisionApprovedMuse(
     )
   }
   const runtime = config.runtime
-  const museConfig = config.muses[muse.id]
-  const networkPolicy = museConfig?.network_policy ?? runtime.network_policy
+  const shipConfig = config.ships[ship.id]
+  const networkPolicy = shipConfig?.network_policy ?? runtime.network_policy
   const customNetwork =
     networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
       ? runtime.internal_network_name
       : undefined
-  return provisionMuseContainer({
+  return provisionShipContainer({
     manager,
     store,
     projectId,
-    muse,
+    ship,
     image: imageTag,
     ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
     limits: {
@@ -305,11 +312,11 @@ async function provisionApprovedMuse(
 }
 
 /**
- * Instantiate an approved `muse.create` proposal: pluton.yaml first (validated
+ * Instantiate an approved `ship.create` proposal: pluton.yaml first (validated
  * before the file is touched), then the store sync, then — only for a live
  * docker-mode run — the specialist's container.
  */
-async function applyMuseCreate(
+async function applyShipCreate(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
@@ -317,30 +324,32 @@ async function applyMuseCreate(
   runBefore: RunRecord | null,
   deps: ApprovalDecideDeps,
 ): Promise<NonNullable<ApprovalDecideReport['applied']>> {
-  const scope = parseMuseCreateScope(approval)
-  const created = createMuse(ctx, {
-    id: scope.museId,
+  const scope = parseShipCreateScope(approval)
+  const created = createShip(ctx, {
+    id: scope.shipId,
     displayName: scope.displayName,
     role: scope.role,
     engine: scope.engine,
     model: scope.model,
   })
   const reloaded = loadConfig(ctx.rootDir)
-  store.syncMuses(projectId, museSpecs(reloaded))
-  const muse = store.getMuse(scope.museId)
-  if (muse === null) {
-    throw new InternalError(`approved muse '${scope.museId}' disappeared after syncing the store`)
+  store.syncShips(projectId, shipSpecs(reloaded))
+  const ship = store.getShip(scope.shipId)
+  if (ship === null) {
+    throw new InternalError(`approved ship '${scope.shipId}' disappeared after syncing the store`)
   }
   // Engine homes are computed, never created, by the bootstrap/config path:
   // materialize the directory so the container mount has a real host path.
-  mkdirSync(muse.engineHome, { recursive: true })
+  mkdirSync(ship.engineHome, { recursive: true })
+  const isLegacyMuse = approval.action === 'muse.create'
   store.appendEvent({
     projectId,
     runId: approval.runId,
-    type: 'muse.applied_from_proposal',
+    type: isLegacyMuse ? 'muse.applied_from_proposal' : 'ship.applied_from_proposal',
     payload: {
       approvalId: approval.id,
-      museId: scope.museId,
+      shipId: scope.shipId,
+      museId: scope.shipId,
       engine: scope.engine,
       configPath: created.configPath,
     },
@@ -353,15 +362,15 @@ async function applyMuseCreate(
     runState === 'active' || runState === 'awaiting_approval' || runState === 'awaiting_input'
   if (approval.runId !== null && ctx.loaded.config.sandbox.kind === 'docker' && liveRun) {
     try {
-      container = await provisionApprovedMuse(ctx, store, projectId, muse, deps)
+      container = await provisionApprovedShip(ctx, store, projectId, ship, deps)
     } catch (e) {
       if (!(e instanceof SandboxUnavailableError)) throw e
       // The decision stands; the next `pluton run` provisions enabled config
-      // muses anyway, so a down sandbox is a warning here, not a failure.
+      // ships anyway, so a down sandbox is a warning here, not a failure.
       containerWarning = e.message
     }
   }
-  return { museId: scope.museId, configPath: created.configPath, container, containerWarning }
+  return { shipId: scope.shipId, museId: scope.shipId, configPath: created.configPath, container, containerWarning }
 }
 
 /** Un-park a run whose last pending approval was just decided (never re-drives an exited supervisor). */
@@ -433,11 +442,11 @@ function reportFromCurrentRows(
     )
   }
   let applied: ApprovalDecideReport['applied'] = null
-  if (current.action === 'muse.create' && current.status === 'approved') {
-    const scope = parseMuseCreateScope(current)
-    const sandbox = store.getSandboxForMuse(projectId, scope.museId)
+  if ((current.action === 'ship.create' || current.action === 'muse.create') && current.status === 'approved') {
+    const scope = parseShipCreateScope(current)
+    const sandbox = store.getSandboxForShip(projectId, scope.shipId)
     applied = {
-      museId: scope.museId,
+      shipId: scope.shipId,
       configPath: ctx.configPath,
       container:
         sandbox !== null && sandbox.containerName !== null
@@ -530,8 +539,8 @@ export async function decideApproval(
     settleApprovalWaiter(decided.id, decided.status, 'decision')
 
     let applied: ApprovalDecideReport['applied'] = null
-    if (decided.status === 'approved' && decided.action === 'muse.create') {
-      applied = await applyMuseCreate(ctx, store, projectId, decided, runBefore, deps)
+    if (decided.status === 'approved' && (decided.action === 'ship.create' || decided.action === 'muse.create')) {
+      applied = await applyShipCreate(ctx, store, projectId, decided, runBefore, deps)
     }
 
     const run = runBefore !== null ? unParkRun(store, projectId, decided, runBefore) : null

@@ -6,7 +6,7 @@
 
 import type { EngineAdapter, EngineSession, McpServerSpec } from '../engines/contract/types.ts'
 import type { EnginePermissionChannel } from '../engines/interactive-approval.ts'
-import type { ChatSessionRecord, MuseRecord, TaskRecord } from '../domain/models.ts'
+import type { ChatSessionRecord, ShipRecord, TaskRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import type { OperatorToolEnv } from '../tools/operator-catalog.ts'
 import { createTheme, type Theme } from '../tui/theme.ts'
@@ -55,7 +55,7 @@ import { computeLayout } from '../tui/layout.ts'
 import { operatorPreamble } from './prompt.ts'
 import type {
   OrchestraInspectorData,
-  MuseInspectorItem,
+  ShipInspectorItem,
   TaskInspectorItem,
   EventInspectorItem,
 } from '../tui/orchestra.ts'
@@ -82,7 +82,7 @@ function approvalRecordToView(record: ApprovalRecord): ApprovalViewData {
     action: record.action,
     reason: record.reason,
     ...(target !== undefined ? { target } : {}),
-    ...(record.requestedByMuseId ? { requestedByMuse: record.requestedByMuseId } : {}),
+    ...(record.requestedByShipId ? { requestedByShip: record.requestedByShipId } : {}),
     scope: record.scope,
     status: record.status,
     runId: record.runId,
@@ -95,7 +95,9 @@ export interface ChatSessionDeps {
   store: Store
   projectId: string
   rootDir: string
-  muse: MuseRecord
+  ship?: ShipRecord
+  /** @deprecated Use `ship`; kept for backward compatibility. */
+  muse?: ShipRecord
   adapter: EngineAdapter
   io: ChatIo
   session: ChatSessionRecord
@@ -125,7 +127,7 @@ export interface ChatSessionDeps {
 }
 
 export class ChatSession {
-  private readonly deps: ChatSessionDeps
+  private readonly deps: ChatSessionDeps & { ship: ShipRecord }
   private readonly theme: Theme
   private engineSession: EngineSession | null = null
   private editor: EditorState
@@ -149,24 +151,28 @@ export class ChatSession {
   private detailsOpen = false
 
   constructor(deps: ChatSessionDeps) {
-    this.deps = deps
+    const ship = deps.ship ?? deps.muse
+    if (!ship) throw new Error('ChatSession requires ship or muse')
+    this.deps = { ...deps, ship }
     this.theme = createTheme()
     this.editor = initialEditor()
     this.viewState = initialViewState({ inspectorOpen: deps.initialInspectorOpen ?? false })
   }
 
   async start(): Promise<void> {
+    const ship = {
+      id: this.deps.ship.id,
+      slug: this.deps.ship.slug,
+      role: this.deps.ship.role,
+      model: this.deps.ship.model,
+    }
     const engineSession = await this.deps.adapter.startSession({
-      muse: {
-        id: this.deps.muse.id,
-        slug: this.deps.muse.slug,
-        role: this.deps.muse.role,
-        model: this.deps.muse.model,
-      },
+      ship,
+      muse: ship,
       workdir: this.deps.rootDir,
       env: {},
-      configDir: this.deps.muse.engineHome,
-      instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
+      configDir: this.deps.ship.engineHome,
+      instructions: this.deps.instructions ?? operatorPreamble(this.deps.ship),
       resumeToken: this.deps.resumeToken ?? undefined,
       mcpServers: this.deps.mcpServers,
       ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
@@ -187,9 +193,9 @@ export class ChatSession {
       {
         projectName,
         rootDir: this.deps.rootDir,
-        museSlug: this.deps.muse.slug,
+        shipSlug: this.deps.ship.slug,
         engine: this.deps.adapter.kind,
-        model: this.deps.muse.model,
+        model: this.deps.ship.model,
         mode: 'container',
         sessionId: this.deps.session.id,
         resumed: isResumed,
@@ -225,26 +231,33 @@ export class ChatSession {
     this.scheduleRedraw()
   }
 
+  get shipModel(): string {
+    return this.deps.ship.model
+  }
+
+  /** @deprecated Use `shipModel`; kept for backward compatibility. */
   get museModel(): string {
-    return this.deps.muse.model
+    return this.shipModel
   }
 
   async switchModel(newModel: string): Promise<void> {
     if (this.engineSession) {
       await this.engineSession.close()
     }
-    this.deps.muse.model = newModel
+    this.deps.ship.model = newModel
+    const ship = {
+      id: this.deps.ship.id,
+      slug: this.deps.ship.slug,
+      role: this.deps.ship.role,
+      model: newModel,
+    }
     const nextEngineSession = await this.deps.adapter.startSession({
-      muse: {
-        id: this.deps.muse.id,
-        slug: this.deps.muse.slug,
-        role: this.deps.muse.role,
-        model: newModel,
-      },
+      ship,
+      muse: ship,
       workdir: this.deps.rootDir,
       env: {},
-      configDir: this.deps.muse.engineHome,
-      instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
+      configDir: this.deps.ship.engineHome,
+      instructions: this.deps.instructions ?? operatorPreamble(this.deps.ship),
       resumeToken: undefined,
       mcpServers: this.deps.mcpServers,
       ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
@@ -540,7 +553,7 @@ export class ChatSession {
     if (this.deps.slashContext) return this.deps.slashContext
     return {
       session: { id: this.deps.session.id },
-      muse: { id: this.deps.muse.id, slug: this.deps.muse.slug },
+      ship: { id: this.deps.ship.id, slug: this.deps.ship.slug },
       status: async () => 'Status not configured',
       runs: async () => 'No runs',
       approvalsList: async () => 'No approvals',
@@ -564,7 +577,7 @@ export class ChatSession {
     if (newSession.state === 'closed') {
       newSession = this.deps.store.createChatSession({
         projectId: this.deps.projectId,
-        museId: this.deps.muse.id,
+        shipId: this.deps.ship.id,
       })
       if (this.deps.slashContext) {
         this.deps.slashContext.session.id = newSession.id
@@ -572,17 +585,19 @@ export class ChatSession {
     }
     this.deps.session = newSession
 
+    const ship = {
+      id: this.deps.ship.id,
+      slug: this.deps.ship.slug,
+      role: this.deps.ship.role,
+      model: this.deps.ship.model,
+    }
     const engineSession = await this.deps.adapter.startSession({
-      muse: {
-        id: this.deps.muse.id,
-        slug: this.deps.muse.slug,
-        role: this.deps.muse.role,
-        model: this.deps.muse.model,
-      },
+      ship,
+      muse: ship,
       workdir: this.deps.rootDir,
       env: {},
-      configDir: this.deps.muse.engineHome,
-      instructions: this.deps.instructions ?? operatorPreamble(this.deps.muse),
+      configDir: this.deps.ship.engineHome,
+      instructions: this.deps.instructions ?? operatorPreamble(this.deps.ship),
       mcpServers: this.deps.mcpServers,
       ...(this.deps.engineApprovals !== undefined ? { approvals: this.deps.engineApprovals } : {}),
     })
@@ -598,9 +613,9 @@ export class ChatSession {
       {
         projectName,
         rootDir: this.deps.rootDir,
-        museSlug: this.deps.muse.slug,
+        shipSlug: this.deps.ship.slug,
         engine: this.deps.adapter.kind,
-        model: this.deps.muse.model,
+        model: this.deps.ship.model,
         mode: 'container',
         sessionId: newSession.id,
         resumed: false,
@@ -850,9 +865,10 @@ export class ChatSession {
   }
 
   private buildOrchestraData(): OrchestraInspectorData {
-    const musesList = this.deps.store.listMuses().filter((m) => m.projectId === this.deps.projectId && m.enabled)
+    const rawShips = this.deps.store.listShips?.() ?? this.deps.store.listMuses?.() ?? []
+    const shipsList = rawShips.filter((m) => m.projectId === this.deps.projectId && m.enabled)
     const tasks: TaskInspectorItem[] = []
-    const museActiveTasks = new Map<string, TaskRecord[]>()
+    const shipActiveTasks = new Map<string, TaskRecord[]>()
 
     if (this.viewState.run?.id) {
       try {
@@ -866,10 +882,10 @@ export class ChatSession {
         }
 
         for (const t of runTasks) {
-          if (t.assigneeMuseId) {
-            const list = museActiveTasks.get(t.assigneeMuseId) ?? []
+          if (t.assigneeShipId) {
+            const list = shipActiveTasks.get(t.assigneeShipId) ?? []
             list.push(t)
-            museActiveTasks.set(t.assigneeMuseId, list)
+            shipActiveTasks.set(t.assigneeShipId, list)
           }
 
           let taskState: TaskInspectorItem['state'] = 'pending'
@@ -886,8 +902,8 @@ export class ChatSession {
           }
 
           let ownerSlug: string | undefined
-          if (t.assigneeMuseId) {
-            const assignee = musesList.find((m) => m.id === t.assigneeMuseId)
+          if (t.assigneeShipId) {
+            const assignee = shipsList.find((m) => m.id === t.assigneeShipId)
             ownerSlug = assignee?.slug
           }
 
@@ -900,7 +916,7 @@ export class ChatSession {
             id: t.id,
             title: t.title,
             state: taskState,
-            ownerMuseSlug: ownerSlug,
+            ownerShipSlug: ownerSlug,
             dependencies: depMap.get(t.id),
             writeScope: t.writeScope,
             retries: t.attempt > 0 ? t.attempt : undefined,
@@ -912,12 +928,12 @@ export class ChatSession {
       }
     }
 
-    const muses: MuseInspectorItem[] = musesList.map((m) => {
-      let state: MuseInspectorItem['state'] = 'idle'
-      if (this.viewState.busy && m.id === this.deps.muse.id) {
+    const ships: ShipInspectorItem[] = shipsList.map((m) => {
+      let state: ShipInspectorItem['state'] = 'idle'
+      if (this.viewState.busy && m.id === this.deps.ship.id) {
         state = 'working'
       } else {
-        const assigned = museActiveTasks.get(m.id)
+        const assigned = shipActiveTasks.get(m.id)
         if (assigned && assigned.length > 0) {
           if (assigned.some((t) => t.state === 'running' || t.state === 'verifying')) {
             state = 'working'
@@ -969,7 +985,7 @@ export class ChatSession {
     }
 
     return {
-      muses,
+      ships,
       tasks,
       approvals,
       events,
@@ -988,9 +1004,9 @@ export class ChatSession {
     const projectName = this.deps.store.getProject(this.deps.projectId)?.name ?? this.deps.projectId
 
     const statusView: StatusView = {
-      museSlug: this.deps.muse.slug,
+      shipSlug: this.deps.ship.slug,
       engine: this.deps.adapter.kind,
-      model: this.deps.muse.model,
+      model: this.deps.ship.model,
       busy: this.viewState.busy,
       run: this.viewState.run,
       approvalsPending: this.approvalInbox.size,
@@ -1000,9 +1016,9 @@ export class ChatSession {
     const header = {
       projectName,
       rootDir: this.deps.rootDir,
-      museSlug: this.deps.muse.slug,
+      shipSlug: this.deps.ship.slug,
       engine: this.deps.adapter.kind,
-      model: this.deps.muse.model,
+      model: this.deps.ship.model,
       runState: this.viewState.run ? `run:${this.viewState.run.id} (${this.viewState.run.state})` : undefined,
     }
 
@@ -1067,7 +1083,7 @@ export class ChatSession {
       approvalCard: firstApproval,
       approvalDetails: this.detailsOpen ? firstApproval : null,
       placeholder: 'Ask Pluton to plan, implement, investigate…',
-      museCount: orchestraData.muses.length,
+      shipCount: (orchestraData.ships ?? orchestraData.muses ?? []).length,
       scrollOffset: this.viewState.scrollOffset,
       columns,
       rows,

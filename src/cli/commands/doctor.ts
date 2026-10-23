@@ -177,11 +177,12 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       fix: 'fix pluton.yaml (see docs/MUSE_CONFIGURATION.md)',
     })
   } else {
+    const ships = loadedConfig.config.ships
     checks.push({
       id: 'config',
       title: 'Project config',
       status: 'pass',
-      message: `${root} (project '${loadedConfig.config.project.name}', ${Object.keys(loadedConfig.config.muses).length} muse(s))`,
+      message: `${root} (project '${loadedConfig.config.project.name}', ${Object.keys(ships).length} ship(s))`,
     })
     try {
       const sd = stateDir(root)
@@ -199,15 +200,15 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         fix: 'fix directory permissions on .pluton/state',
       })
     }
-    // Engine checks per configured Muse
+    // Engine checks per configured Ship
     const seen = new Set<string>()
-    for (const [id, muse] of Object.entries(loadedConfig.config.muses)) {
-      const key = `${muse.engine}` // one discovery per engine kind is enough for install state
-      const adapter = safeAdapter(muse.engine)
+    for (const [id, ship] of Object.entries(ships)) {
+      const key = `${ship.engine}` // one discovery per engine kind is enough for install state
+      const adapter = safeAdapter(ship.engine)
       if (!adapter) {
         checks.push({
-          id: `engine:${muse.engine}`,
-          title: `Engine '${muse.engine}' (muse ${id})`,
+          id: `engine:${ship.engine}`,
+          title: `Engine '${ship.engine}' (ship ${id})`,
           status: 'fail',
           message: 'unknown engine kind — not in the engine registry',
           fix: `choose one of: ${listEngineKinds().map((k) => k.kind).join(', ')}`,
@@ -221,14 +222,14 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         checks.push(
           disc.installed
             ? {
-                id: `engine:${muse.engine}`,
-                title: `Engine '${muse.engine}'`,
+                id: `engine:${ship.engine}`,
+                title: `Engine '${ship.engine}'`,
                 status: 'pass',
                 message: `${disc.version ?? 'version unknown'} ${disc.binaryPath ? `(${disc.binaryPath})` : ''}`.trim(),
               }
             : {
-                id: `engine:${muse.engine}`,
-                title: `Engine '${muse.engine}'`,
+                id: `engine:${ship.engine}`,
+                title: `Engine '${ship.engine}'`,
                 status: 'fail',
                 message: 'not installed / not on PATH',
                 fix: disc.fix,
@@ -238,10 +239,10 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       const auth = await adapter.authStatus(home)
       checks.push(
         auth.configured
-          ? { id: `auth:${id}`, title: `Auth for muse '${id}'`, status: 'pass', message: 'configured' }
+          ? { id: `auth:${id}`, title: `Auth for ship '${id}'`, status: 'pass', message: 'configured' }
           : {
               id: `auth:${id}`,
-              title: `Auth for muse '${id}'`,
+              title: `Auth for ship '${id}'`,
               status: 'warn',
               message: 'not configured — engine runs will fail until this is set up',
               fix: auth.hint,

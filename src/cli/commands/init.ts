@@ -114,7 +114,7 @@ export async function runInit(opts: {
     gitignoreUpdated = true
   }
 
-  notes.push('edit pluton.yaml to select each Muse engine/model (`pluton muse model list <muse>`)')
+  notes.push('edit pluton.yaml to select each Ship engine/model (`pluton ship model list <ship>`)')
   notes.push('run `pluton doctor` to verify the environment')
 
   return { rootDir, configPath, team, createdFiles, skippedFiles, gitignoreUpdated, notes }

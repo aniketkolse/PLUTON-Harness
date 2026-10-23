@@ -8,19 +8,19 @@ import {
   StateTransitionError,
   ValidationError,
 } from '../../domain/errors.ts'
-import type { JsonValue, MuseRecord, RunRecord } from '../../domain/models.ts'
+import type { JsonValue, ShipRecord, RunRecord } from '../../domain/models.ts'
 import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
 import { redactProseSecrets } from '../../util/redact.ts'
 import { stripControlChars } from '../../util/sanitize.ts'
 import type { AcpSpawnFn } from '../../engines/acp/client.ts'
-import { engineAdapterForMuse, type EngineIsolationFacts } from '../../engines/approval.ts'
+import { engineAdapterForShip, type EngineIsolationFacts } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
 import { nativeAdapterFor } from '../../execution/adapter.ts'
 import {
   appendExecutionEvent,
   createNativeExecutionProvider,
-  nativeSpecForMuse,
+  nativeSpecForShip,
 } from '../../execution/factory.ts'
 import type { NativeExecutionProvider } from '../../execution/native.ts'
 import {
@@ -44,6 +44,7 @@ import {
   type WorkerImageProbe,
 } from '../../sandbox/image.ts'
 import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/muse-containers.ts'
+import type { ShipContainerSpec } from '../../sandbox/muse-containers.ts'
 import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../tools/bridge.ts'
@@ -51,8 +52,8 @@ import { ToolHttpServer } from '../../tools/http-transport.ts'
 import { PLUTON_VERSION } from '../../version.ts'
 import { GitWorkspaceManager } from '../../workspace/manager.ts'
 import type { ProjectContext } from '../context.ts'
-import { resolveMuseByRef } from './mcp.ts'
-import { museContainerMounts, provisionMuseContainer } from './muse-provision.ts'
+import { resolveShipByRef } from './mcp.ts'
+import { shipContainerMounts, provisionShipContainer } from './muse-provision.ts'
 
 /**
  * `pluton run` — the CLI entry into supervised execution (Phase 6, ADR-0006/0007).
@@ -65,11 +66,11 @@ import { museContainerMounts, provisionMuseContainer } from './muse-provision.ts
  * - Budgets and timeouts come from `runtime.*` config (single source of truth).
  * - `--request-id` routes run creation through durable request receipts, so a
  *   retried command can never create a second run.
- * - Engine auth lives in per-Muse engine homes (ADR-0008); `engineEnv` adds
+ * - Engine auth lives in per-Ship engine homes (ADR-0008); `engineEnv` adds
  *   nothing on top of each adapter's own allowlist.
  * - `sandbox.kind: native` (the default) runs engines as host processes under
  *   the native execution provider. Legacy `sandbox.kind: docker` runs engines
- *   inside per-Muse containers through `docker exec`, with pinned in-image
+ *   inside per-Ship containers through `docker exec`, with pinned in-image
  *   binaries and the bridge exposed on the host gateway; the acknowledged
  *   dev-only `local-process` mode keeps host child processes.
  */
@@ -82,8 +83,8 @@ export interface RunCommandOptions {
 }
 
 export interface RunDeps {
-  /** Test seam: adapter per Muse; default = the built-in engine registry. */
-  adapterFor?: (muse: MuseRecord) => EngineAdapter
+  /** Test seam: adapter per Ship; default = the built-in engine registry. */
+  adapterFor?: (ship: ShipRecord) => EngineAdapter
   /** Test seam: replaces the Docker sandbox manager in container mode. */
   sandboxManager?: SandboxManager
   /** Test seam: replaces the worker-image probe in container mode. */
@@ -117,17 +118,17 @@ const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
 
 const CONTAINER_PIDS_LIMIT = 512
 
-export function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): MuseRecord {
-  if (managerRef !== undefined) return resolveMuseByRef(store, managerRef)
+export function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): ShipRecord {
+  if (managerRef !== undefined) return resolveShipByRef(store, managerRef)
   const found = findManager(ctx.loaded.config)
   if (!found) {
     throw new ConfigError(
-      "no Muse with role 'supervisor' in pluton.yaml — add one or pass --manager <muse>",
+      "no Ship with role 'supervisor' in pluton.yaml — add one or pass --manager <ship>",
     )
   }
-  const muse = store.getMuse(found[0])
-  if (!muse) throw new NotFoundError('muse', found[0])
-  return muse
+  const ship = store.getShip(found[0])
+  if (!ship) throw new NotFoundError('ship', found[0])
+  return ship
 }
 
 function outcomeFromRunState(state: RunState): RunOutcome['outcome'] | null {
@@ -226,7 +227,7 @@ export function installRunCancelSignals(store: Store, runId: string): () => void
 /**
  * Container mode: fail closed before any run row exists — daemon probe, worker
  * image readiness (the `engines` profile is required), then one long-lived
- * container and a `docker exec` spawn context per enabled Muse. Mount
+ * container and a `docker exec` spawn context per enabled Ship. Mount
  * construction and provisioning live in `muse-provision.ts` (shared with the
  * approvals inbox); the once-per-run probe/readiness checks stay here.
  */
@@ -236,7 +237,7 @@ export async function prepareContainerMode(
   projectId: string,
   manager: SandboxManager,
   imageProbeOverride: ((rootDir: string) => Promise<WorkerImageProbe>) | undefined,
-  opts?: { museIds?: string[] },
+  opts?: { shipIds?: string[] },
 ): Promise<Map<string, DockerExecContext>> {
   const probe = await manager.probe()
   if (!probe.available) {
@@ -258,23 +259,23 @@ export async function prepareContainerMode(
 
   const runtime = ctx.loaded.config.runtime
   const workspacesRoot = workspaceDir(ctx.rootDir)
-  const byMuse = new Map<string, DockerExecContext>()
-  const allowed = opts?.museIds ? new Set(opts.museIds) : null
-  for (const muse of store.listMuses()) {
-    if (!muse.enabled) continue
-    if (allowed !== null && !allowed.has(muse.id)) continue
-    const mounts = museContainerMounts({ muse, rootDir: ctx.rootDir, workspacesRoot })
-    const museConfig = ctx.loaded.config.muses[muse.id]
-    const networkPolicy = museConfig?.network_policy ?? runtime.network_policy
+  const byShip = new Map<string, DockerExecContext>()
+  const allowed = opts?.shipIds ? new Set(opts.shipIds) : null
+  for (const ship of store.listShips()) {
+    if (!ship.enabled) continue
+    if (allowed !== null && !allowed.has(ship.id)) continue
+    const mounts = shipContainerMounts({ ship, rootDir: ctx.rootDir, workspacesRoot })
+    const shipConfig = ctx.loaded.config.ships[ship.id]
+    const networkPolicy = shipConfig?.network_policy ?? runtime.network_policy
     const customNetwork =
       networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
         ? runtime.internal_network_name
         : undefined
-    await provisionMuseContainer({
+    await provisionShipContainer({
       manager,
       store,
       projectId,
-      muse,
+      ship,
       image: imageTag,
       ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
       limits: {
@@ -287,39 +288,39 @@ export async function prepareContainerMode(
       rootDir: ctx.rootDir,
       workspacesRoot,
     })
-    byMuse.set(muse.id, {
-      containerName: sandboxContainerName(projectId, muse.id),
+    byShip.set(ship.id, {
+      containerName: sandboxContainerName(projectId, ship.id),
       mounts: mounts.map((mount) => ({ hostPath: mount.hostPath, containerPath: mount.containerPath })),
       env: {},
     })
   }
-  return byMuse
+  return byShip
 }
 
 /**
- * The container-mode adapter per Muse: pinned in-image binaries, `docker exec`
+ * The container-mode adapter per Ship: pinned in-image binaries, `docker exec`
  * as the process spawn, Linux platform env construction (the engine process
  * runs inside the container, never on the host). `session` carries the proven
  * isolation fact through to the approval policy — a container alone is not
  * isolation (chat/SPA sessions are mounted at the project root inside it).
  */
 export function containerAdapterFor(
-  muse: MuseRecord,
+  ship: ShipRecord,
   contexts: Map<string, DockerExecContext>,
   dockerSpawn: AcpSpawnFn | undefined,
   session: EngineIsolationFacts = { isolatedCheckout: false },
 ): EngineAdapter {
-  const exec = contexts.get(muse.id)
+  const exec = contexts.get(ship.id)
   if (exec === undefined) {
-    throw new InternalError(`container mode: no container was prepared for Muse '${muse.id}'`)
+    throw new InternalError(`container mode: no container was prepared for Ship '${ship.id}'`)
   }
-  const binaryPath = CONTAINER_ENGINE_BINARIES[muse.engineKind]
-  if (binaryPath === undefined && muse.engineKind !== 'mock') {
+  const binaryPath = CONTAINER_ENGINE_BINARIES[ship.engineKind]
+  if (binaryPath === undefined && ship.engineKind !== 'mock') {
     throw new ValidationError(
-      `engine '${muse.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode)`,
+      `engine '${ship.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode)`,
     )
   }
-  return engineAdapterForMuse(muse, {
+  return engineAdapterForShip(ship, {
     spawnFn: dockerExecSpawn(exec, dockerSpawn),
     platform: 'linux',
     isolatedCheckout: session.isolatedCheckout,
@@ -384,19 +385,19 @@ export function createRunSupervisor(args: {
   let supervisorAdapterFor: SupervisorAdapterFactory | undefined = deps.adapterFor
   if (supervisorAdapterFor === undefined && containerContexts !== null) {
     const contexts = containerContexts
-    supervisorAdapterFor = (muse, session) => containerAdapterFor(muse, contexts, deps.dockerSpawn, session)
+    supervisorAdapterFor = (ship, session) => containerAdapterFor(ship, contexts, deps.dockerSpawn, session)
   } else if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
     const nativeProvider = args.nativeProvider
-    supervisorAdapterFor = (muse, session) =>
-      nativeAdapterFor(muse, {
+    supervisorAdapterFor = (ship, session) =>
+      nativeAdapterFor(ship, {
         provider: nativeProvider,
         isolatedCheckout: session.isolatedCheckout,
         specFor: (req) =>
-          nativeSpecForMuse({
+          nativeSpecForShip({
             config: ctx.loaded.config,
             rootDir: ctx.rootDir,
             projectId,
-            muse,
+            ship,
             workdir: req.workdir,
             engineHome: req.configDir,
             isolatedCheckout: session.isolatedCheckout,
@@ -425,7 +426,7 @@ export function createRunSupervisor(args: {
     ...(deps.onWorkerEvent !== undefined ? { onWorkerEvent: deps.onWorkerEvent } : {}),
     workspaceManager,
     engineEnv: () => ({}),
-    mcpServerFor: (muse, taskId) => {
+    mcpServerFor: (ship, taskId) => {
       const bridge =
         taskId === null
           ? supervisor.managerBridge()
@@ -434,7 +435,7 @@ export function createRunSupervisor(args: {
               projectId,
               rootDir: ctx.rootDir,
               runId: run.id,
-              callerMuseId: muse.id,
+              callerShipId: ship.id,
               callerTaskId: taskId,
               limits,
               leaseManager: supervisor.leaseManager,
@@ -442,10 +443,10 @@ export function createRunSupervisor(args: {
               wakeups,
             })
       const { token } = http.register(bridge, {
-        museId: muse.id,
+        shipId: ship.id,
         taskId,
         runId: run.id,
-        label: muse.slug,
+        label: ship.slug,
       })
       const spec: McpServerSpec = {
         kind: 'http',
@@ -496,7 +497,7 @@ export function startRunInBackground(
   const payload: JsonValue = {
     goal,
     acceptanceCriteria: opts.acceptance,
-    managerMuseId: manager.id,
+    managerShipId: manager.id,
     budget: { ...budget },
   }
   const createRun = (): RunRecord =>
@@ -506,7 +507,7 @@ export function startRunInBackground(
       origin: 'cli',
       requestedBy: 'cli',
       acceptanceCriteria: opts.acceptance,
-      managerMuseId: manager.id,
+      managerShipId: manager.id,
       budget,
     })
 
@@ -683,7 +684,7 @@ export async function runRun(
     const settings = supervisorSettingsFromRuntime(runtime)
 
     // Container mode (sandbox.kind: docker — the legacy container provider)
-    // provisions the per-Muse containers before the run row exists, so a daemon
+    // provisions the per-Ship containers before the run row exists, so a daemon
     // or image failure never leaves a started run behind. Native creates its
     // provider and validates acknowledgements/network policy here too; an
     // unacknowledged local-process config is refused the same way every sandbox
@@ -702,7 +703,7 @@ export async function runRun(
     const payload: JsonValue = {
       goal,
       acceptanceCriteria: opts.acceptance,
-      managerMuseId: manager.id,
+      managerShipId: manager.id,
       budget: { ...budget },
     }
     const createRun = (): RunRecord =>
@@ -712,7 +713,7 @@ export async function runRun(
         origin: 'cli',
         requestedBy: 'cli',
         acceptanceCriteria: opts.acceptance,
-        managerMuseId: manager.id,
+        managerShipId: manager.id,
         budget,
       })
 

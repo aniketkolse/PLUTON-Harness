@@ -3,7 +3,7 @@ import { TerminalUnavailableError, ValidationError } from '../../domain/errors.t
 import { createSandboxManager } from '../../sandbox/factory.ts'
 import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import {
-  attachToMuseTerminal,
+  attachToShipTerminal,
   buildAttachArgv,
   type AttachOutcome,
   type AttachSpawnFn,
@@ -14,10 +14,10 @@ import { NativeTerminalManager } from '../../terminal/native.ts'
 import { tmuxSessionName } from '../../terminal/names.ts'
 import type { TerminalManager } from '../../terminal/types.ts'
 import type { ProjectContext } from '../context.ts'
-import { resolveMuseByRef } from './mcp.ts'
+import { resolveShipByRef } from './mcp.ts'
 
 /**
- * `pluton attach <muse> [--window <name>]` — resolve the Muse's terminal target,
+ * `pluton attach <ship> [--window <name>]` — resolve the Ship's terminal target,
  * ensure the tmux session exists (inside the container for Docker mode, on the
  * host for native mode) and hand the terminal to `docker exec -it … tmux
  * attach-session` or host `tmux attach-session`.
@@ -29,7 +29,9 @@ import { resolveMuseByRef } from './mcp.ts'
  */
 
 export interface AttachCommandOptions {
-  museRef: string
+  shipRef?: string
+  /** @deprecated Use `shipRef`; kept for backward compatibility. */
+  museRef?: string
   windowName?: string
 }
 
@@ -40,7 +42,9 @@ export interface AttachDeps {
 }
 
 export interface AttachCommandResult {
-  museId: string
+  shipId: string
+  /** @deprecated Use `shipId`; kept for backward compatibility. */
+  museId?: string
   containerName: string
   sessionName: string
   windowName: string | null
@@ -51,7 +55,7 @@ export interface AttachCommandResult {
 }
 
 const CONTAINER_MISSING_FIX =
-  'start a run first — per-Muse containers are created by `pluton run`; attach never creates containers'
+  'start a run first — per-Ship containers are created by `pluton run`; attach never creates containers'
 
 /** `details.reason` is the terminal manager's stable failure vocabulary. */
 function terminalFailureReason(e: unknown): unknown {
@@ -61,30 +65,32 @@ function terminalFailureReason(e: unknown): unknown {
   return (d as { reason?: unknown }).reason
 }
 
-export async function attachMuse(
+export async function attachShip(
   ctx: ProjectContext,
   opts: AttachCommandOptions,
   deps: AttachDeps = {},
 ): Promise<AttachCommandResult> {
   const { store, projectId } = bootstrapStore(ctx.loaded)
   try {
-    const muse = resolveMuseByRef(store, opts.museRef)
-    if (!muse.enabled) {
+    const shipRef = opts.shipRef ?? opts.museRef
+    if (!shipRef) throw new ValidationError('shipRef is required')
+    const ship = resolveShipByRef(store, shipRef)
+    if (!ship.enabled) {
       throw new ValidationError(
-        `muse '${muse.id}' is disabled (it is no longer in pluton.yaml) — add it back with \`pluton muse create\` or attach to an enabled muse`,
+        `ship '${ship.id}' is disabled (it is no longer in pluton.yaml) — add it back with \`pluton ship create\` or attach to an enabled ship`,
       )
     }
     const sandboxKind = ctx.loaded.config.sandbox.kind
     if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
       throw new ValidationError(
-        `pluton attach requires container-mode Muses (sandbox.kind: docker) or native host mode (sandbox.kind: native): ${sandboxKind} sessions have no Muse container or host tmux session`,
+        `pluton attach requires container-mode Ships (sandbox.kind: docker) or native host mode (sandbox.kind: native): ${sandboxKind} sessions have no Ship container or host tmux session`,
       )
     }
     const isNative = sandboxKind === 'native'
-    const containerName = isNative ? 'host' : sandboxContainerName(projectId, muse.id)
+    const containerName = isNative ? 'host' : sandboxContainerName(projectId, ship.id)
     const target: AttachTarget = {
       containerName,
-      sessionName: tmuxSessionName(ctx.loaded.config.project.name, muse.id),
+      sessionName: tmuxSessionName(ctx.loaded.config.project.name, ship.id),
       ...(opts.windowName !== undefined ? { windowName: opts.windowName } : {}),
     }
     const manager =
@@ -95,7 +101,7 @@ export async function attachMuse(
 
     let outcome: AttachOutcome
     try {
-      outcome = await attachToMuseTerminal({
+      outcome = await attachToShipTerminal({
         sandboxKind,
         manager,
         target,
@@ -106,7 +112,7 @@ export async function attachMuse(
         // attach NEVER creates containers: the run path owns provisioning, so
         // the honest fix is "start a run", not "re-create the sandbox".
         throw new TerminalUnavailableError(
-          `Muse container '${target.containerName}' does not exist — attach never creates containers`,
+          `Ship container '${target.containerName}' does not exist — attach never creates containers`,
           { details: (e as TerminalUnavailableError).details, fix: CONTAINER_MISSING_FIX },
         )
       }
@@ -115,13 +121,14 @@ export async function attachMuse(
 
     store.upsertTerminal({
       projectId,
-      museId: muse.id,
-      sandboxId: isNative ? null : (store.getSandboxForMuse(projectId, muse.id)?.id ?? null),
+      shipId: ship.id,
+      sandboxId: isNative ? null : (store.getSandboxForShip(projectId, ship.id)?.id ?? null),
       tmuxSessionName: target.sessionName,
       state: 'present',
     })
     return {
-      museId: muse.id,
+      shipId: ship.id,
+      museId: ship.id,
       containerName,
       sessionName: target.sessionName,
       windowName: outcome.windowName,
@@ -134,3 +141,6 @@ export async function attachMuse(
     store.close()
   }
 }
+
+/** @deprecated Use `attachShip`; kept for backward compatibility. */
+export const attachMuse = attachShip

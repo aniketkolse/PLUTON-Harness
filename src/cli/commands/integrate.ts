@@ -147,7 +147,7 @@ export function approvalScopeTaskId(scope: JsonValue): string | null {
 function hasApprovedApply(store: Store, runId: string, taskId: string, matches: string[]): boolean {
   return store.listApprovals(runId).some((a) => {
     if (a.action !== 'integration.apply' || a.status !== 'approved') return false
-    if (a.taskId !== taskId || a.requestedByMuseId !== null) return false
+    if (a.taskId !== taskId || a.requestedByShipId !== null) return false
     if (approvalScopeTaskId(a.scope) !== taskId) return false
     const scope = a.scope
     if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return false
@@ -350,7 +350,7 @@ export async function integrateRun(
           projectId,
           runId: runRecord.id,
           taskId: task.id,
-          requestedByMuseId: null,
+          requestedByShipId: null,
           action: 'integration.apply',
           reason: `task ${task.id} (${task.title}) changes protected paths: ${matches.join(', ')}`,
           scope: { taskId: task.id, runId: runRecord.id, files: matches },
