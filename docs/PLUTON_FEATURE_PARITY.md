@@ -141,3 +141,33 @@ Open items (from ROADMAP named follow-ups; status per files, not re-tested inter
 | Q6 | Budget semantics: which axes (run/per-Muse; tokens/cost), defaults, and behavior at breach (interrupt vs fail) | Owner (PR-1 assumes: optional, tokens primary, interrupt) |
 | Q7 | PTC/workflow engine: any concrete Pluton use case? | Owner |
 | Q8 | Delivery scope: packaging/publish/license (O8) | Owner |
+
+## H. Revalidation — 2026-10-25 (baseline `main` @ `932b077`)
+
+> The historical audit above is unchanged. This section records what was re-checked against the
+> current source so a reader does not treat G1–G5 as still-current without evidence.
+
+| Prior gap | Current state | Evidence |
+|---|---|---|
+| G1 usage budgets dormant in real runs | **Closed** | `runtime.usage_budgets` + `usageBudgetsFromRuntime` (`src/config/schema.ts`), `UsageLedger` constructed per run (`src/cli/commands/run.ts:384,421-422`); `supervisor-usage-budget(5)`, `usage-ledger` |
+| G2 no interactive operator channel for engine permission requests | **Closed** | `src/engines/interactive-approval.ts`, `pluton approvals`, `POST /api/approvals/:id/decide`; `engine-interactive-approval(17)` |
+| G3 no transport-level retry/backoff | **Closed** | `src/engines/acp/retry.ts`; `acp-retry(4)`, `transport-retry(3)` |
+| G4 no session-log projection/query surface | **Closed for cursor query and projections; FTS remains open** | New `src/store/query.ts` (cursor pages, run/task/ship/type/time filters, run projections) and `pluton logs [run]` / `log`; ADR-0017; `log-query(18)`, `cli-logs(7)`. FTS/search (CG-8) and JSONL session export/import remain unimplemented by design |
+| G5 TUI context %/cost fabricated | **Closed** | cost stays null until an engine reports it (`src/tui/state.ts`); status renders `Context: unknown` (`src/ui/status.ts`) |
+
+Conformance gates added (see `docs/reverse-engineering/implementation-decisions.md` for acceptance
+criteria):
+
+| Item | Gate | Evidence |
+|---|---|---|
+| A7 capability records | table ↔ registry identity, deep-equal capabilities, dev-only labels | `tests/unit/capability-conformance.test.ts` |
+| R3 no vestigial states | vocabulary inventory ratchet + transition coverage for task/run/sandbox | `tests/unit/state-coverage.test.ts`; unused engine-process vocabulary removed from `src/domain/state.ts` |
+| R4 module boundaries | dependency direction, presentation/engines isolation, CLI/server containment | `tests/unit/module-boundaries.test.ts` |
+| O1 streaming vs CLI replay | replay is the durable SQLite cursor; SSE stays live-tail | `docs/adr/0017-session-log-query-and-cursor-replay.md` |
+| O5 doc-drift enforcement | dead relative links across README + `docs/**/*.md` fail `npm run verify:docs` and `release:check` | `scripts/verify-docs.mjs`, `tests/unit/doc-links.test.ts` |
+| Q2/P5 composition | static composition retained; kernel/market/HMR/Electron/Python rejected with revisit triggers | `docs/adr/0016-static-composition-rejected-kernel.md` |
+
+Still open after this pass: FTS/search over events (CG-8); session export/import (P2 item 3); an
+approval-model ADR (O2 — the channel is implemented, the vocabulary/default decision is not recorded
+as its own ADR); server `routes.ts` and `tools/operator-catalog.ts` still import runtime helpers from
+`cli/` (allowlisted, tracked debt in the module-boundary test); `REA.txt` remains absent (Q1).

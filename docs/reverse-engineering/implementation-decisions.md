@@ -72,7 +72,7 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 - **Idea:** engine capabilities are declared per engine and tested against the registry so engine additions cannot silently change level/continuation semantics.
 - **Source:** OpenMausBot (`omb-rt`: `capabilities.test.ts:13-36, 39-47, 81-104`; report §11 adapt 3); cloudroom's capability gating is the same posture (`cc`: `src/runtime/mod.rs:631-641`).
 - **Pluton:** adapters expose a capabilities record; unsupported features return explicit capability errors instead of fabricated behaviour (ADR-0003, Proposed); `EngineCapabilities` is already typed in `src/engines/contract/types.ts` with conservative defaults.
-- **Acceptance test:** a conformance test asserts every adapter registered in `src/engines/registry.ts` appears in the capability table and no table row exists without an adapter; adding an adapter without updating the table fails CI. **Status:** decided; interface skeleton exists, test and enforcement not implemented.
+- **Acceptance test:** a conformance test asserts every adapter registered in `src/engines/registry.ts` appears in the capability table and no table row exists without an adapter; adding an adapter without updating the table fails CI. **Status:** implemented — `tests/unit/capability-conformance.test.ts` pins registry ↔ table identity, deep-equals every adapter's `capabilities()`, checks the full capability vocabulary and dev-only labels, and fails when an adapter or capability is added without a deliberate table update.
 
 ### A8. Adapter contract isolating protocol encoding
 
@@ -137,14 +137,14 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 - **Idea rejected:** publishing state machines whose states have no producer or no defined exit (cloudroom ships `waiting_for_files` with no producer in the snapshot; `rewinding`/`suspended` exist for private features).
 - **Source:** cloudroom-core (`cc`: §4, §13 avoid 3).
 - **Pluton does instead:** one tested state machine in `src/domain/state.ts` where any transition outside the table is rejected (ADR-0006); the skeleton table is the full intended set.
-- **Acceptance test:** state-coverage test — every declared task/run/engine/sandbox state has at least one test that enters and leaves it, or the state is removed before release. **Status:** rule decided, coverage test not implemented.
+- **Acceptance test:** state-coverage test — every declared task/run/engine/sandbox state has at least one test that enters and leaves it, or the state is removed before release. **Status:** implemented — `tests/unit/state-coverage.test.ts` builds the task/run graphs from the exported transition functions, checks incoming/outgoing coverage and terminal consistency, and exercises every sandbox state through `setSandboxState`. The declared-but-unused engine-process vocabulary was removed from `src/domain/state.ts`; the test's vocabulary-inventory ratchet fails if a new `*_STATES` export is added without coverage.
 
 ### R4. A monolithic host above a clean runtime
 
 - **Idea rejected:** a single god module holding goal runs, seats, cards and watchdogs beside a clean runtime (OpenMausBot's `server/index.ts` is ~17k lines and the contract lists three "what remains" leaks).
 - **Source:** OpenMausBot (`omb-rt`: §11 avoid 1; `omb-mcp`: §11.2 item 3).
 - **Pluton does instead:** enforced module directories mirroring the architecture (`domain/ runtime/ persistence/ engines/ orchestration/ sandbox/ terminal/ workspace/ tools/ verification/ config/ cli/`), with boundaries enforced by dependency-direction unit tests (ADR-0001, Accepted).
-- **Acceptance test:** the dependency-direction unit test fails when a forbidden edge is added (e.g. `domain/` importing `cli/`); module layout review at every phase gate. **Status:** decided; boundary test not yet written.
+- **Acceptance test:** the dependency-direction unit test fails when a forbidden edge is added (e.g. `domain/` importing `cli/`); module layout review at every phase gate. **Status:** implemented — `tests/unit/module-boundaries.test.ts` enforces dependency direction for `domain/`, `util/`, `config/`, `store/`, `workspace/`, keeps presentation modules out of infrastructure/transport, keeps engine adapters below orchestration, and lets only `cli/` compose the server. The two existing non-CLI imports of `cli/` (`server/routes.ts`, `tools/operator-catalog.ts`) are explicit tracked-debt allowlist entries; a new edge fails, and a stale entry fails too.
 
 ### R5. Memory-only state beside durable state
 
@@ -194,7 +194,7 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 
 - **Question:** should Pluton expose an event stream with reconnect replay (both references use SSE with `Last-Event-ID`; `cc`: §10; `omb-mcp`: `server/sse-fanout.ts:11-38`), or keep everything behind `pluton logs`/`status --json`?
 - **Closing action:** an ADR defining the surface (if any), plus a reconnect/replay test (disconnect a client, reconnect, assert no gaps and no duplicates).
-- **Status:** open; Pluton's surfaces today are CLI-only (`pluton logs`/`status`), and no ADR records a streaming protocol.
+- **Status:** decided and implemented for the query/replay path — ADR-0017 defines the seq-cursor contract (`src/store/query.ts`; CLI `pluton logs [run]`), keeps SSE as a live tail with durable-log recovery, and is covered by `tests/unit/log-query.test.ts` and `tests/integration/cli-logs.test.ts` (pagination, reconnect, filters, typed failures). Server-side historical SSE replay/generations remain rejected.
 
 ### O2. Approval model and default mode
 
@@ -221,7 +221,7 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 - **Question:** how to make R2 mechanical rather than aspirational.
 - **Prior art:** OpenMausBot's expected-capability table and source-extracted constants make drift a test failure (`omb-rt`: `capabilities.test.ts:39-47, 73-78`); its doc line numbers are still stale, showing that mechanics + link checks are both needed.
 - **Closing action:** a CI check (dead internal links; status claims must link to tests or carry the NOT RUN convention) recorded in an ADR or development doc.
-- **Status:** open; convention exists in README/ROADMAP, tooling does not.
+- **Status:** implemented for dead relative links — `scripts/verify-docs.mjs` walks README, THIRD_PARTY_NOTICES and `docs/**/*.md`, reports every unresolved relative target, runs as `npm run verify:docs`, and is invoked by `scripts/release-check.mjs`; `tests/unit/doc-links.test.ts` proves the repo passes and a fixture with a dead link fails by name. The status-claim / "NOT RUN" half of the convention remains review discipline rather than tooling.
 
 ### O6. Outward-effect probe (only if auto-rerun is ever adopted)
 

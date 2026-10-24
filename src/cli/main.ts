@@ -26,6 +26,7 @@ import { chatRun } from './commands/chat.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { integrateRun } from './commands/integrate.ts'
+import { collectLogType, formatLogsHuman, logsView } from './commands/logs.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createShip, editShip, engineList, listShips, modelList, showShip } from './commands/ship.ts'
@@ -631,6 +632,51 @@ program
                   .join('\n')
           emitOk(io, json, human, { runs })
         }
+      } finally {
+        store.close()
+      }
+    })
+  })
+
+program
+  .command('logs [run]')
+  .alias('log')
+  .description('query the durable event log with a resumable seq cursor')
+  .option('--run <id>', 'restrict to one run (full id or unique suffix)')
+  .option('--after <seq>', 'start after this global event seq (cursor)', '0')
+  .option('--limit <n>', 'page size (1-1000, default 50)', '50')
+  .option('--type <type>', 'only events of this type (repeatable)', collectLogType, [])
+  .option('--task <id>', 'only events of this task')
+  .option('--ship <id>', 'only events of this ship')
+  .option('--since <iso>', 'inclusive created_at lower bound (ISO-8601)')
+  .option('--until <iso>', 'inclusive created_at upper bound (ISO-8601)')
+  .action(async (runRef: string | undefined, opts: {
+    run?: string
+    after: string
+    limit: string
+    type: string[]
+    task?: string
+    ship?: string
+    since?: string
+    until?: string
+  }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const { store, projectId } = bootstrapStore(ctx.loaded)
+      try {
+        const view = logsView(store, projectId, {
+          ...(runRef !== undefined ? { run: runRef } : {}),
+          ...(opts.run !== undefined ? { runOption: opts.run } : {}),
+          after: opts.after,
+          limit: opts.limit,
+          type: opts.type,
+          ...(opts.task !== undefined ? { task: opts.task } : {}),
+          ...(opts.ship !== undefined ? { ship: opts.ship } : {}),
+          ...(opts.since !== undefined ? { since: opts.since } : {}),
+          ...(opts.until !== undefined ? { until: opts.until } : {}),
+        })
+        emitOk(io, json, formatLogsHuman(view), view)
       } finally {
         store.close()
       }

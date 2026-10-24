@@ -156,8 +156,10 @@ Data flow for a run (target, with current implementation coverage):
    live-verified).
 
 Separate state axes (never compressed into one status string): **run state**, **task state**,
-**engine process state**, **sandbox state** — all defined in `src/domain/state.ts` with the same
-transition-table discipline; only that module defines transitions.
+**sandbox state** — all defined in `src/domain/state.ts`. The task and run axes have transition-table
+discipline and only that module defines transitions; every state must have a producer and an exit
+(`tests/unit/state-coverage.test.ts`). Engine *process* state is deliberately not modelled: Pluton
+delegates process lifecycle to the adapter/session and persists no such state.
 
 Trust boundaries (ADR-0004/0005/0008/0010):
 

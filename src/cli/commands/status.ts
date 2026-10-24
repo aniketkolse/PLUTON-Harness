@@ -1,5 +1,6 @@
 import type { EventRecord, RunRecord, TaskEdgeRecord, TaskRecord } from '../../domain/models.ts'
 import { NotFoundError, ValidationError } from '../../domain/errors.ts'
+import { recentEvents } from '../../store/query.ts'
 import type { Store } from '../../store/store.ts'
 
 export interface RunSummary {
@@ -25,10 +26,7 @@ export function runDetail(
   eventLimit = 10,
 ): { summary: RunSummary; recentEvents: EventRecord[] } {
   const run = store.getRun(runId)
-  const events = store
-    .eventsSince(run.projectId, 0, 1000)
-    .filter((e) => e.runId === runId)
-    .slice(-eventLimit)
+  const events = recentEvents(store, { projectId: run.projectId, runId, limit: eventLimit })
   return { summary: summarizeRun(store, run), recentEvents: events }
 }
 

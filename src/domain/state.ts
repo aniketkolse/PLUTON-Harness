@@ -158,19 +158,12 @@ export function assertRunTransition(from: RunState, to: RunState): void {
 }
 
 /**
- * Engine *process* state — distinct from task state and run state.
+ * Engine *process* state is deliberately not modelled here: Pluton delegates
+ * the engine process lifecycle to the adapter/session and persists no process
+ * state of its own. A declared vocabulary with no producer or consumer is the
+ * exact "vestigial states" failure R3 forbids, so there is no such table. The
+ * state-coverage test pins this decision.
  */
-export const ENGINE_PROCESS_STATES = [
-  'not_started',
-  'starting',
-  'ready',
-  'busy',
-  'interrupted',
-  'stopped',
-  'crashed',
-] as const
-
-export type EngineProcessState = (typeof ENGINE_PROCESS_STATES)[number]
 
 /** Sandbox lifecycle state — distinct from task state. */
 export const SANDBOX_STATES = ['absent', 'creating', 'running', 'stopped', 'error'] as const

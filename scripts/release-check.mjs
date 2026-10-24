@@ -9,7 +9,8 @@
  *   3. package identity (name + bin mapping)
  *   4. engine requirement declared and satisfied by the running Node
  *   5. lockfile consistency (package-lock.json vs package.json)
- *   6. documentation integrity (README / THIRD_PARTY_NOTICES relative links)
+ *   6. documentation integrity (README / THIRD_PARTY_NOTICES relative links
+ *      plus the full README + docs/ tree link gate)
  *   7. typecheck + full test suite (`npm run check`)
  *   8. production build (`npm run build`)
  *   9. package contents via `npm pack --dry-run --json`:
@@ -227,6 +228,25 @@ try {
   }
 } catch (err) {
   record('docs-links', 'documentation links resolve', FAIL, formatErrorDetail(err, 2), 'restore README.md / THIRD_PARTY_NOTICES.md')
+}
+
+// 6b. Documentation tree integrity (README + docs/**/*.md)
+try {
+  const out = run('node scripts/verify-docs.mjs')
+  const summary = out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('doc links:'))
+    .pop()
+  record('docs-tree', 'documentation tree links resolve', PASS, summary ?? 'green')
+} catch (err) {
+  record(
+    'docs-tree',
+    'documentation tree links resolve',
+    FAIL,
+    formatErrorDetail(err, 8),
+    'fix the dead relative links listed above (npm run verify:docs)',
+  )
 }
 
 // 7. Typecheck + tests

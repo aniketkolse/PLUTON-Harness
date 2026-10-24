@@ -90,6 +90,8 @@ G1, L2, L3, G3 closed with tests; all suites green; no config/schema break for e
 
 **Acceptance tests:** projection queries against fixture stores; cursor reconnect test (no gaps, no duplicates). **Rollback:** additive module + ADR; no schema change (optionally a new migration for indexes only, which is forward-only). **Depends on:** P1 done (not strictly required, but sequencing keeps diffs small).
 
+**Landed 2026-10-25:** `src/store/query.ts` (seq-keyed pages, run/task/ship/type/time filters applied in SQL before the limit, run projections), `pluton logs [run]` / `log` with `--after/--limit/--type/--task/--ship/--since/--until/--json`, and `status --run` now reads its tail through `recentEvents` (removing the old 1000-event project-wide cap). ADR-0017 records the replay contract; SSE stays live-tail. Item 3 (JSONL session export/import) remains open. Verified: `log-query` 18/18 and `cli-logs` 7/7; typecheck/build green.
+
 ## P3 — Approval channel and tool pipeline
 
 **Goal:** close G2 honestly; add extension seams only if Q2 confirms a need.
@@ -113,11 +115,13 @@ G1, L2, L3, G3 closed with tests; all suites green; no config/schema break for e
 
 **Process:** write the ADR first (options: status quo / minimal service registry + lifecycle / full plugin composition). Implementation only after acceptance; minimal scope if chosen: typed service registry with lifecycle events and dependency-direction tests. Market/HMR/Electron/Python parity stay rejected unless re-scoped by the owner. **Rollback:** N/A when ADR-only; a future implementation would be staged behind the registry, not by rewriting modules.
 
+**Resolved 2026-10-25:** ADR-0016 accepts static composition and rejects a runtime plugin kernel, market, HMR, and alternate hosts, with explicit revisit triggers. No implementation follows; the kernel's useful substance (typed capabilities, inspectable registries) is covered by the A7/R4 gates.
+
 ## P6 — Quality gates and delivery (ongoing)
 
-1. Capability conformance test (A7): adapters ↔ capability table drift fails CI.
-2. State-coverage test (R3): every declared state is entered/left by a test or removed.
-3. Doc-drift check (O5) and dependency-boundary test (R4).
+1. Capability conformance test (A7): adapters ↔ capability table drift fails CI. **Landed:** `tests/unit/capability-conformance.test.ts`.
+2. State-coverage test (R3): every declared state is entered/left by a test or removed. **Landed:** `tests/unit/state-coverage.test.ts`; unused engine-process vocabulary removed.
+3. Doc-drift check (O5) and dependency-boundary test (R4). **Landed:** `scripts/verify-docs.mjs` + `tests/unit/doc-links.test.ts` (also wired into `release:check`), `tests/unit/module-boundaries.test.ts`.
 4. Coverage threshold in CI; packaging and license decision (O8) before any distribution.
 5. Sandbox: egress-filter enforcement for `network_policy: restricted` (documented today as not an egress filter).
 
