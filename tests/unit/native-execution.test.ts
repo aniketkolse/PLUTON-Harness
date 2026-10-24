@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -33,11 +41,16 @@ function delay(ms: number): Promise<void> {
 }
 
 function makeRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pluton-native-unit-'))
-  tmpDirs.push(root)
-  mkdirSync(join(root, '.pluton', 'workspaces'), { recursive: true })
-  mkdirSync(join(root, '.pluton', 'engine-homes'), { recursive: true })
-  return root
+  const created = mkdtempSync(join(tmpdir(), 'pluton-native-unit-'))
+  tmpDirs.push(created)
+  mkdirSync(join(created, '.pluton', 'workspaces'), { recursive: true })
+  mkdirSync(join(created, '.pluton', 'engine-homes'), { recursive: true })
+  // The provider resolves every workdir through `realpathSync.native` before it
+  // reports facts or spawns a child (containment is checked on the canonical
+  // path). `tmpdir()` itself can sit behind a symlink — on macOS `/var` is a
+  // symlink to `/private/var` — so the fixture must hand out the same canonical
+  // root the provider will report back.
+  return realpathSync.native(created)
 }
 
 function spec(root: string, overrides: Partial<ExecutionSessionSpec> = {}): ExecutionSessionSpec {
@@ -358,5 +371,26 @@ describe('NativeExecutionProvider', () => {
     expect(facts.workdir).toBe(root)
     expect(facts.limitations.join(' ')).toMatch(/filesystem|network/i)
     expect(JSON.stringify(facts)).not.toContain('host-secret')
+  })
+
+  it('reports the canonical workdir when the session root is reached through a symlink', async () => {
+    const root = makeRoot()
+    const alias = join(root, '.pluton', 'workspaces', 'root-alias')
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const provider = makeProvider(root, [])
+    const session = await provider.prepare(spec(root, { hostWorkdir: alias }))
+    const facts = session.facts()
+
+    // An alias that resolves inside the allowed roots is accepted, but spawning
+    // and facts must agree on one canonical directory: the reported workdir is
+    // the real path, never the operator-supplied symlink. Comparing against
+    // the raw fixture path breaks on hosts whose temp root is itself a symlink.
+    expect(facts.workdir).toBe(realpathSync.native(root))
+    expect(facts.workdir).not.toBe(alias)
+
+    const result = await session.exec([process.execPath, '-e', 'process.stdout.write(process.cwd())'])
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(facts.workdir)
   })
 })
