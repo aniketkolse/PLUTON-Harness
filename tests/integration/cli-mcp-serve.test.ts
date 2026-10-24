@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
@@ -166,7 +166,11 @@ function spawnServe(args: string[]): ServeHandle {
 }
 
 beforeAll(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'pluton-cli-mcp-'))
+  // The child process resolves its cwd to the canonical path, while the store
+  // is seeded here. On macOS `tmpdir()` is behind the `/var` ->
+  // `/private/var` symlink, so both must use the same canonical root or the
+  // child looks up the run in a different project database.
+  projectDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-cli-mcp-')))
   writeFileSync(join(projectDir, 'pluton.yaml'), CONFIG)
 
   const loaded = loadConfig(projectDir)

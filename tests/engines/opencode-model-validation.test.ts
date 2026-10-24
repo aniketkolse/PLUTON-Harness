@@ -10,8 +10,17 @@ import { ApiRouter } from '../../src/server/routes.ts'
 import type { Store } from '../../src/store/store.ts'
 
 describe('OpenCode Model Catalog Validation', () => {
+  /**
+   * These tests inject `runFn`, so no real OpenCode install is needed. The
+   * binary still has to be pinned: without `binaryPath`, `listModels()` first
+   * resolves the host PATH and throws `EngineMissingError` on a machine where
+   * `opencode` is not installed, so the injected runner is never reached.
+   */
+  const injectedRunner = { binaryPath: process.execPath } as const
+
   it('flags unavailable models and refuses silent substitution', async () => {
     const adapter = new OpenCodeAdapter({
+      ...injectedRunner,
       runFn: async () => ({
         stdout: 'opencode/minimax-m3.1-flash-free\n',
         stderr: '',
@@ -51,6 +60,7 @@ describe('OpenCode Model Catalog Validation', () => {
 
   it('defaults to candidate SHIP_WORKER_MODELS when candidateModels is omitted', async () => {
     const adapter = new OpenCodeAdapter({
+      ...injectedRunner,
       runFn: async () => ({
         stdout: 'opencode/deepseek-v4.1-flash-free\n',
         stderr: '',
@@ -69,6 +79,7 @@ describe('OpenCode Model Catalog Validation', () => {
 
   it('marks all candidates unavailable when engine runner throws', async () => {
     const adapter = new OpenCodeAdapter({
+      ...injectedRunner,
       runFn: async () => {
         throw new Error('engine not found')
       },

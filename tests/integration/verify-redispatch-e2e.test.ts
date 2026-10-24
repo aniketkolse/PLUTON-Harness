@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,7 +64,12 @@ muses:
 
 beforeAll(() => {
   registerBuiltinEngines()
-  projectDir = mkdtempSync(join(tmpdir(), 'pluton-redispatch-'))
+  // Project identity is keyed on the literal root path, and the CLI resolves
+  // its cwd to the canonical path. `tmpdir()` itself can sit behind a symlink
+  // — on macOS `/var` is a symlink to `/private/var` — so seeding the store
+  // through the raw temp path would create a second project that the CLI
+  // cannot see. Hand both sides the same canonical directory.
+  projectDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-redispatch-')))
   execFileSync('git', ['init', '-b', 'main', projectDir])
   execFileSync('git', ['config', 'user.name', 'test'], { cwd: projectDir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir })

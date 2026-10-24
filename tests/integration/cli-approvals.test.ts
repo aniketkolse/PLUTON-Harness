@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -93,7 +93,11 @@ interface Fixture {
 }
 
 function makeProject(config = BASE_CONFIG): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-cli-approvals-'))
+  // Project identity is keyed on the literal root path and the CLI resolves
+  // its cwd to the canonical path. On macOS `tmpdir()` is behind the
+  // `/var` -> `/private/var` symlink, so seed the store through the same
+  // canonical root the subprocess will see.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-cli-approvals-')))
   tmpDirs.push(dir)
   writeFileSync(join(dir, 'pluton.yaml'), config)
   writeFileSync(join(dir, 'README.md'), '# cli-approvals project\n')

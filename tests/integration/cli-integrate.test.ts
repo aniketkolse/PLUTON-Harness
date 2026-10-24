@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -80,7 +80,11 @@ interface Fixture {
 }
 
 function makeProject(): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-cli-integrate-'))
+  // The checks run in a workspace whose path is recorded from the fixture
+  // root, while the child prints its canonical cwd. On macOS `tmpdir()` is
+  // behind the `/var` -> `/private/var` symlink, so use the canonical root
+  // for both sides.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-cli-integrate-')))
   tmpDirs.push(dir)
   writeFileSync(join(dir, 'pluton.yaml'), CONFIG)
   writeFileSync(join(dir, 'README.md'), '# cli-integrate project\n')
