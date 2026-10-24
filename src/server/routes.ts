@@ -29,8 +29,14 @@ import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath } from './security.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
-import { requestRunCancel, resumeRun, settleRunCrashed, startRunInBackground } from '../cli/commands/run.ts'
-import type { WorkerLifecycleEvent } from '../orchestrator/supervisor.ts'
+import {
+  requestRunCancel,
+  resumeRun,
+  settleRunCrashed,
+  startRunInBackground,
+  type RunDeps,
+} from '../cli/commands/run.ts'
+import type { SandboxManager } from '../sandbox/types.ts'
 import type { ProjectContext } from '../cli/context.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { redactProseSecrets } from '../util/redact.ts'
@@ -53,6 +59,11 @@ export interface RouteContext {
   projectId: string
   loaded: LoadedConfig
   broadcaster: ServerEventBroadcaster
+  /**
+   * Test seam: replaces the Docker sandbox manager for server-owned runs, so
+   * tests can script probe/start failures without a container runtime.
+   */
+  sandboxManager?: SandboxManager
 }
 
 /**
@@ -1051,11 +1062,12 @@ export class ApiRouter {
    * same SSE broadcaster as run/task frames, and the broadcaster persists them
    * in the durable event log before sending.
    */
-  private runDeps(): { onWorkerEvent: (event: WorkerLifecycleEvent) => void } {
+  private runDeps(): RunDeps {
     return {
       onWorkerEvent: (event) => {
         this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId)
       },
+      ...(this.ctx.sandboxManager !== undefined ? { sandboxManager: this.ctx.sandboxManager } : {}),
     }
   }
 

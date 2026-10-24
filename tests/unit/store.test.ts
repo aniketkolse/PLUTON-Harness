@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, setUserVersion, type DatabaseSync } from '../../src/store/db.ts'
 import { MIGRATIONS, migrate, SCHEMA_VERSION } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -1238,5 +1238,50 @@ describe('approvals', () => {
     expect(store.expirePendingApprovals(now, projectId)).toEqual([])
     expect(store.expirePendingApprovals(now).map((a) => a.id)).toEqual([otherOverdue.id])
     expect(store.getApproval(otherOverdue.id).decidedBy).toBe('pluton:timeout')
+  })
+})
+
+describe('verifications', () => {
+  it('returns the most recently recorded row when two verifications share a millisecond', () => {
+    const { store } = freshStore('verification-order')
+    const projectId = seedProject(store)
+    const run = store.createRun({
+      projectId,
+      goal: 'g',
+      origin: 'cli',
+      requestedBy: 'tester',
+      acceptanceCriteria: [],
+      managerMuseId: 'worker-a',
+      budget: BUDGET,
+    })
+    const task = store.createTask({
+      runId: run.id,
+      parentTaskId: null,
+      title: 't',
+      brief: 'b',
+      acceptanceCriteria: ['a'],
+      assigneeMuseId: 'worker-a',
+    })
+
+    // Two records in the same millisecond: the later insert is the latest
+    // verification, so a malformed payload recorded last must not be shadowed
+    // by an earlier well-formed one just because `created_at` ties.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-24T12:00:00.000Z'))
+    try {
+      store.recordVerification({
+        runId: run.id,
+        taskId: task.id,
+        verdict: 'failed',
+        criteria: [{ criterion: 'docs updated', status: 'failed', evidence: 'no docs diff' }],
+      })
+      store.recordVerification({ runId: run.id, taskId: task.id, verdict: 'failed', criteria: 'not-an-array' })
+
+      const latest = store.getTaskVerification(task.id)
+      expect(latest?.criteria).toBe('not-an-array')
+      expect(latest?.createdAt).toBe('2026-10-24T12:00:00.000Z')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -146,9 +146,16 @@ describeLinux('Linux bind-mount ownership (opt-in, native Linux only)', () => {
       )
       await sandbox.start(name)
 
-      const identity = await sandbox.exec(name, ['id', '-u', '-g'], { timeoutMs: EXEC_TIMEOUT_MS })
-      expect(identity.exitCode, identity.stderr).toBe(0)
-      expect(identity.stdout.trim()).toBe(`${String(hostUid)} ${String(hostGid)}`)
+      // `id -u -g` is rejected with "cannot print \"only\" of more than one
+      // choice"; each choice is asked for separately so the identity assertion
+      // still proves both the effective uid and the effective gid.
+      const uid = await sandbox.exec(name, ['id', '-u'], { timeoutMs: EXEC_TIMEOUT_MS })
+      expect(uid.exitCode, uid.stderr).toBe(0)
+      expect(uid.stdout.trim()).toBe(String(hostUid))
+
+      const gid = await sandbox.exec(name, ['id', '-g'], { timeoutMs: EXEC_TIMEOUT_MS })
+      expect(gid.exitCode, gid.stderr).toBe(0)
+      expect(gid.stdout.trim()).toBe(String(hostGid))
 
       const read = await sandbox.exec(name, ['cat', `${RW_MOUNT}/host-owned.txt`], {
         timeoutMs: EXEC_TIMEOUT_MS,
@@ -223,9 +230,13 @@ describeLinux('Linux bind-mount ownership (opt-in, native Linux only)', () => {
       )
       await sandbox.start(name)
 
-      const identity = await sandbox.exec(name, ['id', '-u', '-g'], { timeoutMs: EXEC_TIMEOUT_MS })
-      expect(identity.exitCode, identity.stderr).toBe(0)
-      expect(identity.stdout.trim()).toBe('10001 10001')
+      const uid = await sandbox.exec(name, ['id', '-u'], { timeoutMs: EXEC_TIMEOUT_MS })
+      expect(uid.exitCode, uid.stderr).toBe(0)
+      expect(uid.stdout.trim()).toBe('10001')
+
+      const gid = await sandbox.exec(name, ['id', '-g'], { timeoutMs: EXEC_TIMEOUT_MS })
+      expect(gid.exitCode, gid.stderr).toBe(0)
+      expect(gid.stdout.trim()).toBe('10001')
 
       const read = await sandbox.exec(name, ['cat', `${RESTRICTED_MOUNT}/secret.txt`], {
         timeoutMs: EXEC_TIMEOUT_MS,

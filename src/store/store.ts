@@ -1866,8 +1866,16 @@ export class Store {
     evidence: JsonValue
     createdAt: string
   } | null {
+    // `created_at` is millisecond ISO text, so two verifications recorded in
+    // the same millisecond tie. Without a second key the winner is whatever
+    // order the index/sorter happens to produce (fast hosts hit this: the
+    // macOS runner returned the earlier row), which made "the latest
+    // verification" nondeterministic. `rowid` is insertion order here, so the
+    // last recorded row always wins the tie.
     const row = this.db
-      .prepare(`SELECT * FROM verifications WHERE task_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .prepare(
+        `SELECT * FROM verifications WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
       .get(taskId) as Row | undefined
     if (!row) return null
     return {

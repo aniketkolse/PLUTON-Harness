@@ -9,6 +9,7 @@ import {
   type MuseContainerSpec,
 } from '../../src/sandbox/ship-containers.ts'
 import { sandboxContainerName, type SandboxSpec } from '../../src/sandbox/types.ts'
+import { resolveContainerUser } from '../../src/sandbox/user-mapping.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -44,6 +45,14 @@ function freshStore(name: string): { store: Store; projectId: string } {
   return { store, projectId: project.id }
 }
 
+/**
+ * The user the code under test resolves when the spec does not pin one.
+ * Host-mapped on native Linux (`<uid>:<gid>`) and the non-root default
+ * (`10001:10001`) on Windows/macOS/root hosts — the fixtures must follow the
+ * resolver instead of hardcoding one platform's answer.
+ */
+const RESOLVED_CONTAINER_USER = resolveContainerUser().containerUser
+
 function specFor(projectId: string): MuseContainerSpec {
   return {
     projectId,
@@ -74,7 +83,7 @@ describe('ensureMuseContainer', () => {
     expect(created.projectId).toBe(projectId)
     expect(created.museId).toBe('worker-a')
     expect(created.image).toBe('pluton-worker:engines')
-    expect(created.containerUser).toBe('10001:10001')
+    expect(created.containerUser).toBe(RESOLVED_CONTAINER_USER)
     expect(created.limits).toEqual({ cpus: 2, memoryMb: 4096, pids: 512 })
     expect(created.network).toBe('restricted')
     expect(created.mounts).toEqual(specFor(projectId).mounts)
@@ -199,7 +208,7 @@ describe('ensureMuseContainer', () => {
     fake.statusResult = 'running'
     fake.inspectResult = {
       imageId: 'sha256:old',
-      user: '10001:10001',
+      user: RESOLVED_CONTAINER_USER,
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
     }
@@ -217,7 +226,7 @@ describe('ensureMuseContainer', () => {
     fake.statusResult = 'stopped'
     fake.inspectResult = {
       imageId: 'sha256:img',
-      user: '10001:10001',
+      user: RESOLVED_CONTAINER_USER,
       mounts: [{ destination: '/work', readOnly: false }], // '/home/pluton' is gone
       extraHosts: [HOST_GATEWAY_ADD_HOST],
     }
@@ -243,7 +252,7 @@ describe('ensureMuseContainer', () => {
     fake.statusResult = 'running'
     fake.inspectResult = {
       imageId: 'sha256:img',
-      user: '10001:10001',
+      user: RESOLVED_CONTAINER_USER,
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
     }
@@ -253,5 +262,46 @@ describe('ensureMuseContainer', () => {
     expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
     expect(fake.created).toHaveLength(0)
     expect(store.getSandboxForMuse(projectId, 'worker-a')?.containerId).toBe('cid_match')
+  })
+
+  it('recreates when the container runs as a different user than the resolved one', async () => {
+    const { store, projectId } = freshStore('user-mismatch')
+    const fake = new FakeSandbox()
+    fake.statusResult = 'running'
+    // Any other non-root identity: the reuse predicate must compare the exact
+    // resolved user, never fall back to "some numeric user is close enough".
+    const foreignUser = RESOLVED_CONTAINER_USER === '99999:99999' ? '10001:10001' : '99999:99999'
+    fake.inspectResult = {
+      imageId: 'sha256:img',
+      user: foreignUser,
+      mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+      extraHosts: [HOST_GATEWAY_ADD_HOST],
+    }
+
+    const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
+    expect(r.created).toBe(true)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'remove', 'create', 'start'])
+    expect(fake.created).toHaveLength(1)
+    expect(fake.created[0]?.containerUser).toBe(RESOLVED_CONTAINER_USER)
+  })
+
+  it('honors an explicit spec containerUser in the reuse predicate', async () => {
+    const { store, projectId } = freshStore('explicit-user')
+    const fake = new FakeSandbox()
+    fake.statusResult = 'running'
+    fake.inspectResult = {
+      imageId: 'sha256:img',
+      user: '12345:12345',
+      mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+      extraHosts: [HOST_GATEWAY_ADD_HOST],
+    }
+
+    const r = await ensureMuseContainer(fake, store, {
+      ...specFor(projectId),
+      imageId: 'sha256:img',
+      containerUser: '12345:12345',
+    })
+    expect(r.created).toBe(false)
+    expect(fake.methods()).toEqual(['status', 'inspect', 'start'])
   })
 })

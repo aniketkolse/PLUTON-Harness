@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
+import type { SandboxManager } from '../../src/sandbox/types.ts'
+import { FakeSandbox } from '../helpers/fake-sandbox.ts'
 import { PROSE_SECRET_PATTERNS } from '../../src/util/redact.ts'
 
 /**
@@ -73,7 +75,7 @@ muses:
  *
  * The default is the local-process sandbox (dev-only, no isolation). The
  * container-mode sandbox is used by the start-failure test: a supervised run
- * against a worker image that does not exist must fail, not hang.
+ * whose sandbox cannot be prepared must fail, not hang.
  */
 function testConfig(sandbox?: { kind: 'docker' | 'local-process'; image?: string }): string {
   if (!sandbox) return TEST_CONFIG
@@ -88,6 +90,7 @@ function testConfig(sandbox?: { kind: 'docker' | 'local-process'; image?: string
 
 async function setupTestProject(options?: {
   sandbox?: { kind: 'docker' | 'local-process'; image?: string }
+  sandboxManager?: SandboxManager
 }): Promise<{
   rootDir: string
   appServer: Promise<AppServerInstance>
@@ -106,6 +109,7 @@ async function setupTestProject(options?: {
       store: bootstrapped.store,
       projectId: bootstrapped.projectId,
       loaded,
+      ...(options?.sandboxManager !== undefined ? { sandboxManager: options.sandboxManager } : {}),
     }),
   }
 }
@@ -288,15 +292,27 @@ describe('PLUTON SPA — supervised build control', () => {
   })
 
   it('settles a run whose supervised start failed, instead of leaving it pending forever', async () => {
-    // A container-mode project whose worker image does not exist: the
+    // A container-mode project whose sandbox cannot be prepared: the
     // supervised start cannot succeed, so the run MUST reach a terminal
     // state. Before the fix the rejection was swallowed, the run stayed in
     // `created`, and the client waited on a run that could never move.
+    //
+    // The failure is scripted through the existing `RunDeps.sandboxManager`
+    // seam instead of pointing at a missing image. A real cold `docker info`
+    // probe costs 8-11s on the Windows CI runner (bounded at 20s), which made
+    // this assertion measure daemon start latency rather than settlement. The
+    // route, store, background driver and broadcaster under test stay real;
+    // only the runtime probe is a fake.
+    const sandbox = new FakeSandbox()
+    sandbox.probeResult = {
+      available: false,
+      kind: 'docker',
+      detail: 'sandbox probe failed (test fixture)',
+      fix: 'start the container runtime',
+    }
     const { rootDir, appServer } = await setupTestProject({
-      sandbox: {
-        kind: 'docker',
-        image: 'pluton-worker:missing-image-for-this-test',
-      },
+      sandbox: { kind: 'docker' },
+      sandboxManager: sandbox,
     })
     const server = await appServer
     const loaded = loadConfig(rootDir)
@@ -351,6 +367,10 @@ describe('PLUTON SPA — supervised build control', () => {
       const events = store.eventsSince(projectId, 0, 500)
       const finished = events.find((e) => e.type === 'run.finished' && e.runId === run.id)
       expect(finished).toBeDefined()
+
+      // The failure came from the injected runtime probe, proving the start
+      // really was attempted (and rejected) rather than never dispatched.
+      expect(sandbox.methods()).toEqual(['probe'])
     } finally {
       store.close()
       await server.close()

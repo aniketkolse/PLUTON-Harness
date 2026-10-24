@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import type { LoadedConfig } from '../config/load.ts'
 import type { Store } from '../store/store.ts'
+import type { SandboxManager } from '../sandbox/types.ts'
 import { InternalError } from '../domain/errors.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { clearServerInstance, writeServerInstance } from './instance.ts'
@@ -33,6 +34,8 @@ export interface AppServerOptions {
    * tunable; the watcher's own default applies when omitted.
    */
   logWatcherIntervalMs?: number
+  /** Test seam: replaces the Docker sandbox manager for server-owned runs. */
+  sandboxManager?: SandboxManager
 }
 
 export interface AppServerInstance {
@@ -54,6 +57,7 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     projectId: options.projectId,
     loaded: options.loaded,
     broadcaster,
+    ...(options.sandboxManager !== undefined ? { sandboxManager: options.sandboxManager } : {}),
   })
   const logWatcher = new ServerLogWatcher({
     store: options.store,

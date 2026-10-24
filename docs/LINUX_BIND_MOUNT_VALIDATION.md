@@ -79,7 +79,7 @@ container lifecycles, then removes everything in a final cleanup test.
 | # | Assertion | Expected |
 |---|---|---|
 | 1 | Resolver on a native Linux non-root host | `source === "host-detected"`; `containerUser === "<host uid>:<host gid>"` |
-| 2 | Container identity | `id -u -g` prints exactly `<host uid> <host gid>` |
+| 2 | Container identity | `id -u` prints exactly `<host uid>` and `id -g` prints exactly `<host gid>` (`id -u -g` is invalid: GNU/POSIX `id` accepts only one choice) |
 | 3 | Read a host-owned `0644` file | `cat` exits 0 and the bytes are exactly `seed\n` |
 | 4 | Create and append | both writes exit 0 |
 | 5 | Host-side ownership after writes | both files report `uid === host uid`, `gid === host gid`; the existing file stays mode `0644`; content is exactly `seed\nappended\n` |
@@ -95,7 +95,7 @@ Assertions 6–7 are the negative controls: a permissive mount or an accidental
 
 - **PASS** — all assertions hold. Record the evidence table below and update
   `SECURITY.md` §8.9 to point at the dated result.
-- **FAIL, identity mismatch** — compare `id -u -g` with
+- **FAIL, identity mismatch** — compare `id -u` and `id -g` with
   `docker inspect --format '{{.Config.User}}' <container>` and
   `resolveContainerUser()`. Do not "fix" it with `chmod 0777`.
 - **FAIL, `Permission denied` on a file the host user owns** — inspect
