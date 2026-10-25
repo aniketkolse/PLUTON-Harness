@@ -164,8 +164,8 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 
 - **Idea rejected:** defaulting new agents to the most permissive engine mode (OpenMausBot's `DEFAULT_APPROVAL_MODE = "full"`); the report itself flags this as wrong for a local-first tool.
 - **Source:** OpenMausBot (`omb-mcp`: `shared/approval-mode.ts:47-51`; §11.2 item 1).
-- **Pluton does instead (partial):** capability-expanding creations require an approval record (ADR-0007); protected paths require approval before integration (ADR-0009); a `needs_approval` state exists (ADR-0006). There is no dedicated approval-mode decision yet — Pluton must resolve unknown/absent policy fail-closed and must not define a "full access" equivalent by default.
-- **Acceptance test:** once a mode model exists — a new Muse starts in a reviewable mode; an unknown or missing mode resolves to the most restrictive agent-run policy; only an explicit, recorded grant elevates. **Status:** avoided by omission today; dedicated decision open (see O2).
+- **Pluton does instead:** capability-expanding creations require an approval record (ADR-0007), protected paths require approval before integration (ADR-0009), and a `needs_approval` state exists (ADR-0006). ADR-0018 adds the mode model on top: there is no "full access" equivalent; new Ships default to `ask-for-sensitive-actions`; `autonomous-bounded` never grants engine consent. Unknown config values are rejected by the schema, and an unknown stored mode fails loudly at adapter construction (stricter than a silent deny, so a misconfiguration cannot look like a legitimate no-op). Only an explicit, recorded operator decision elevates.
+- **Acceptance test:** once a mode model exists — a new Muse starts in a reviewable mode; an unknown or missing mode resolves to the most restrictive agent-run policy; only an explicit, recorded grant elevates. **Status:** implemented — pinned by `tests/unit/approval-model.test.ts` and `engine-approval.test.ts`; typed text cannot answer a card (`tests/unit/tui-keys.test.ts`).
 
 ### R8. Shell-text classifiers sold as a security boundary
 
@@ -200,7 +200,12 @@ Citations use the report slugs defined in `comparison-matrix.md` (`cc` = cloudro
 
 - **Question:** what is Pluton's approval vocabulary and default? OpenMausBot's five-mode enum (`omb-mcp`: `shared/approval-mode.ts:5-7`) is prior art, but its default (`full`) is explicitly rejected (R7).
 - **Closing action:** a dedicated ADR (mode set, default, fail-closed resolution, elevation journal) plus tests: unknown → restrictive; unconfirmed grant → restrictive; a typed line never answers a card (`omb-mcp`: `docs/runtime-contract.md:39`).
-- **Status:** open; approvals exist only as scattered rules in ADR-0006/0007/0009.
+- **Status:** implemented and recorded — ADR-0018 defines the three-mode vocabulary, the
+  `ask-for-sensitive-actions` default, the no-blanket-grant engine mapping, fail-closed resolution
+  (unknown config rejected; unknown stored mode fails loudly; timeout, abort and store failure deny)
+  and the `approval.requested` / `approval.decided` / `approval.expired` journal. Verified by
+  `tests/unit/approval-model.test.ts`, `engine-approval`, `engine-interactive-approval`,
+  `engine-approval-seam`, and `tui-keys` (typed text never answers a card).
 
 ### O3. Engine-native resume verification
 

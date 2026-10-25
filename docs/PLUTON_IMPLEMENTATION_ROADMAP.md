@@ -103,6 +103,8 @@ G1, L2, L3, G3 closed with tests; all suites green; no config/schema break for e
 
 **Acceptance tests:** operator approves a scripted engine request → engine proceeds, decision durable; deny → task result carries denial evidence; hook-order tests if seams land. **Rollback:** feature-flagged channel; ADR documents removal path.
 
+**Recorded 2026-10-25:** ADR-0018 closes O2 (three modes, `ask-for-sensitive-actions` default, no blanket engine grant, fail-closed resolution, `approval.requested|decided|expired` journal) and is pinned by `tests/unit/approval-model.test.ts`. Q2 is resolved by ADR-0016 (static composition), so runtime tool-pipeline extension seams are not pursued; item 2 shipped earlier with `engine-interactive-approval` and `engine-approval-seam`.
+
 ## P4 — Machine interfaces (decision-gated: Q3)
 
 **Goal:** expose Pluton programmatically without weakening the control-plane model.

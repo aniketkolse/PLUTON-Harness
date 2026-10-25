@@ -72,7 +72,7 @@ Boundary rule used throughout: the four volumes describe a **harness** (model �
 | §15 Tools: registry + guarded pipeline | Schema validation, guards, pre/post-execute hooks, concurrency metadata | Partial | Catalog + strict Zod + per-call authz + leases (`src/tools/catalog.ts`, `bridge.ts`); no hook seams, no per-tool concurrency-safety metadata, no output-rendering seam | Candidate (needed if extension/plugin goals are confirmed) | Q2 decision | Extension-seam tests: pre/post hooks observed in order; concurrent-unsafe tools serialized | P2 |
 | §16 Execution capabilities (shell/fs/subprocess/terminal/lsp/skill/web) | Engine-provided tool families | N-A by design | Engines own file/shell tools inside containers; Pluton deliberately exposes only 13 coordination tools | N-A — Pluton is the control plane; keeping this surface narrow is a security property | — | n/a | — |
 | §17 Sandboxing | Sandbox service for tool execution | Implemented (one gap) | Docker hardening + image gating + per-Muse containers (`src/sandbox/*`); E2E 5/5 green; `network_policy=restricted` is not an egress filter (documented) | Required for the documented policy; egress enforcement = Candidate | — | Egress probe test once implemented; today: doc states the limitation | P2 (egress) |
-| §18 Approvals/permissions/ask-user/credentials | Approval waterfall; ask-user; credential stores | Partial | Durable approval records + TTL sweep + fail-closed expiry (`store.ts:782–984`); engine approval mapping (`src/engines/approval.ts`); TUI cards + keyboard decisions; credentials = per-Muse engine home (ADR-0008) | Required (interactive engine-approval channel); O2 decision still open | TUI/chat event channel | Engine `approval_request` surfaced, operator decides, decision recorded and applied; denial cannot record as silent success | P1 |
+| §18 Approvals/permissions/ask-user/credentials | Approval waterfall; ask-user; credential stores | Partial | Durable approval records + TTL sweep + fail-closed expiry (`store.ts:782-984`); engine approval mapping (`src/engines/approval.ts`); TUI cards + keyboard decisions; credentials = per-Muse engine home (ADR-0008) | Required (interactive engine-approval channel); O2 recorded in ADR-0018 | TUI/chat event channel | Engine `approval_request` surfaced, operator decides, decision recorded and applied; denial cannot record as silent success | P1 |
 | §19 MCP | MCP client/server integration | Partial (server side) | Pluton exposes the restricted bridge over MCP stdio + HTTP to engines (`mcp-server.ts`, `http-transport.ts`); MCP config for engines live-verified (`docs/reverse-engineering/engine-mcp-integration.md`) | Adapted — the useful direction for a control plane | — | Existing bridge tests + engine integration doc | — |
 | §20 PTC & workflow engine | Programmatic tool calling; workflow scripts | Missing | No workflow engine in `src/` | Candidate — only with a concrete use case (e.g. unattended pipelines) | Q2 decision | Workflow spec + engine-mock execution tests | P3 |
 | §21 Subagents & agent teams | `ctx.subagents`; team orchestration | Adapted (implemented differently) | Durable task graph + delegation limits + exactly-once wakeups + supervisor (`task-graph.ts`, `wakeups.ts`, `supervisor.ts`); 12 mock-engine integration tests | Required — Pluton's core value; parity by mechanism, not shape | — | Existing integration tests | — |
@@ -142,6 +142,10 @@ Open items (from ROADMAP named follow-ups; status per files, not re-tested inter
 | Q7 | PTC/workflow engine: any concrete Pluton use case? | Owner |
 | Q8 | Delivery scope: packaging/publish/license (O8) | Owner |
 
+**Resolved since the audit:** Q2 → ADR-0016 (static composition retained); Q4 → ADR-0018 (three
+approval modes, reviewable default, fail-closed resolution, single journal; `pluton approvals` and
+the TUI/SPA share one funnel); Q5 → ADR-0017 (durable cursor replay; SSE stays live-tail).
+
 ## H. Revalidation — 2026-10-25 (baseline `main` @ `932b077`)
 
 > The historical audit above is unchanged. This section records what was re-checked against the
@@ -166,8 +170,8 @@ criteria):
 | O1 streaming vs CLI replay | replay is the durable SQLite cursor; SSE stays live-tail | `docs/adr/0017-session-log-query-and-cursor-replay.md` |
 | O5 doc-drift enforcement | dead relative links across README + `docs/**/*.md` fail `npm run verify:docs` and `release:check` | `scripts/verify-docs.mjs`, `tests/unit/doc-links.test.ts` |
 | Q2/P5 composition | static composition retained; kernel/market/HMR/Electron/Python rejected with revisit triggers | `docs/adr/0016-static-composition-rejected-kernel.md` |
+| O2 approval model | three modes, reviewable default, no blanket grant, fail-closed resolution and elevation journal | `docs/adr/0018-approval-model-and-default-mode.md`, `tests/unit/approval-model.test.ts` |
 
-Still open after this pass: FTS/search over events (CG-8); session export/import (P2 item 3); an
-approval-model ADR (O2 — the channel is implemented, the vocabulary/default decision is not recorded
-as its own ADR); server `routes.ts` and `tools/operator-catalog.ts` still import runtime helpers from
-`cli/` (allowlisted, tracked debt in the module-boundary test); `REA.txt` remains absent (Q1).
+Still open after this pass: FTS/search over events (CG-8); session export/import (P2 item 3); server
+`routes.ts` and `tools/operator-catalog.ts` still import runtime helpers from `cli/` (allowlisted,
+tracked debt in the module-boundary test); `REA.txt` remains absent (Q1).
