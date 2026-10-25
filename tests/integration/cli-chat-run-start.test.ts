@@ -194,7 +194,13 @@ describe('chat background run driver', () => {
           capturedServer = (req.mcpServers?.[0] as Extract<McpServerSpec, { kind: 'http' }>) ?? null
         }
       },
-      script: [{ text: 'ready', outcome: 'success' }],
+      script: [
+        { text: 'ready', outcome: 'success' },
+        // The guard only exists while the first run is active. Without a
+        // delay the one-event mock run can finish before the second MCP call
+        // arrives, so keep it in flight long enough for the assertion.
+        { text: 'working', outcome: 'success', delayMs: 250 },
+      ],
     })
 
     const runPromise = chatRun(ctx, {}, {
