@@ -31,16 +31,8 @@ export interface McpServeOptions {
   isLegacyMuse?: boolean
 }
 
-export function resolveShipByRef(store: Store, ref: string): ShipRecord {
-  const byId = store.getShip(ref)
-  if (byId) return byId
-  const bySlug = store.listShips().find((m) => m.slug === ref)
-  if (bySlug) return bySlug
-  throw new NotFoundError('ship', ref)
-}
-
-/** @deprecated Use `resolveShipByRef`; kept for backward compatibility. */
-export const resolveMuseByRef = resolveShipByRef
+import { resolveShipByRef, resolveMuseByRef } from '../../orchestrator/service.ts'
+export { resolveShipByRef, resolveMuseByRef }
 
 export function mcpServePlan(
   ctx: ProjectContext,

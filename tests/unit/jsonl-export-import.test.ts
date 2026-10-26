@@ -126,7 +126,6 @@ describe('JSONL Export & Import', () => {
         acceptanceCriteria: ['pass verification'],
         budget: {
           maxTasks: 5,
-          maxRetries: 2,
           maxConcurrentWorkers: 1,
           maxDelegationDepth: 0,
           maxRunMinutes: 10,

@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { NotFoundError } from '../domain/errors.ts'
 import type { Permission } from '../domain/permissions.ts'
 import type { Store } from '../store/store.ts'
-import { runByRef } from '../cli/commands/status.ts'
+import { runByRef } from '../orchestrator/service.ts'
 import type { McpToolInfo } from './mcp-server.ts'
 
 export interface OperatorToolEnv {

@@ -1,11 +1,8 @@
 import { ConfigError } from '../domain/errors.ts'
-import { findProjectRoot, loadConfig, type LoadedConfig } from '../config/load.ts'
+import { findProjectRoot, loadConfig } from '../config/load.ts'
+import type { ProjectContext } from '../orchestrator/service.ts'
 
-export interface ProjectContext {
-  rootDir: string
-  configPath: string
-  loaded: LoadedConfig
-}
+export type { ProjectContext }
 
 export function requireProject(cwd: string): ProjectContext {
   const root = findProjectRoot(cwd)

@@ -46,29 +46,7 @@ export function taskListHuman(tasks: TaskRecord[]): string {
   return rows.map((r) => r.join('  ')).join('\n')
 }
 
-export function runByRef(store: Store, runIdOrSuffix: string): RunRecord {
-  const exact = store.getRunOrNull(runIdOrSuffix)
-  if (exact) return exact
-  const matches = store.listRuns(500).filter((r) => r.id.endsWith(runIdOrSuffix))
-  if (matches.length === 1) return matches[0] as RunRecord
-  if (matches.length === 0) throw new NotFoundError('run', runIdOrSuffix)
-  throw new ValidationError(`ambiguous run id: ${matches.length} runs end with '${runIdOrSuffix}'; use the full id`)
-}
-
-export function taskById(store: Store, taskIdOrSuffix: string): TaskRecord {
-  const exact = store.getTaskOrNull(taskIdOrSuffix)
-  if (exact) return exact
-  // Allow suffix lookup (short ids shown in tables), but only when unambiguous.
-  const suffixMatches: TaskRecord[] = []
-  for (const run of store.listRuns(500)) {
-    for (const t of store.listTasks(run.id)) {
-      if (t.id.endsWith(taskIdOrSuffix)) suffixMatches.push(t)
-    }
-  }
-  if (suffixMatches.length === 1) return suffixMatches[0] as TaskRecord
-  if (suffixMatches.length === 0) throw new NotFoundError('task', taskIdOrSuffix)
-  throw new ValidationError(`ambiguous task id: ${suffixMatches.length} tasks end with '${taskIdOrSuffix}'; use the full id`)
-}
+export { runByRef, taskById } from '../../orchestrator/service.ts'
 
 export interface GraphView {
   tasks: TaskRecord[]

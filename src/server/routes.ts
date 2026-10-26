@@ -31,15 +31,16 @@ import { pickNativeFolder } from './folder-picker.ts'
 import { describeWorkspace, resolveWorkspaceRoot } from './workspace.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import { SessionRunner } from './session-runner.ts'
-import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
 import {
+  decideApproval,
+  sweepExpiredApprovals,
   requestRunCancel,
   resumeRun,
   settleRunCrashed,
   startRunInBackground,
   type RunDeps,
-} from '../cli/commands/run.ts'
-import type { ProjectContext } from '../cli/context.ts'
+  type ProjectContext,
+} from '../orchestrator/service.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'

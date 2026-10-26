@@ -112,63 +112,8 @@ export async function modelList(ctx: ProjectContext, shipId: string): Promise<En
   return adapter.listModels()
 }
 
-export interface CreateShipSpec {
-  id: string
-  displayName?: string
-  role?: string
-  engine: string
-  model: string
-  instructionsFile?: string
-  workspacePolicy?: string
-  approvalMode?: string
-  permissions?: string[]
-}
-
-export function createShip(ctx: ProjectContext, spec: CreateShipSpec): { configPath: string; ship: ShipConfig } {
-  if (!/^[a-z][a-z0-9-]{0,47}$/.test(spec.id)) {
-    throw new ValidationError(
-      `invalid ship id '${spec.id}': ids are lowercase slugs (a-z, 0-9, -), starting with a letter`,
-    )
-  }
-  if (ctx.loaded.config.ships[spec.id]) {
-    throw new ValidationError(`ship '${spec.id}' already exists in pluton.yaml`)
-  }
-  // Engine must exist in the registry even before install checks — a typo must fail here.
-  getEngineAdapter(spec.engine)
-  if (spec.role !== undefined && !(SHIP_ROLES as readonly string[]).includes(spec.role)) {
-    throw new ValidationError(`unknown role '${spec.role}'; known roles: ${SHIP_ROLES.join(', ')}`)
-  }
-  for (const p of spec.permissions ?? []) {
-    if (!isPermission(p)) throw new ValidationError(`unknown permission '${p}' (see docs/SHIPS_CONFIGURATION.md)`)
-  }
-
-  const role = (spec.role as ShipConfig['role']) ?? 'custom'
-  // Supervisors must never get a checkout policy — keep the default role-aware so
-  // `ship create boss --role supervisor` produces a valid config without extra flags.
-  const defaultWorkspace: ShipConfig['workspace_policy'] =
-    role === 'supervisor' ? 'coordinator-read-only' : 'isolated-task-checkout'
-
-  const ship: ShipConfig = {
-    display_name: spec.displayName ?? spec.id,
-    role,
-    engine: spec.engine,
-    model: spec.model,
-    workspace_policy: (spec.workspacePolicy as ShipConfig['workspace_policy']) ?? defaultWorkspace,
-    approval_mode: (spec.approvalMode as ShipConfig['approval_mode']) ?? 'ask-for-sensitive-actions',
-    ...(spec.instructionsFile ? { instructions_file: spec.instructionsFile } : {}),
-    ...(spec.permissions ? { permissions: spec.permissions as ShipConfig['permissions'] } : {}),
-  }
-
-  // Edit the YAML document (preserving comments) instead of re-serializing the object model.
-  const doc = parseDocument(readFileSync(ctx.configPath, 'utf8'))
-  const key = doc.has('ships') ? 'ships' : 'muses'
-  doc.setIn([key, spec.id], ship)
-  const nextRaw = parseYaml(doc.toString())
-  validateConfig(nextRaw, ctx.rootDir, ctx.configPath) // reject before writing anything
-  writeFileSync(ctx.configPath, doc.toString({ lineWidth: 0 }))
-
-  return { configPath: ctx.configPath, ship }
-}
+import { createShip, type CreateShipSpec } from '../../orchestrator/service.ts'
+export { createShip, type CreateShipSpec }
 
 export interface EditShipPatch {
   displayName?: string

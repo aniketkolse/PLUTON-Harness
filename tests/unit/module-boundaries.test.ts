@@ -125,12 +125,10 @@ const ENGINES_FORBIDDEN = new Set([
 ])
 
 /**
- * Files outside `cli/` that still import it. Both are composition/read
- * surfaces that should eventually call a non-CLI service module instead:
- * - server/routes.ts: HTTP routes reuse CLI approval/run orchestration helpers
- * - tools/operator-catalog.ts: operator tool resolves a run via status helpers
+ * Files outside `cli/` that still import it.
+ * Strictly empty: no non-CLI module may import cli/.
  */
-const CLI_IMPORT_ALLOWLIST = new Set(['server/routes.ts', 'tools/operator-catalog.ts'])
+const CLI_IMPORT_ALLOWLIST = new Set<string>()
 
 describe('module boundaries', () => {
   const { edges, unresolved } = collectEdges()
