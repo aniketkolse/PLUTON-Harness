@@ -105,6 +105,7 @@ describe('container user mapping and file ownership alignment', () => {
       image: 'pluton-worker:engines',
       limits: { cpus: 2, memoryMb: 4096, pids: 512 },
       network: 'restricted',
+      customNetwork: 'pluton-restricted',
       containerUser: '1000:1000',
       mounts: [{ hostPath: 'C:\\work\\checkout', containerPath: '/work' }],
     }
@@ -119,6 +120,7 @@ describe('container user mapping and file ownership alignment', () => {
       imageId: 'sha256:1111',
       user: '10001:10001', // old user mismatch!
       extraHosts: ['host.docker.internal:host-gateway'],
+      networks: ['pluton-restricted'],
       mounts: [{ destination: '/work', readOnly: false }],
     }
 

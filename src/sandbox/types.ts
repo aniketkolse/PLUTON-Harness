@@ -80,6 +80,8 @@ export interface SandboxInspect {
   mounts: { destination: string; readOnly: boolean }[]
   /** Extra host mappings from the create config (e.g. 'host.docker.internal:host-gateway'). */
   extraHosts: string[]
+  /** Docker networks the container is attached to (`.NetworkSettings.Networks` keys). */
+  networks: string[]
 }
 
 export interface SandboxManager {
@@ -96,6 +98,13 @@ export interface SandboxManager {
    * manager returns real facts or throws — never null-as-valid.
    */
   inspect(containerName: string): Promise<SandboxInspect | null>
+  /**
+   * Docker-like managers only: ensure a dedicated `--internal` network exists
+   * (creating it when missing) and refuse an existing non-internal network.
+   * Managers that cannot enforce egress isolation omit this method, which makes
+   * `network_policy: restricted` fail closed for them.
+   */
+  ensureInternalNetwork?(name: string): Promise<'created' | 'existing'>
   stop(containerName: string): Promise<void>
   remove(containerName: string): Promise<void>
 }

@@ -45,6 +45,7 @@ import {
 } from '../../sandbox/image.ts'
 import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/ship-containers.ts'
 import type { ShipContainerSpec } from '../../sandbox/ship-containers.ts'
+import { planShipNetwork, verifyRestrictedEgress } from '../../sandbox/network.ts'
 import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../tools/bridge.ts'
@@ -260,17 +261,19 @@ export async function prepareContainerMode(
   const runtime = ctx.loaded.config.runtime
   const workspacesRoot = workspaceDir(ctx.rootDir)
   const byShip = new Map<string, DockerExecContext>()
+  const ensuredNetworks = new Set<string>()
   const allowed = opts?.shipIds ? new Set(opts.shipIds) : null
   for (const ship of store.listShips()) {
     if (!ship.enabled) continue
     if (allowed !== null && !allowed.has(ship.id)) continue
     const mounts = shipContainerMounts({ ship, rootDir: ctx.rootDir, workspacesRoot })
-    const shipConfig = ctx.loaded.config.ships[ship.id]
-    const networkPolicy = shipConfig?.network_policy ?? runtime.network_policy
-    const customNetwork =
-      networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
-        ? runtime.internal_network_name
-        : undefined
+    const plan = await planShipNetwork({
+      manager,
+      config: ctx.loaded.config,
+      shipId: ship.id,
+      projectId,
+      ensured: ensuredNetworks,
+    })
     await provisionShipContainer({
       manager,
       store,
@@ -283,13 +286,18 @@ export async function prepareContainerMode(
         memoryMb: runtime.default_memory_mb,
         pids: CONTAINER_PIDS_LIMIT,
       },
-      network: networkPolicy,
-      ...(customNetwork !== undefined ? { customNetwork } : {}),
+      network: plan.policy,
+      ...(plan.customNetwork !== undefined ? { customNetwork: plan.customNetwork } : {}),
       rootDir: ctx.rootDir,
       workspacesRoot,
     })
+    const containerName = sandboxContainerName(projectId, ship.id)
+    // Prove the kernel/Docker denial from inside before any engine session
+    // starts. A container that can still reach the internet must never be
+    // used for a `restricted` run.
+    if (plan.policy === 'restricted') await verifyRestrictedEgress(manager, containerName)
     byShip.set(ship.id, {
-      containerName: sandboxContainerName(projectId, ship.id),
+      containerName,
       mounts: mounts.map((mount) => ({ hostPath: mount.hostPath, containerPath: mount.containerPath })),
       env: {},
     })

@@ -34,7 +34,7 @@ runtime:
   default_cpu_limit: 2
   default_memory_mb: 2048
   max_retries_per_task: 1
-  network_policy: restricted
+  network_policy: open
   max_prompt_chars: 60000
   max_event_payload_chars: 8000
   max_tool_result_chars: 120000

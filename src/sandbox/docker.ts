@@ -1,5 +1,6 @@
 import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../domain/errors.ts'
 import { firstLine, run, type RunOptions, type RunResult } from '../util/exec.ts'
+import { expectedContainerNetworks } from './network.ts'
 import {
   DOCKER_UNAVAILABLE_FIX,
   SANDBOX_LABEL_MANAGED,
@@ -20,8 +21,10 @@ import {
  *
  * Hardening encoded in one place: non-root user, `--cap-drop ALL`,
  * `no-new-privileges`, PID/memory/CPU limits, bounded noexec tmpfs, explicit
- * env allowlist, mounts only as specified by the caller, and default `bridge`
- * networking (documented as NOT an egress filter; `none` is available).
+ * env allowlist, mounts only as specified by the caller, and a network choice
+ * that cannot silently leave egress open — `none` for a hermetic box,
+ * `restricted` only on a dedicated `--internal` network, `open` on `bridge`
+ * (or the configured network). See src/sandbox/network.ts.
  *
  * Lifecycle safety: stop/remove first re-read the container's Pluton labels —
  * a container that Pluton did not create (or that was replaced) is never
@@ -31,6 +34,7 @@ import {
 const PROBE_TIMEOUT_MS = 20_000
 const CREATE_TIMEOUT_MS = 120_000
 const INSPECT_TIMEOUT_MS = 15_000
+const NETWORK_TIMEOUT_MS = 20_000
 const STOP_TIMEOUT_MS = 30_000
 const TMPFS = '/tmp:rw,noexec,nosuid,size=256m'
 
@@ -64,9 +68,68 @@ export class DockerSandboxManager implements SandboxManager {
     }
   }
 
+  /**
+   * Ensure a dedicated internal network exists. An existing network is only
+   * accepted when Docker reports `Internal=true`: reusing a normal bridge
+   * network would silently restore full egress under a `restricted` label.
+   */
+  async ensureInternalNetwork(name: string): Promise<'created' | 'existing'> {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+      throw new ValidationError(`invalid docker network name '${name}'`, { details: { network: name } })
+    }
+    const inspectArgs = ['network', 'inspect', '--format', '{{.Internal}}', name]
+    const existing = await this.docker(inspectArgs, { timeoutMs: NETWORK_TIMEOUT_MS })
+    if (existing.exitCode === 0) {
+      if (existing.stdout.trim() !== 'true') {
+        throw new PolicyDeniedError(
+          `refusing network policy "restricted": network '${name}' exists but is not internal ` +
+            '(Docker reports Internal=false, so containers on it can reach the internet)',
+          { network: name, fix: 'delete the network or set runtime.internal_network_name to an --internal network' },
+        )
+      }
+      return 'existing'
+    }
+    if (!/no such network/i.test(existing.stderr)) {
+      throw new SandboxUnavailableError(
+        `cannot inspect docker network '${name}': ${firstLine(existing.stderr, 300) || 'unknown error'}`,
+        { fix: DOCKER_UNAVAILABLE_FIX, details: { network: name } },
+      )
+    }
+
+    const created = await this.docker(
+      [
+        'network',
+        'create',
+        '--driver',
+        'bridge',
+        '--internal',
+        '--label',
+        `${SANDBOX_LABEL_MANAGED}=true`,
+        '--label',
+        'io.pluton.network=restricted',
+        name,
+      ],
+      { timeoutMs: NETWORK_TIMEOUT_MS },
+    )
+    if (created.exitCode === 0) return 'created'
+    if (/already exists/i.test(created.stderr)) {
+      const recheck = await this.docker(inspectArgs, { timeoutMs: NETWORK_TIMEOUT_MS })
+      if (recheck.exitCode === 0 && recheck.stdout.trim() === 'true') return 'existing'
+      throw new PolicyDeniedError(
+        `refusing network policy "restricted": concurrently created network '${name}' is not internal`,
+        { network: name },
+      )
+    }
+    throw new SandboxUnavailableError(
+      `docker network create failed for '${name}' (exit ${String(created.exitCode)}): ${firstLine(created.stderr, 300)}`,
+      { fix: DOCKER_UNAVAILABLE_FIX, details: { network: name, stderr: created.stderr.slice(0, 2_000) } },
+    )
+  }
+
   /** The exact `docker create` argument vector — kept pure for conformance tests. */
   static buildCreateArgs(spec: SandboxSpec): string[] {
     DockerSandboxManager.validateSpec(spec)
+    const [network] = expectedContainerNetworks(spec)
     const shipId = spec.shipId ?? spec.museId ?? ''
     const args = [
       'create',
@@ -95,7 +158,7 @@ export class DockerSandboxManager implements SandboxManager {
       '--tmpfs',
       TMPFS,
       '--network',
-      spec.network === 'none' ? 'none' : spec.customNetwork ?? 'bridge',
+      network,
     ]
     for (const host of spec.extraHosts ?? []) {
       args.push('--add-host', host)
@@ -227,7 +290,7 @@ export class DockerSandboxManager implements SandboxManager {
       [
         'inspect',
         '--format',
-        '{{.Image}}|{{.Config.User}}|{{json .HostConfig.ExtraHosts}}|{{json .Mounts}}',
+        '{{.Image}}|{{.Config.User}}|{{json .HostConfig.ExtraHosts}}|{{json .Mounts}}|{{json .NetworkSettings.Networks}}',
         containerName,
       ],
       { timeoutMs: INSPECT_TIMEOUT_MS },
@@ -238,7 +301,9 @@ export class DockerSandboxManager implements SandboxManager {
         { details: { containerName } },
       )
     }
-    const [imageId = '', user = '', extraHostsJson = '[]', mountsJson = '[]'] = r.stdout.trim().split('|')
+    const [imageId = '', user = '', extraHostsJson = '[]', mountsJson = '[]', networksJson = '{}'] = r.stdout
+      .trim()
+      .split('|')
     if (imageId === '') {
       throw new SandboxUnavailableError(`container '${containerName}' inspect returned no image id`, {
         details: { containerName },
@@ -246,9 +311,11 @@ export class DockerSandboxManager implements SandboxManager {
     }
     let extraHosts: unknown
     let mounts: unknown
+    let networks: unknown
     try {
       extraHosts = JSON.parse(extraHostsJson)
       mounts = JSON.parse(mountsJson)
+      networks = JSON.parse(networksJson)
     } catch {
       throw new SandboxUnavailableError(`container '${containerName}' inspect output could not be parsed`, {
         details: { containerName, stdout: r.stdout.slice(0, 500) },
@@ -267,6 +334,10 @@ export class DockerSandboxManager implements SandboxManager {
             }))
             .filter((m) => m.destination !== '')
         : [],
+      networks:
+        networks !== null && typeof networks === 'object' && !Array.isArray(networks)
+          ? Object.keys(networks as Record<string, unknown>)
+          : [],
     }
   }
 

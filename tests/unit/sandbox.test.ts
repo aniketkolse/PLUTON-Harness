@@ -32,7 +32,7 @@ const spec: SandboxSpec = {
     { hostPath: 'C:\\home\\worker-a', containerPath: '/home/pluton', readOnly: false },
   ],
   env: { TERM: 'xterm-256color', LANG: 'C.UTF-8' },
-  network: 'restricted',
+  network: 'open',
 }
 
 describe('sandboxContainerName', () => {
@@ -225,6 +225,20 @@ describe('DockerSandboxManager lifecycle safety', () => {
       runFn: async (argv) => fail(argv, 'Error: No such object: pluton-x'),
     })
     expect(await missing.status('pluton-x')).toBe('missing')
+  })
+
+  it('reads the attached Docker network set from inspect output', async () => {
+    const manager = new DockerSandboxManager({
+      runFn: async (argv) =>
+        ok(
+          argv,
+          'sha256:img|10001:10001|["host.docker.internal:host-gateway"]|[{"Destination":"/work","RW":false}]|' +
+            '{"pluton-restricted-proj_1":{"IPAddress":"172.18.0.2"}}\n',
+        ),
+    })
+    const info = await manager.inspect('pluton-demo-worker-a')
+    expect(info?.networks).toEqual(['pluton-restricted-proj_1'])
+    expect(info?.mounts).toEqual([{ destination: '/work', readOnly: true }])
   })
 
   it('refuses to stop or remove a container without the Pluton managed label', async () => {

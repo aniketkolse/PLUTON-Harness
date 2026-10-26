@@ -26,7 +26,8 @@ import {
   WorkerImageManager,
   type WorkerImageProbe,
 } from '../../sandbox/image.ts'
-import type { SandboxManager } from '../../sandbox/types.ts'
+import { planShipNetwork, verifyRestrictedEgress } from '../../sandbox/network.ts'
+import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import type { ProjectContext } from '../context.ts'
 import { createShip } from './ship.ts'
@@ -286,13 +287,13 @@ async function provisionApprovedShip(
     )
   }
   const runtime = config.runtime
-  const shipConfig = config.ships[ship.id]
-  const networkPolicy = shipConfig?.network_policy ?? runtime.network_policy
-  const customNetwork =
-    networkPolicy === 'restricted' && runtime.internal_network_name !== undefined
-      ? runtime.internal_network_name
-      : undefined
-  return provisionShipContainer({
+  const plan = await planShipNetwork({
+    manager,
+    config,
+    shipId: ship.id,
+    projectId,
+  })
+  const provisioned = await provisionShipContainer({
     manager,
     store,
     projectId,
@@ -304,11 +305,15 @@ async function provisionApprovedShip(
       memoryMb: runtime.default_memory_mb,
       pids: CONTAINER_PIDS_LIMIT,
     },
-    network: networkPolicy,
-    ...(customNetwork !== undefined ? { customNetwork } : {}),
+    network: plan.policy,
+    ...(plan.customNetwork !== undefined ? { customNetwork: plan.customNetwork } : {}),
     rootDir: ctx.rootDir,
     workspacesRoot: workspaceDir(ctx.rootDir),
   })
+  if (plan.policy === 'restricted') {
+    await verifyRestrictedEgress(manager, sandboxContainerName(projectId, ship.id))
+  }
+  return provisioned
 }
 
 /**

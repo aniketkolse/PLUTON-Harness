@@ -131,9 +131,16 @@ export const runtimeConfigSchema = z
     max_retries_per_task: z.number().int().min(0).max(10).default(1),
     /** Per-task cap on manager-requested revisions of failed tasks; 0 = revisions disabled. */
     max_revisions_per_task: z.number().int().min(0).max(10).default(1),
-    /** Worker network policy: 'restricted' = bridge with DNS (not an egress filter — see docs/SECURITY.md). */
+    /**
+     * Worker network policy. `open` = Docker bridge (explicit egress opt-in); `none` = `--network none`;
+     * `restricted` = a dedicated `--internal` Docker network with no default route, verified at run start by
+     * an in-container egress probe (see docs/SECURITY.md §8.5 and src/sandbox/network.ts).
+     */
     network_policy: z.enum(['restricted', 'none', 'open']).default('open'),
-    /** Custom Docker network for restricted policy isolation (e.g. internal network with egress disabled). */
+    /**
+     * Name of the Docker network used by `restricted`. It must exist (or be creatable) with `--internal`;
+     * an existing non-internal network is refused. Defaults to `pluton-restricted-<projectId>`.
+     */
     internal_network_name: z
       .string()
       .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, 'valid docker network name')

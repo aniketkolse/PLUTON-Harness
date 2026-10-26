@@ -1,5 +1,6 @@
 import { PolicyDeniedError } from '../domain/errors.ts'
 import { run, type RunOptions, type RunResult } from '../util/exec.ts'
+import { assertNetworkPolicyEnforceable } from './network.ts'
 import type {
   SandboxCreateResult,
   SandboxExecOptions,
@@ -15,7 +16,9 @@ import type {
  * It exists to exercise orchestration logic on machines without a container
  * runtime. It is labeled non-isolated everywhere and must be explicitly
  * acknowledged in config (`sandbox.local_process_acknowledged: true`) before
- * the factory will hand it out.
+ * the factory will hand it out. It cannot enforce any network policy other than
+ * `open`, so `restricted`/`none` are refused at create time rather than being
+ * silently downgraded to host networking.
  */
 
 export const LOCAL_PROCESS_WARNING =
@@ -34,6 +37,7 @@ export class LocalProcessSandbox implements SandboxManager {
   }
 
   async create(spec: SandboxSpec): Promise<SandboxCreateResult> {
+    assertNetworkPolicyEnforceable('sandbox.kind local-process', spec.network)
     return { containerId: `local-process:${spec.containerName}`, containerName: spec.containerName }
   }
 

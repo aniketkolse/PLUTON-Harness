@@ -1,5 +1,6 @@
 import { SandboxUnavailableError } from '../domain/errors.ts'
 import type { Store } from '../store/store.ts'
+import { expectedContainerNetworks } from './network.ts'
 import { resolveContainerUser } from './user-mapping.ts'
 import {
   sandboxContainerName,
@@ -18,13 +19,14 @@ import {
  * reached from inside via `host.docker.internal`.
  *
  * Reuse safety: a container is reused only when it still matches the requested
- * spec — image ID, container user, mount set and host-gateway entry are read
- * back via `inspect`, and a stale Pluton-owned container (e.g. after an image
- * rebuild or a workspace-policy change) is removed and recreated. The removal
- * and the reuse `start()` both go through the managed-label guard — a
- * pre-existing container without the label is refused (PolicyDeniedError),
- * never adopted, and never removed by this path. A container whose state
- * cannot be determined fails closed.
+ * spec — image ID, container user, mount set, host-gateway entry and the exact
+ * Docker network set are read back via `inspect`, and a stale Pluton-owned
+ * container (e.g. after an image rebuild, a workspace-policy change or a
+ * network-policy change) is removed and recreated. The removal and the reuse
+ * `start()` both go through the managed-label guard — a pre-existing container
+ * without the label is refused (PolicyDeniedError), never adopted, and never
+ * removed by this path. A container whose state cannot be determined fails
+ * closed.
  *
  * The record (one row per project+ship, `upsertSandbox`) is advisory state for
  * status/doctor; the container itself is the source of truth.
@@ -148,10 +150,31 @@ function containerMatchesSpec(spec: ShipContainerSpec, info: SandboxInspect): bo
   if (info.user !== expectedUser) return false
   if (spec.imageId !== undefined && info.imageId !== '' && info.imageId !== spec.imageId) return false
   if (!info.extraHosts.includes(HOST_GATEWAY_ADD_HOST)) return false
+  if (!containerNetworksMatch(spec, info.networks)) return false
   if (info.mounts.length !== spec.mounts.length) return false
   return spec.mounts.every((m) =>
     info.mounts.some((x) => x.destination === m.containerPath && x.readOnly === (m.readOnly === true)),
   )
+}
+
+/**
+ * `--network none` removes every endpoint, and Docker has reported both `{}`
+ * and `{none: …}` for that mode across versions. Both mean "no egress"; any
+ * other attachment is stale. Every other policy requires the exact set.
+ */
+function containerNetworksMatch(spec: ShipContainerSpec, actual: string[]): boolean {
+  if (spec.network === 'none') {
+    return actual.length === 0 || (actual.length === 1 && actual[0] === 'none')
+  }
+  return sameNetworkSet(actual, expectedContainerNetworks(spec))
+}
+
+/** Exact set equality: an extra network (e.g. a later `docker network connect bridge`) is stale. */
+function sameNetworkSet(actual: string[], expected: string[]): boolean {
+  if (actual.length !== expected.length) return false
+  const a = [...actual].sort()
+  const b = [...expected].sort()
+  return a.every((name, i) => name === b[i])
 }
 
 /** @deprecated Use `ShipContainerSpec`; kept for backward compatibility. */

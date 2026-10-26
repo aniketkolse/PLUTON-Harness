@@ -16,7 +16,7 @@ import type { RunResult } from '../../src/util/exec.ts'
  */
 
 export interface FakeSandboxCall {
-  method: 'probe' | 'create' | 'start' | 'exec' | 'status' | 'inspect' | 'stop' | 'remove'
+  method: 'probe' | 'create' | 'start' | 'exec' | 'status' | 'inspect' | 'ensureInternalNetwork' | 'stop' | 'remove'
   args: unknown[]
 }
 
@@ -39,6 +39,13 @@ export class FakeSandbox implements SandboxManager {
   readonly calls: FakeSandboxCall[] = []
   readonly created: SandboxSpec[] = []
   readonly execCalls: Array<{ containerName: string; argv: string[]; options: SandboxExecOptions }> = []
+  readonly ensureNetworkCalls: string[] = []
+  /** Set to undefined to model a manager that cannot provide an internal network. */
+  ensureInternalNetwork: ((name: string) => Promise<'created' | 'existing'>) | undefined = (name) => {
+    this.calls.push({ method: 'ensureInternalNetwork', args: [name] })
+    this.ensureNetworkCalls.push(name)
+    return Promise.resolve('existing')
+  }
 
   probe(): Promise<SandboxProbe> {
     this.calls.push({ method: 'probe', args: [] })

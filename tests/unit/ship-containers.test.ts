@@ -60,6 +60,7 @@ function specFor(projectId: string): MuseContainerSpec {
     image: 'pluton-worker:engines',
     limits: { cpus: 2, memoryMb: 4096, pids: 512 },
     network: 'restricted',
+    customNetwork: 'pluton-restricted',
     mounts: [
       { hostPath: 'C:\\work\\checkout', containerPath: '/work' },
       { hostPath: 'C:\\home\\worker-a', containerPath: '/home/pluton' },
@@ -211,6 +212,7 @@ describe('ensureMuseContainer', () => {
       user: RESOLVED_CONTAINER_USER,
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
+      networks: ['pluton-restricted'],
     }
 
     const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:new' })
@@ -218,6 +220,53 @@ describe('ensureMuseContainer', () => {
     expect(fake.methods()).toEqual(['status', 'inspect', 'remove', 'create', 'start'])
     expect(fake.created).toHaveLength(1)
     expect(store.getSandboxForMuse(projectId, 'worker-a')?.containerId).toBe(`cid_${r.containerName}`)
+  })
+
+  it('recreates when the container is not on exactly the requested network (policy change or extra attachment)', async () => {
+    for (const networks of [['bridge'], ['pluton-restricted', 'bridge']]) {
+      const { store, projectId } = freshStore('net-mismatch')
+      const fake = new FakeSandbox()
+      fake.statusResult = 'running'
+      fake.inspectResult = {
+        imageId: 'sha256:img',
+        user: RESOLVED_CONTAINER_USER,
+        mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+        extraHosts: [HOST_GATEWAY_ADD_HOST],
+        networks,
+      }
+
+      const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
+      expect(r.created).toBe(true)
+      expect(fake.methods()).toEqual(['status', 'inspect', 'remove', 'create', 'start'])
+      expect(fake.created[0]?.customNetwork).toBe('pluton-restricted')
+    }
+  })
+
+  it('reuses a none-network container for both Docker representations and recreates on any attachment', async () => {
+    for (const [networks, reusable] of [
+      [[], true],
+      [['none'], true],
+      [['bridge'], false],
+    ] as const) {
+      const { store, projectId } = freshStore('none-network')
+      const spec = { ...specFor(projectId), network: 'none' as const }
+      delete spec.customNetwork
+      const fake = new FakeSandbox()
+      fake.statusResult = 'running'
+      fake.inspectResult = {
+        imageId: 'sha256:img',
+        user: RESOLVED_CONTAINER_USER,
+        mounts: spec.mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
+        extraHosts: [HOST_GATEWAY_ADD_HOST],
+        networks: [...networks],
+      }
+
+      const r = await ensureMuseContainer(fake, store, { ...spec, imageId: 'sha256:img' })
+      expect(r.created).toBe(!reusable)
+      expect(fake.methods()).toEqual(
+        reusable ? ['status', 'inspect', 'start'] : ['status', 'inspect', 'remove', 'create', 'start'],
+      )
+    }
   })
 
   it('recreates when the recorded mounts no longer match the spec (workspace-policy change)', async () => {
@@ -229,6 +278,7 @@ describe('ensureMuseContainer', () => {
       user: RESOLVED_CONTAINER_USER,
       mounts: [{ destination: '/work', readOnly: false }], // '/home/pluton' is gone
       extraHosts: [HOST_GATEWAY_ADD_HOST],
+      networks: ['pluton-restricted'],
     }
 
     const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
@@ -255,6 +305,7 @@ describe('ensureMuseContainer', () => {
       user: RESOLVED_CONTAINER_USER,
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
+      networks: ['pluton-restricted'],
     }
 
     const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
@@ -276,6 +327,7 @@ describe('ensureMuseContainer', () => {
       user: foreignUser,
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
+      networks: ['pluton-restricted'],
     }
 
     const r = await ensureMuseContainer(fake, store, { ...specFor(projectId), imageId: 'sha256:img' })
@@ -294,6 +346,7 @@ describe('ensureMuseContainer', () => {
       user: '12345:12345',
       mounts: specFor(projectId).mounts.map((m) => ({ destination: m.containerPath, readOnly: m.readOnly === true })),
       extraHosts: [HOST_GATEWAY_ADD_HOST],
+      networks: ['pluton-restricted'],
     }
 
     const r = await ensureMuseContainer(fake, store, {
