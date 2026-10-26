@@ -404,6 +404,23 @@ export const MIGRATIONS: Migration[] = [
        ON sandboxes(project_id, IFNULL(ship_id, '')) WHERE active = 1`,
     ],
   },
+  {
+    version: 11,
+    name: 'session-inbox',
+    statements: [
+      `CREATE TABLE session_inbox (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'chat',
+        state TEXT NOT NULL DEFAULT 'enqueued',
+        created_at TEXT NOT NULL,
+        processed_at TEXT
+      )`,
+      `CREATE INDEX idx_inbox_session_state ON session_inbox(session_id, state, seq)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

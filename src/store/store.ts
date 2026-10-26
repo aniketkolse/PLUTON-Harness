@@ -32,6 +32,9 @@ import {
   type EventRecord,
   type ExecutionMode,
   type ExecutionNetworkPolicy,
+  INBOX_ITEM_STATES,
+  type InboxItemRecord,
+  type InboxItemState,
   type JsonValue,
   type ShipRecord,
   type ProjectRecord,
@@ -1667,6 +1670,66 @@ export class Store {
     return rows.map(rowToChatSession)
   }
 
+  // -- session inbox ---------------------------------------------------------
+
+  enqueueInboxItem(spec: { sessionId: string; text: string; mode?: string }): InboxItemRecord {
+    this.getChatSession(spec.sessionId)
+    const now = nowIso()
+    const id = newId('inbox')
+    const mode = spec.mode ?? 'chat'
+    return withTx(this.db, () => {
+      const next = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM session_inbox WHERE session_id = ?')
+        .get(spec.sessionId) as Row
+      const seq = num(next, 'seq')
+      this.db
+        .prepare(
+          'INSERT INTO session_inbox (id, session_id, seq, text, mode, state, created_at, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)',
+        )
+        .run(id, spec.sessionId, seq, spec.text, mode, 'enqueued', now)
+      const saved = this.db.prepare('SELECT * FROM session_inbox WHERE id = ?').get(id) as Row | undefined
+      if (!saved) throw new InternalError('session inbox item insert disappeared')
+      return rowToInboxItem(saved)
+    })
+  }
+
+  getInboxItem(id: string): InboxItemRecord | null {
+    const row = this.db.prepare('SELECT * FROM session_inbox WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToInboxItem(row) : null
+  }
+
+  listPendingInbox(sessionId: string): InboxItemRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM session_inbox WHERE session_id = ? AND state IN ('enqueued', 'processing') ORDER BY seq ASC",
+      )
+      .all(sessionId) as Row[]
+    return rows.map(rowToInboxItem)
+  }
+
+  updateInboxState(id: string, state: InboxItemState, processedAt?: string): void {
+    const proc = processedAt ?? (state === 'delivered' || state === 'cancelled' || state === 'failed' ? nowIso() : null)
+    this.db
+      .prepare('UPDATE session_inbox SET state = ?, processed_at = COALESCE(?, processed_at) WHERE id = ?')
+      .run(state, proc, id)
+  }
+
+  cancelPendingInbox(sessionId: string): number {
+    const now = nowIso()
+    const res = this.db
+      .prepare("UPDATE session_inbox SET state = 'cancelled', processed_at = ? WHERE session_id = ? AND state = 'enqueued'")
+      .run(now, sessionId)
+    return Number(res.changes)
+  }
+
+  recoverStaleInboxItems(): number {
+    const now = nowIso()
+    const res = this.db
+      .prepare("UPDATE session_inbox SET state = 'failed', processed_at = ? WHERE state = 'processing'")
+      .run(now)
+    return Number(res.changes)
+  }
+
   // -- plans (planning workflow) ----------------------------------------------
 
   createPlan(spec: {
@@ -2390,6 +2453,23 @@ function rowToChatMessage(r: Row): ChatMessageRecord {
     text: str(r, 'text'),
     meta: parseJsonText<JsonValue>(nstr(r, 'meta_json'), {}),
     createdAt: str(r, 'created_at'),
+  }
+}
+
+function rowToInboxItem(r: Row): InboxItemRecord {
+  const state = str(r, 'state')
+  if (!(INBOX_ITEM_STATES as readonly string[]).includes(state)) {
+    throw new InternalError(`db row: invalid inbox item state '${state}'`)
+  }
+  return {
+    id: str(r, 'id'),
+    sessionId: str(r, 'session_id'),
+    seq: num(r, 'seq'),
+    text: str(r, 'text'),
+    mode: str(r, 'mode'),
+    state: state as InboxItemState,
+    createdAt: str(r, 'created_at'),
+    processedAt: nstr(r, 'processed_at'),
   }
 }
 

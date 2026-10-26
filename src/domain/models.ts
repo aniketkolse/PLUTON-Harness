@@ -387,3 +387,17 @@ export interface ChatMessageRecord {
   meta: JsonValue
   createdAt: string
 }
+
+export const INBOX_ITEM_STATES = ['enqueued', 'processing', 'delivered', 'cancelled', 'failed'] as const
+export type InboxItemState = (typeof INBOX_ITEM_STATES)[number]
+
+export interface InboxItemRecord {
+  id: string
+  sessionId: string
+  seq: number
+  text: string
+  mode: string
+  state: InboxItemState
+  createdAt: string
+  processedAt: string | null
+}
