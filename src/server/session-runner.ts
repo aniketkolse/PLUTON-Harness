@@ -38,7 +38,7 @@ export class SessionRunner {
     this.store = options.store
     this.broadcaster = options.broadcaster
     // Recover any orphaned items from previous server process crash
-    this.store.recoverStaleInboxItems()
+    this.store.recoverStaleInboxItems?.()
   }
 
   enqueue(sessionId: string, text: string, mode: string = 'chat'): InboxItemRecord {

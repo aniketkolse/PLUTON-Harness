@@ -93,6 +93,7 @@ describe('migrations', () => {
       'v8:muse-to-ship-terminology',
       'v9:session-workspaces',
       'v10:native-execution-sessions',
+      'v11:session-inbox',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -143,6 +144,7 @@ describe('migrations', () => {
       'v8:muse-to-ship-terminology',
       'v9:session-workspaces',
       'v10:native-execution-sessions',
+      'v11:session-inbox',
     ])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
@@ -201,8 +203,8 @@ describe('migrations', () => {
     const result = migrate(db)
     expect(result.from).toBe(5)
     expect(result.to).toBe(SCHEMA_VERSION)
-    expect(SCHEMA_VERSION).toBe(10)
-    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology', 'v9:session-workspaces', 'v10:native-execution-sessions'])
+    expect(SCHEMA_VERSION).toBe(11)
+    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology', 'v9:session-workspaces', 'v10:native-execution-sessions', 'v11:session-inbox'])
 
     const store = new Store(db)
     const task = store.getTask('task_v5')
@@ -242,7 +244,7 @@ describe('migrations', () => {
 
     const result = migrate(db)
     expect(result.from).toBe(9)
-    expect(result.applied).toEqual(['v10:native-execution-sessions'])
+    expect(result.applied).toEqual(['v10:native-execution-sessions', 'v11:session-inbox'])
 
     const store = new Store(db)
     const legacy = store.getSandbox('sb_docker')

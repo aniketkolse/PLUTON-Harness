@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { OwnershipLostError, StateTransitionError } from '../../src/domain/errors.ts'
 import type { RunBudget } from '../../src/domain/models.ts'
 import { openDatabase, setUserVersion, type DatabaseSync } from '../../src/store/db.ts'
-import { MIGRATIONS, migrate } from '../../src/store/migrations.ts'
+import { MIGRATIONS, SCHEMA_VERSION, migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
 
 /**
@@ -623,12 +623,13 @@ describe('migration v7', () => {
 
     const result = migrate(db)
     expect(result.from).toBe(6)
-    expect(result.to).toBe(10)
+    expect(result.to).toBe(SCHEMA_VERSION)
     expect(result.applied).toEqual([
       'v7:run-supervisor-ownership',
       'v8:muse-to-ship-terminology',
       'v9:session-workspaces',
       'v10:native-execution-sessions',
+      'v11:session-inbox',
     ])
 
     const store = new Store(db)

@@ -157,7 +157,7 @@ export class ApiRouter {
         mcpServersResolver: (sessionId, ship, adapter, workspaceRoot) =>
           this.mcpServersForSession(sessionId, ship, adapter, workspaceRoot),
         onSessionDropped: (sessionId) => this.dropMcpRegistration(sessionId),
-        approvalTimeoutMinutes: ctx.loaded.config.runtime.approval_timeout_minutes,
+        approvalTimeoutMinutes: ctx.loaded?.config?.runtime?.approval_timeout_minutes ?? 10,
       })
   }
 
