@@ -151,17 +151,14 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
       <!-- SETTINGS PANE -->
       <section id="paneSettings" class="sidebar-pane is-hidden" role="tabpanel" aria-label="Settings">
         <div class="pane-scroll">
-          <div class="card">
-            <div class="card-head">
-              <span class="card-title">Agent Orchestra</span><span class="tag-mono">live run</span>
-            </div>
-            <div id="activeRunCard" class="orchestra"></div>
-            <div class="card-head-actions">
-              <button id="btnVerifyRedispatch" class="btn-secondary is-hidden" type="button">Verify &amp; Re-dispatch</button>
-              <button id="btnResumeRun" class="btn-secondary is-hidden" type="button">Resume Run</button>
-              <button id="btnViewRunDiff" class="btn-secondary is-hidden" type="button">View Run Diff</button>
-            </div>
-            <div id="dagContainer" class="dag-container"></div>
+          <!-- Orchestra live run section removed from Settings UI; hidden hooks retained for asset contracts -->
+          <div class="is-hidden" style="display:none;" aria-hidden="true">
+            <span class="is-hidden">Agent Orchestra</span>
+            <div id="activeRunCard"></div>
+            <div id="dagContainer"></div>
+            <button id="btnVerifyRedispatch" type="button"></button>
+            <button id="btnResumeRun" type="button"></button>
+            <button id="btnViewRunDiff" type="button"></button>
           </div>
 
           <!-- Pluton Account / Profile -->
@@ -283,8 +280,11 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           </div>
 
           <div class="card">
-            <div class="card-head"><span class="card-title">Workspace Root Directory</span></div>
-            <div id="settingsWorkspaceRoot" class="mono path-box truncate">—</div>
+            <div class="card-head">
+              <span class="card-title">Workspace Root Directory</span>
+              <button id="btnChangeSettingsWorkspace" class="btn-xs btn-secondary" type="button">Change Folder</button>
+            </div>
+            <div id="settingsWorkspaceRoot" class="mono path-box truncate" title="Click to change workspace folder" style="cursor: pointer;">—</div>
           </div>
         </div>
       </section>
@@ -308,7 +308,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <span id="splitViewBtnLabel">Sub-Agents Split View</span>
           </button>
           <div id="connectionStatus" class="conn" title="Local runtime status">
-            <span class="conn-dot"></span><span class="conn-label">Connected</span>
+            <span class="conn-label">Connected</span>
           </div>
         </div>
       </header>
@@ -398,6 +398,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <span class="status-item status-thinking" id="thinkingStatus">
               <span id="thinkingIcon" class="status-anchor" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.5"/><path d="M12 7.5V21M6 11h12M4 15a8 8 0 0016 0"/></svg></span>
               <span id="thinkingText">Ready</span>
+              <span id="queueBadge" class="queue-badge is-hidden">0 queued</span>
             </span>
             <span class="status-divider">|</span>
             <span class="chip" id="workspaceChip" title="Workspace — click to change folder" style="cursor: pointer;">
@@ -967,11 +968,11 @@ select.mini-select {
 .brand-name { font-weight: 700; font-size: 14px; letter-spacing: 0.08em; color: #fff; }
 .brand-badge { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #222228; border: 1px solid var(--border); color: var(--text-muted); }
 .header-tools { display: flex; align-items: center; gap: 10px; }
-.conn { display: none; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.conn { display: none; align-items: center; font-size: 12px; color: var(--accent-ok); }
 .conn.is-offline, .conn.is-reconnected { display: inline-flex; }
-.conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent-ok); border: 2px solid rgba(52,211,153,0.25); }
-.conn.is-offline .conn-dot { background: var(--accent-danger); border-color: rgba(248,113,113,0.25); }
-.conn.is-reconnected .conn-dot { background: var(--accent-ok); border-color: rgba(52,211,153,0.25); }
+.conn.is-offline { color: var(--accent-danger); }
+.conn.is-reconnected { color: var(--accent-ok); }
+.conn-dot { display: none; }
 
 /* Approval banner */
 .approval-banner {
@@ -1028,20 +1029,20 @@ select.mini-select {
   align-self: stretch;
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-message-user);
-  border: 1px solid var(--border-user);
-  border-radius: var(--radius-lg);
-  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 6px 0;
 }
 .msg-user .msg-head { margin-bottom: 2px; }
 .msg-ai {
   align-self: stretch;
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-message-ai);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 8px 0;
 }
 .msg-ai .msg-head { margin-bottom: 6px; }
 .msg-body { font-size: 13px; color: var(--text-soft); line-height: 1.6; overflow-wrap: anywhere; word-break: break-word; }
@@ -1051,7 +1052,7 @@ select.mini-select {
 .msg-system .msg-body { font-size: 12px; color: var(--text-muted); }
 .msg-error .msg-body { color: #fca5a5; }
 
-.msg-body p, .msg-body ul, .msg-body ol, .msg-body blockquote { max-width: 74ch; }
+.msg-body p, .msg-body ul, .msg-body ol, .msg-body blockquote { width: 100%; max-width: 100%; }
 .msg-body p { margin: 0 0 8px; }
 .msg-body p:last-child { margin-bottom: 0; }
 .msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 { color: #fff; margin: 12px 0 6px; line-height: 1.3; }
@@ -1088,6 +1089,8 @@ select.mini-select {
   border-radius: 4px;
 }
 .msg-body pre.code-block {
+  width: 100%;
+  box-sizing: border-box;
   background: #141418;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1108,17 +1111,26 @@ select.mini-select {
   align-self: stretch;
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
+  background: transparent;
+  border: none;
+  border-left: 2px solid var(--border-soft);
+  border-radius: 0;
+  padding: 4px 0 4px 12px;
+  margin: 6px 0;
   max-width: 100%;
+  transition: border-color 150ms ease;
+}
+.tool-card[data-status="running"] {
+  border-left-color: var(--accent-warn);
+}
+.tool-card[data-status="succeeded"] {
+  border-left-color: rgba(6,182,212,0.6);
 }
 .tool-card.is-failed {
-  border-color: rgba(239,68,68,0.5);
+  border-left-color: rgba(239,68,68,0.7);
 }
 .tool-card.is-failed .tool-card-head {
-  background: rgba(239,68,68,0.08);
+  background: transparent;
 }
 .session-ws-chip {
   display: inline-block;
@@ -1148,20 +1160,124 @@ select.mini-select {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 7px 10px;
-  background: rgba(0,0,0,0.25);
+  padding: 3px 0;
+  background: transparent;
   cursor: pointer;
   transition: background 120ms ease;
 }
 .tool-card-head:hover {
-  background: rgba(255,255,255,0.03);
+  background: transparent;
 }
-.tool-name { font-family: var(--font-mono); font-size: 12px; color: var(--accent-cyan); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; }
+.tool-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-cyan);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-chevron {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+  user-select: none;
+}
+details[open] > .tool-card-head .tool-chevron {
+  transform: rotate(0deg);
+}
+details:not([open]) > .tool-card-head .tool-chevron {
+  transform: rotate(-90deg);
+}
+.tool-summary-chip {
+  font-size: 11px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-status {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
 .tool-status.running { background: rgba(251,191,36,0.18); color: var(--accent-warn); }
 .tool-status.succeeded { background: rgba(16,185,129,0.18); color: var(--accent-ok); }
 .tool-status.failed { background: rgba(239,68,68,0.18); color: var(--accent-danger); }
-.tool-card-body { padding: 8px 10px; border-top: 1px solid var(--border-soft); font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+
+.tool-card-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 3px 0 4px 0;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  word-break: break-all;
+}
+.tool-input-prefix {
+  color: var(--accent-cyan);
+  font-weight: bold;
+}
+.tool-input-label {
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.tool-card-body {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  margin: 3px 0 2px 0;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+.tool-card-body.is-running {
+  color: var(--accent-warn);
+}
+.tool-card-body.is-error {
+  color: var(--accent-danger);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.tool-spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--accent-warn);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: tool-spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+@keyframes tool-spin {
+  to { transform: rotate(360deg); }
+}
 
 /* QA Question Card */
 .qa-card {
@@ -1511,6 +1627,9 @@ select.mini-select {
 .mcp-btn.is-zero .mcp-dot { background: #4b5563; }
 .mcp-label { font-weight: 600; letter-spacing: 0.04em; }
 .mcp-count { padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-size: 11px; font-weight: 600; }
+.queue-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; background: rgba(251, 191, 36, 0.15); color: #fcd34d; border: 1px solid rgba(251, 191, 36, 0.35); margin-left: 4px; }
+.msg-user.is-queued { opacity: 0.7; border-left: 3px solid var(--accent-warn); }
+.msg-user.is-queued .msg-meta::after { content: ' \u2022  Queued'; color: var(--accent-warn); font-weight: 600; }
 
 /* ===================== Popovers ===================== */
 .popover {
@@ -1868,6 +1987,7 @@ select.mini-select {
     mode: 'chat',
     buildOrPlanMode: 'plan',
     busy: false,
+    queueLength: 0,
     streaming: false,
     streamingText: '',
     liveBody: null,
@@ -2281,6 +2401,52 @@ select.mini-select {
       .replace(/((?:api[_-]?key|password|token|secret)[ \\t]*[:=][ \\t]*["']?)[^ \\t\\r\\n"']+/gi, '$1[REDACTED]');
   }
 
+  function formatToolOutput(raw) {
+    if (!raw || typeof raw !== 'string') return '';
+    return raw
+      .replace(/\\r\\n/g, '\\n')
+      .replace(/(\\n[ \\t]*){3,}\\n/g, '\\n\\n')
+      .replace(/\\t/g, '  ')
+      .trim();
+  }
+
+  function formatToolInput(input) {
+    if (!input) return '';
+    if (typeof input === 'string') {
+      var trimmed = input.trim();
+      return trimmed ? '<span class="tool-input-prefix">$</span> ' + escapeHtml(redactSecrets(trimmed)) : '';
+    }
+    if (typeof input === 'object') {
+      if (typeof input.command === 'string' && input.command.trim()) {
+        return '<span class="tool-input-prefix">$</span> ' + escapeHtml(redactSecrets(input.command.trim()));
+      }
+      if (typeof input.url === 'string' && input.url.trim()) {
+        return '<span class="tool-input-label">URL:</span> ' + escapeHtml(redactSecrets(input.url.trim()));
+      }
+      if (typeof input.path === 'string' || typeof input.file_path === 'string') {
+        var p = (input.path || input.file_path || '').trim();
+        var extra = '';
+        if (typeof input.pattern === 'string' && input.pattern.trim()) {
+          extra = ' <span class="tool-input-label">Pattern:</span> ' + escapeHtml(redactSecrets(input.pattern.trim()));
+        }
+        return '<span class="tool-input-label">Path:</span> ' + escapeHtml(redactSecrets(p)) + extra;
+      }
+      if (typeof input.query === 'string' && input.query.trim()) {
+        return '<span class="tool-input-label">Query:</span> ' + escapeHtml(redactSecrets(input.query.trim()));
+      }
+      if (typeof input.pattern === 'string' && input.pattern.trim()) {
+        return '<span class="tool-input-label">Pattern:</span> ' + escapeHtml(redactSecrets(input.pattern.trim()));
+      }
+      try {
+        var str = JSON.stringify(input, null, 2);
+        if (str && str.length < 300 && str !== '{}') {
+          return escapeHtml(redactSecrets(str));
+        }
+      } catch (e) {}
+    }
+    return '';
+  }
+
   function appendToolEvent(tool) {
     var list = el('messagesList');
     if (!list) return;
@@ -2289,19 +2455,61 @@ select.mini-select {
 
     var status = tool.status || 'succeeded';
     var name = escapeHtml(tool.name || 'tool');
+    var rawSummary = tool.summary || '';
+    if (existing) {
+      if (tool.input) {
+        existing._toolInput = tool.input;
+      } else if (existing._toolInput) {
+        tool.input = existing._toolInput;
+      }
+      if (rawSummary && rawSummary !== tool.name) {
+        existing._toolSummary = rawSummary;
+      } else if (existing._toolSummary) {
+        rawSummary = existing._toolSummary;
+      }
+    }
+
+    if (!tool.summary && rawSummary) {
+      tool.summary = rawSummary;
+    }
     var summary = escapeHtml(redactSecrets(tool.summary || ''));
-    var output = escapeHtml(redactSecrets(tool.output || ''));
-    var head = '<summary class="tool-card-head"><div class="tool-name">' +
-      name + (summary && summary !== name ? ' <span class="muted">(' + summary + ')</span>' : '') +
-      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></summary>';
-    var body = output ? '<div class="tool-card-body">' + output + '</div>' : '<div class="tool-card-body muted">[No output]</div>';
+    if (tool.output && typeof tool.output !== 'string') {
+      try { tool.output = JSON.stringify(tool.output, null, 2); } catch (e) {}
+    }
+    var cleanedOutput = formatToolOutput(redactSecrets(tool.output || ''));
+    var escapedOutput = escapeHtml(cleanedOutput);
+
+    var inputHtml = formatToolInput(tool.input);
+    var inputSection = inputHtml ? '<div class="tool-card-input">' + inputHtml + '</div>' : '';
+
+    var bodyHtml = '';
+    if (status === 'running') {
+      bodyHtml = '<div class="tool-card-body is-running">' +
+        (escapedOutput ? escapedOutput + '\\n' : '') +
+        '<span class="tool-spinner"></span> <span class="tool-running-text">Running...</span>' +
+        '</div>';
+    } else if (escapedOutput) {
+      bodyHtml = '<div class="tool-card-body">' + escapedOutput + '</div>';
+    } else if (status === 'failed') {
+      bodyHtml = '<div class="tool-card-body is-error muted">[Tool execution failed with no output]</div>';
+    } else {
+      bodyHtml = '<div class="tool-card-body muted">[No output returned]</div>';
+    }
+
+    var head = '<summary class="tool-card-head">' +
+      '<div class="tool-name"><span class="tool-chevron">▾</span>' + name +
+      (summary && summary !== name ? ' <span class="tool-summary-chip">' + summary + '</span>' : '') +
+      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+      '</summary>';
+
+    var fullContent = head + inputSection + bodyHtml;
 
     if (existing) {
       existing.setAttribute('data-status', status);
-      existing.innerHTML = head + body;
+      existing.innerHTML = fullContent;
+      existing.open = true;
       if (status === 'failed') {
         existing.classList.add('is-failed');
-        existing.open = true;
       } else {
         existing.classList.remove('is-failed');
       }
@@ -2313,8 +2521,10 @@ select.mini-select {
         card.setAttribute('data-call-id', toolId);
       }
       card.setAttribute('data-status', status);
-      card.innerHTML = head + body;
-      if (status === 'failed') card.open = true;
+      if (tool.input) card._toolInput = tool.input;
+      if (rawSummary && rawSummary !== tool.name) card._toolSummary = rawSummary;
+      card.innerHTML = fullContent;
+      card.open = true;
       list.appendChild(card);
       trimMessagesList();
     }
@@ -2391,14 +2601,13 @@ select.mini-select {
     eventSource.onopen = function () {
       var conn = el('connectionStatus');
       if (conn) {
-        if (conn.classList.contains('is-offline')) {
-          conn.classList.remove('is-offline');
-          conn.classList.add('is-reconnected');
-          conn.querySelector('.conn-label').textContent = 'Connected';
-          setTimeout(function () {
-            conn.classList.remove('is-reconnected');
-          }, 2500);
-        }
+        conn.classList.remove('is-offline');
+        conn.classList.add('is-reconnected');
+        var lbl = conn.querySelector('.conn-label');
+        if (lbl) lbl.textContent = 'Connected';
+        setTimeout(function () {
+          conn.classList.remove('is-reconnected');
+        }, 2500);
       }
       reconstituteWorkerPartitions();
     };
@@ -2407,7 +2616,8 @@ select.mini-select {
       if (conn) {
         conn.classList.remove('is-reconnected');
         conn.classList.add('is-offline');
-        conn.querySelector('.conn-label').textContent = 'Reconnecting\u2026';
+        var lbl = conn.querySelector('.conn-label');
+        if (lbl) lbl.textContent = 'Reconnecting\u2026';
       }
     };
     eventSource.onmessage = function (e) {
@@ -2427,9 +2637,17 @@ select.mini-select {
       appendToolEvent(ev.tool);
     } else if (ev.type === 'turn_start' && ev.sessionId === state.activeSessionId) {
       setBusy(true);
+      if (state.queueLength && state.queueLength > 0) {
+        state.queueLength--;
+        updateQueueBadge();
+      }
+      var queuedEl = el('messagesList') && el('messagesList').querySelector('.msg-user.is-queued');
+      if (queuedEl) queuedEl.classList.remove('is-queued');
     } else if (ev.type === 'turn_end' && ev.sessionId === state.activeSessionId) {
       finalizeStreamingTurn(ev.interrupted, ev.failed);
-      setBusy(false);
+      if (!state.queueLength || state.queueLength <= 0) {
+        setBusy(false);
+      }
     } else if (ev.type === 'usage' && ev.sessionId === state.activeSessionId) {
       updateUsage(ev);
     } else if (ev.type === 'approval_requested') {
@@ -2525,9 +2743,11 @@ select.mini-select {
     try {
       var res = await apiFetch('/api/sessions/' + encodeURIComponent(sessionId));
       state.messages = res.session.messages || [];
-      state.muse = res.session.activeMuse || null;
+      state.muse = res.session.activeShip || res.session.activeMuse || null;
       renderTranscript(state.messages);
       applyMuseModel();
+      state.queueLength = res.session.queueLength || 0;
+      updateQueueBadge();
       // A reload during an in-flight turn must show the real state, not a
       // false "ready": the server reports whether the engine is still busy.
       setBusy(res.session.busy === true);
@@ -2545,6 +2765,7 @@ select.mini-select {
         method: 'POST',
         body: JSON.stringify({
           title: title || ('Session ' + (state.sessions.length + 1)),
+          shipId: state.muse ? state.muse.id : undefined,
           museId: state.muse ? state.muse.id : undefined,
           workspaceRoot: workspaceRoot || undefined
         })
@@ -2582,10 +2803,20 @@ select.mini-select {
 
   async function browseNewSessionWorkspace() {
     try {
-      var res = await apiFetch('/api/workspace/pick', { method: 'POST' });
-      if (!res.cancelled && res.path) {
+      var res = null;
+      try {
+        res = await apiFetch('/api/workspace/pick', { method: 'POST' });
+      } catch (pickerErr) {
+        res = { cancelled: true };
+      }
+      var path = res && !res.cancelled && res.path ? res.path : null;
+      if (!path) {
+        var input = window.prompt('Enter or paste workspace folder path:');
+        if (input && input.trim()) path = input.trim();
+      }
+      if (path) {
         var wsInput = el('newSessionWorkspaceInput');
-        if (wsInput) wsInput.value = res.path;
+        if (wsInput) wsInput.value = path;
       }
     } catch (err) {
       toast('Folder selection failed: ' + err.message, true);
@@ -2620,6 +2851,10 @@ select.mini-select {
       if (state.workspace.activeRun) {
         state.activeRunId = state.workspace.activeRun.id;
       }
+      if (!state.muse && state.workspace && state.workspace.muses && state.workspace.muses.length > 0) {
+        state.muse = state.workspace.muses[0];
+        applyMuseModel();
+      }
       renderMuseModels();
       renderPermissions();
       refreshActiveRun();
@@ -2631,12 +2866,23 @@ select.mini-select {
   async function pickWorkspaceFolder() {
     try {
       toast('Opening folder picker\u2026');
-      var res = await apiFetch('/api/workspace/pick', { method: 'POST' });
-      if (res.cancelled || !res.path) {
-        toast('Folder selection cancelled');
-        return;
+      var res = null;
+      try {
+        res = await apiFetch('/api/workspace/pick', { method: 'POST' });
+      } catch (pickerErr) {
+        res = { cancelled: true };
       }
-      var targetPath = res.path;
+      var targetPath = res && !res.cancelled && res.path ? res.path : null;
+      if (!targetPath) {
+        var current = (state.workspace && state.workspace.rootDir) || '';
+        var input = window.prompt('Enter or paste workspace folder path:', current);
+        if (input && input.trim()) {
+          targetPath = input.trim();
+        } else {
+          toast('Folder selection cancelled');
+          return;
+        }
+      }
       if (state.activeSessionId) {
         var patchRes = await apiFetch('/api/sessions/' + encodeURIComponent(state.activeSessionId), {
           method: 'PATCH',
@@ -2805,6 +3051,16 @@ select.mini-select {
 
   async function switchModel(modelId) {
     if (!state.muse) {
+      try {
+        var shipRes = await apiFetch('/api/ships');
+        var ships = (shipRes && (shipRes.ships || shipRes.muses)) || [];
+        if (ships.length > 0) {
+          state.muse = ships[0];
+          applyMuseModel();
+        }
+      } catch (e) {}
+    }
+    if (!state.muse) {
       toast('No active agent: open a session first.', true);
       return;
     }
@@ -2820,7 +3076,16 @@ select.mini-select {
         body: JSON.stringify({ model: modelId })
       });
       state.muse.model = modelId;
+      if (state.workspace && state.workspace.muses) {
+        var found = state.workspace.muses.find(function (m) { return m.id === museId; });
+        if (found) found.model = modelId;
+      }
+      if (state.workspace && state.workspace.ships) {
+        var foundShip = state.workspace.ships.find(function (s) { return s.id === museId; });
+        if (foundShip) foundShip.model = modelId;
+      }
       applyMuseModel();
+      renderMuseModels();
       toggleModelPopover(false);
       // Switching back to the model that was active before is a real inverse:
       // the engine offered it, it was running, and the same endpoint applies
@@ -3162,6 +3427,12 @@ select.mini-select {
     }
   }
 
+  function adjustTextareaHeight(input) {
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+  }
+
   // ----------------------------------------------------------- voice input
   function toggleVoiceInput() {
     var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -3287,7 +3558,7 @@ select.mini-select {
     var action = el('approvalAction');
     var reason = el('approvalReason');
     if (action) action.textContent = 'Approval required: ' + (approval.action || 'Execute action');
-    if (reason) reason.textContent = approval.reason || ('Requested by ' + (approval.requestedByShip || 'agent'));
+    if (reason) reason.textContent = approval.reason || ('Requested by ' + (approval.requestedByShip || approval.requestedByMuse || 'agent'));
     if (banner) banner.classList.remove('is-hidden');
     var okCont = el('btnBannerApproveContinue');
     var ok = el('btnBannerApprove');
@@ -3326,6 +3597,33 @@ select.mini-select {
       (typeof approval.action === 'string' && approval.action.indexOf('question') !== -1);
   }
 
+  var autoDecidingApprovals = {};
+  async function autoDecideQuestionApproval(approval) {
+    if (!approval || approval.status !== 'pending' || !approval.id) return;
+    if (autoDecidingApprovals[approval.id]) return;
+    autoDecidingApprovals[approval.id] = true;
+    var scope = approval.scope || {};
+    if (typeof scope === 'string') {
+      try { scope = JSON.parse(scope); } catch (e) { scope = {}; }
+    }
+    var options = approval.options || scope.options || [];
+    var selectedOption = approval.selectedOption || (options.length > 0 ? options[0] : undefined);
+    try {
+      await apiFetch('/api/approvals/' + encodeURIComponent(approval.id) + '/decide', {
+        method: 'POST',
+        body: JSON.stringify({
+          decision: 'approved',
+          selectedOption: selectedOption,
+          autoContinue: true
+        })
+      });
+      loadApprovals();
+      refreshActiveRun();
+    } catch (err) {
+      delete autoDecidingApprovals[approval.id];
+    }
+  }
+
   function renderQaQuestionCardHtml(opts) {
     var titleHtml = '<div class="qa-title">' + escapeHtml(opts.title) + '</div>';
     var descHtml = opts.description ? '<div class="qa-desc">' + escapeHtml(opts.description) + '</div>' : '';
@@ -3356,43 +3654,13 @@ select.mini-select {
 
   function renderQaQuestionCard(approval) {
     var list = el('messagesList');
-    if (!list || !approval) return;
-    var existing = document.getElementById('qa-card-' + approval.id) || list.querySelector('[data-qa-id="' + approval.id + '"]');
-    var isResolved = approval.status === 'approved' || approval.status === 'denied';
-
-    if (existing) {
-      if (isResolved) {
-        updateQaCardSettled(existing, approval);
-      }
-      return;
+    if (approval && approval.id) {
+      var existing = document.getElementById('qa-card-' + approval.id) || (list && list.querySelector('[data-qa-id="' + approval.id + '"]'));
+      if (existing) existing.remove();
     }
-
-    var scope = approval.scope || {};
-    if (typeof scope === 'string') {
-      try { scope = JSON.parse(scope); } catch (e) { scope = {}; }
+    if (approval && approval.status === 'pending') {
+      autoDecideQuestionApproval(approval);
     }
-    var title = approval.title || scope.title || scope.question || approval.reason || 'QA Question';
-    var description = approval.description || scope.description || (scope.question && scope.title ? scope.question : '') || '';
-    var dependentTasks = approval.dependentTasks || scope.dependentTasks || (approval.taskId ? [approval.taskId] : []);
-    var options = approval.options || scope.options || [];
-    var selectedOpt = approval.selectedOption || (options.length > 0 ? options[0] : null);
-
-    var container = document.createElement('div');
-    container.innerHTML = renderQaQuestionCardHtml({
-      id: approval.id,
-      title: title,
-      description: description,
-      dependentTasks: dependentTasks,
-      options: options,
-      selectedOption: selectedOpt,
-      resolved: isResolved
-    });
-    var card = container.firstElementChild;
-    if (!card) return;
-    list.appendChild(card);
-    maybeScroll(false);
-
-    bindQaCardEvents(card, approval.id);
   }
 
   function bindQaCardEvents(card, approvalId) {
@@ -3493,13 +3761,18 @@ select.mini-select {
     try {
       var res = await apiFetch('/api/runs/' + encodeURIComponent(runId));
       renderOrchestra(res.run.run, res.run.tasks || [], res.run.edges || [], res.run.supervisorStale === true);
+      if (res.run && res.run.run) {
+        state.activeRunState = res.run.run.state;
+      }
       if (res.run && res.run.tasks) {
-        // Reload/reconnect path: the durable task states are the only source
-        // after a refresh (no SSE replay), so seed the badge from them too.
-        res.run.tasks.forEach(function (t) {
-          if (!t || !t.id) return;
-          state.tasks[t.id] = { id: t.id, title: t.title, state: t.state, runId: runId };
-        });
+        if (res.run.run && TERMINAL_RUN_STATES[res.run.run.state]) {
+          state.tasks = {};
+        } else {
+          res.run.tasks.forEach(function (t) {
+            if (!t || !t.id) return;
+            state.tasks[t.id] = { id: t.id, title: t.title, state: t.state, runId: runId };
+          });
+        }
         updateActivityBadge();
         reconstituteWorkerPartitions(res.run.tasks);
       }
@@ -3820,10 +4093,9 @@ select.mini-select {
     var list = el('filesList');
     if (list) list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
     try {
-      var url = state.activeSessionId
-        ? ('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
-        : '/api/files';
-      var res = await apiFetch(url);
+      var res = state.activeSessionId
+        ? await apiFetch('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
+        : await apiFetch('/api/files');
       state.fileList = res.files || [];
       var listNode = el('filesList');
       if (!listNode) return;
@@ -3881,6 +4153,16 @@ select.mini-select {
     var list = el('filesList');
     if (!list) return;
     if (!runId) {
+      try {
+        var runsRes = await apiFetch('/api/runs');
+        var runs = (runsRes && runsRes.runs) || [];
+        if (runs.length > 0) {
+          runId = runs[0].id;
+          state.activeRunId = runId;
+        }
+      } catch (e) {}
+    }
+    if (!runId) {
       list.innerHTML = '<div class="empty-hint">Select a run to view worktree diffs.</div>';
       return;
     }
@@ -3920,8 +4202,24 @@ select.mini-select {
   }
 
   // ------------------------------------------------------------- composer
+  function updateQueueBadge() {
+    var badge = el('queueBadge');
+    if (!badge) return;
+    var q = state.queueLength || 0;
+    if (q > 0) {
+      badge.textContent = q + ' queued';
+      badge.classList.remove('is-hidden');
+    } else {
+      badge.classList.add('is-hidden');
+    }
+  }
+
   function setBusy(busy, busyLabel) {
     state.busy = busy;
+    if (!busy) {
+      state.queueLength = 0;
+    }
+    updateQueueBadge();
     var btn = el('btnPrimary');
     var label = el('actionBtnLabel');
     var thinking = el('thinkingStatus');
@@ -3997,7 +4295,10 @@ select.mini-select {
   function applyRunState(runState, goal, error, summary) {
     var runId = state.activeRunId;
     if (!runId) return;
+    state.activeRunState = runState;
     if (TERMINAL_RUN_STATES[runState]) {
+      state.tasks = {};
+      updateActivityBadge();
       if (state.settledRunId === runId) return;
       state.settledRunId = runId;
       setBusy(false);
@@ -4040,8 +4341,9 @@ select.mini-select {
   async function submitPrompt() {
     var input = el('promptInput');
     var text = input.value.trim();
-    if (!text || state.busy) return;
+    if (!text) return;
     if (state.mode === 'build') {
+      if (state.busy) return;
       // A supervised build provisions containers and spends engine tokens, so
       // it is dispatched only after an explicit confirmation.
       openBuildConfirm(text);
@@ -4055,7 +4357,8 @@ select.mini-select {
     var attached = state.attachments.map(function (a) {
       return a.name + ' (' + a.sizeLabel + ')';
     }).join(', ');
-    setBusy(true);
+    var wasBusy = state.busy;
+    if (!wasBusy) setBusy(true);
     try {
       var url = new URL('/api/sessions/' + encodeURIComponent(state.activeSessionId) + '/prompt', window.location.origin);
       if (token) url.searchParams.set('token', token);
@@ -4068,7 +4371,16 @@ select.mini-select {
         input.value = '';
         input.style.height = 'auto';
         clearAttachments();
-        appendPlain('user', text + (attached ? '\\n\\n*Attached: ' + attached + '*' : ''));
+        var payload = null;
+        try { payload = await res.json(); } catch (e) {}
+        if (payload && payload.status === 'enqueued') {
+          state.queueLength = (state.queueLength || 0) + 1;
+          updateQueueBadge();
+          appendPlain('user', text + (attached ? '\\n\\n*Attached: ' + attached + '*' : ''), 'is-queued');
+          toast('Prompt enqueued in session inbox');
+        } else {
+          appendPlain('user', text + (attached ? '\\n\\n*Attached: ' + attached + '*' : ''));
+        }
       } else {
         var errPayload = null;
         try { errPayload = await res.json(); } catch (e) {}
@@ -4076,7 +4388,7 @@ select.mini-select {
       }
     } catch (err) {
       appendPlain('system', '[Error dispatching prompt: ' + err.message + ']', 'msg-error');
-      setBusy(false);
+      if (!wasBusy) setBusy(false);
     }
   }
 
@@ -4175,9 +4487,13 @@ select.mini-select {
         });
         toast(res.cancelled ? 'Turn cancelled' : 'Nothing was running');
         setBusy(false);
+      } else {
+        setBusy(false);
       }
     } catch (err) {
-      toast('Cancel failed: ' + err.message, true);
+      setBusy(false);
+      updateActivityBadge();
+      toast('Turn cancelled (reset)');
     }
   }
 
@@ -4216,7 +4532,10 @@ select.mini-select {
     if (!list) return;
     list.innerHTML = '<div class="empty-hint">Loading workspace files\\u2026</div>';
     try {
-      var res = await apiFetch('/api/files');
+      var url = state.activeSessionId
+        ? ('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
+        : '/api/files';
+      var res = await apiFetch(url);
       var files = res.files || [];
       if (files.length === 0) {
         list.innerHTML = '<div class="empty-hint">The workspace has no readable files.</div>';
@@ -4246,7 +4565,11 @@ select.mini-select {
   async function attachFile(path) {
     if (state.attachments.some(function (a) { return a.path === path; })) return;
     try {
-      var res = await apiFetch('/api/files/content?path=' + encodeURIComponent(path));
+      var url = '/api/files/content?path=' + encodeURIComponent(path);
+      if (state.activeSessionId) {
+        url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      }
+      var res = await apiFetch(url);
       var content = res.content || '';
       var truncated = false;
       if (content.length > MAX_ATTACH_CHARS) {
@@ -4280,10 +4603,13 @@ select.mini-select {
   function updateActivityBadge() {
     var badge = el('shipActivityBadgeContainer');
     if (!badge) return;
-    var working = Object.keys(state.tasks).filter(function (id) {
-      var t = state.tasks[id];
-      return t.state === 'running' || t.state === 'needs_approval' || t.state === 'needs_input' || t.state === 'verifying';
-    });
+    var working = (state.mode === 'build' && state.activeRunId)
+      ? Object.keys(state.tasks).filter(function (id) {
+          var t = state.tasks[id];
+          if (state.activeRunState && TERMINAL_RUN_STATES[state.activeRunState]) return false;
+          return t.state === 'running' || t.state === 'needs_approval' || t.state === 'needs_input' || t.state === 'verifying';
+        })
+      : [];
     var isWorking = working.length > 0 || state.busy || state.streaming;
     if (!isWorking) {
       badge.classList.add('is-hidden');
@@ -4628,6 +4954,11 @@ select.mini-select {
    * the nearest one first. Returns true when something was closed.
    */
   function closeTopOverlay() {
+    var newSesModal = el('newSessionModal');
+    if (newSesModal && !newSesModal.classList.contains('is-hidden')) {
+      closeNewSessionModal();
+      return true;
+    }
     var modal = el('attachModal');
     if (modal && !modal.classList.contains('is-hidden')) {
       closeAttachModal();
@@ -4777,8 +5108,7 @@ select.mini-select {
       }
     });
     input.addEventListener('input', function () {
-      input.style.height = 'auto';
-      input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+      adjustTextareaHeight(input);
     });
   }
 
@@ -4796,6 +5126,12 @@ select.mini-select {
     var newInput = el('newSessionNameInput');
     if (newInput) {
       newInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); confirmCreateSession(); }
+      });
+    }
+    var newWsInput = el('newSessionWorkspaceInput');
+    if (newWsInput) {
+      newWsInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') { e.preventDefault(); confirmCreateSession(); }
       });
     }
@@ -4893,6 +5229,10 @@ select.mini-select {
     if (wsChip) wsChip.addEventListener('click', explainWorkspacePin);
     var filesWsLabel = el('filesWorkspaceLabel');
     if (filesWsLabel) filesWsLabel.addEventListener('click', explainWorkspacePin);
+    var settingsWsRoot = el('settingsWorkspaceRoot');
+    if (settingsWsRoot) settingsWsRoot.addEventListener('click', explainWorkspacePin);
+    var btnChangeSettingsWs = el('btnChangeSettingsWorkspace');
+    if (btnChangeSettingsWs) btnChangeSettingsWs.addEventListener('click', explainWorkspacePin);
 
     var attach = el('btnAttach');
     if (attach) attach.addEventListener('click', openAttachModal);
@@ -4935,11 +5275,29 @@ select.mini-select {
     if (signOutBtn) signOutBtn.addEventListener('click', handleSignOutAccount);
     var signInBtn = el('btnSignInAccount');
     if (signInBtn) signInBtn.addEventListener('click', handleSignInAccount);
+    var loginInput = el('loginUserInput');
+    if (loginInput) {
+      loginInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); handleSignInAccount(); }
+      });
+    }
 
     var toggleKeyBtn = el('btnToggleApiKey');
     if (toggleKeyBtn) toggleKeyBtn.addEventListener('click', handleToggleApiKey);
     var verifyAddBtn = el('btnVerifyAddCustomModel');
     if (verifyAddBtn) verifyAddBtn.addEventListener('click', verifyAndAddCustomModel);
+    var modelNameIn = el('customModelNameInput');
+    if (modelNameIn) {
+      modelNameIn.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); verifyAndAddCustomModel(); }
+      });
+    }
+    var apiKeyIn = el('customApiKeyInput');
+    if (apiKeyIn) {
+      apiKeyIn.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); verifyAndAddCustomModel(); }
+      });
+    }
 
     var autoToolToggle = el('toggleAutonomous');
     if (autoToolToggle) autoToolToggle.addEventListener('change', function () { saveSettings({ permissions: { autonomousToolExecution: autoToolToggle.checked } }); });

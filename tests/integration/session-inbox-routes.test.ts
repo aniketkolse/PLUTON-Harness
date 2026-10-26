@@ -106,7 +106,7 @@ describe('Session Inbox HTTP Routes', () => {
         headers,
         body: JSON.stringify({ title: 'Inbox Route Test' }),
       })
-      const createData = await createRes.json()
+      const createData = (await createRes.json()) as { session: { id: string } }
       expect(createRes.status).toBe(201)
       const session = createData.session
 
@@ -126,7 +126,10 @@ describe('Session Inbox HTTP Routes', () => {
       expect(p1.status).toBe(202)
       expect(p2.status).toBe(202)
 
-      const [data1, data2] = await Promise.all([p1.json(), p2.json()])
+      const [data1, data2] = (await Promise.all([p1.json(), p2.json()])) as [
+        { ok: boolean; status: string },
+        { ok: boolean; status: string },
+      ]
       expect(data1.ok).toBe(true)
       expect(data2.ok).toBe(true)
       const statuses = [data1.status, data2.status]
@@ -137,7 +140,7 @@ describe('Session Inbox HTTP Routes', () => {
       const detailRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${session.id}`, {
         headers,
       })
-      const detailData = await detailRes.json()
+      const detailData = (await detailRes.json()) as { session: { busy: boolean } }
       expect(detailData.session.busy).toBe(true)
 
       // Cancel turn and queue
@@ -145,7 +148,7 @@ describe('Session Inbox HTTP Routes', () => {
         method: 'POST',
         headers,
       })
-      const cancelData = await cancelRes.json()
+      const cancelData = (await cancelRes.json()) as { ok: boolean; cancelled: boolean }
       expect(cancelData.ok).toBe(true)
       expect(cancelData.cancelled).toBe(true)
     } finally {

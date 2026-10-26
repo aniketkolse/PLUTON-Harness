@@ -263,7 +263,7 @@ export class SessionRunner {
           text: assistantText,
         })
       }
-      const wasInterrupted = entry.interrupted === true
+      const wasInterrupted = (entry as { interrupted?: boolean }).interrupted === true
       if (wasInterrupted) {
         this.store.updateInboxState(item.id, 'cancelled')
       } else if (failed) {
