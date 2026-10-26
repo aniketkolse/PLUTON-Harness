@@ -2,7 +2,8 @@ name: CI
 
 # Local technical validation lives in `npm run release:check` (docs/RELEASE.md).
 # This workflow runs it plus the clean-install smoke on all three supported
-# host platforms, and the opt-in Docker/tmux E2E on Linux.
+# host platforms, a coverage threshold on Linux, and the opt-in Docker/tmux
+# E2E on Linux.
 #
 # It never publishes, tags or releases anything; permissions are read-only and
 # no repository secrets are referenced.
@@ -45,6 +46,10 @@ jobs:
 
       - name: Release gate (typecheck, tests, build, package, audit)
         run: npm run release:check
+
+      - name: Coverage gate (ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run test:coverage
 
       - name: Package smoke (clean temporary install)
         run: npm run smoke:package

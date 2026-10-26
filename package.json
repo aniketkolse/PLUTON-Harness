@@ -26,6 +26,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:live": "vitest run --config vitest.live.config.ts",
     "check": "npm run typecheck && npm run test",
@@ -41,6 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "26.6.5",
+    "@vitest/coverage-v8": "5.0.5",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }
