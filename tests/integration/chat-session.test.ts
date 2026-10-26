@@ -21,6 +21,24 @@ describe('ChatSession interactive loop', () => {
   let muse: MuseRecord
   let io: ScriptedIo
 
+  /**
+   * Poll until `predicate` holds. These tests exercise real timers; a fixed
+   * sleep fails under coverage when the worker pool starves the event loop.
+   */
+  const waitFor = async (
+    predicate: () => boolean,
+    description: string,
+    timeoutMs = 15_000,
+  ): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (!predicate()) {
+      if (Date.now() > deadline) {
+        throw new Error(`timed out after ${timeoutMs}ms waiting for ${description}`)
+      }
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'pluton-chat-session-'))
     db = openDatabase(join(tmpDir, 'pluton.sqlite'))
@@ -94,8 +112,11 @@ describe('ChatSession interactive loop', () => {
     // Send user message
     io.send('Hello muse')
 
-    // Allow async turn to process
-    await new Promise((r) => setTimeout(r, 20))
+    // Wait for the turn to persist both messages; a fixed sleep is flaky under coverage.
+    await waitFor(
+      () => store.listChatMessages(chatSessionRow.id).length >= 2,
+      'the turn to persist its user and assistant messages',
+    )
 
     // Check commits: header, user block (You label + text), assistant response (Hello operator!)
     expect(io.commits.some((c) => c.includes('Hello muse'))).toBe(true)
@@ -156,8 +177,11 @@ describe('ChatSession interactive loop', () => {
     // While busy (during delayMs: 50), send second prompt
     io.send('prompt 2')
 
-    // Wait for both to finish
-    await new Promise((r) => setTimeout(r, 120))
+    // Wait for both turns to finish.
+    await waitFor(
+      () => store.listChatMessages(chatSessionRow.id).length >= 4,
+      'both turns to persist their messages',
+    )
 
     const msgs = store.listChatMessages(chatSessionRow.id)
     expect(msgs.length).toBe(4)
@@ -199,12 +223,11 @@ describe('ChatSession interactive loop', () => {
     io.send('prompt 2')
 
     // Wait until the queued turn has persisted its user message (3 rows).
-    let msgs = store.listChatMessages(chatSessionRow.id)
-    for (let i = 0; i < 400 && msgs.length < 3; i++) {
-      await new Promise((r) => setTimeout(r, 5))
-      msgs = store.listChatMessages(chatSessionRow.id)
-    }
-    expect(msgs.length).toBe(3)
+    await waitFor(
+      () => store.listChatMessages(chatSessionRow.id).length >= 3,
+      'the queued turn to start',
+    )
+    expect(store.listChatMessages(chatSessionRow.id).length).toBe(3)
 
     io.press('d', { ctrl: true })
     const exitCode = await runPromise
@@ -243,13 +266,24 @@ describe('ChatSession interactive loop', () => {
     const runPromise = session.run()
 
     io.send('long calculation')
-    // Wait a brief tick for stream to yield partial text
-    await new Promise((r) => setTimeout(r, 30))
+    // Wait for the stream to render partial text before interrupting.
+    await waitFor(
+      () =>
+        io.frames.some((f) => stripAnsi(f.lines.join('\n')).includes('Starting to work...')),
+      'assistant partial text',
+    )
 
     // Interrupt with Escape
     io.press('escape')
 
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(
+      () => {
+        const rows = store.listChatMessages(chatSessionRow.id)
+        const meta = rows[1]?.meta as { interrupted?: boolean } | undefined
+        return rows.length >= 2 && meta?.interrupted === true
+      },
+      'the interrupted assistant message to persist',
+    )
 
     const msgs = store.listChatMessages(chatSessionRow.id)
     expect(msgs.length).toBe(2)
@@ -294,9 +328,20 @@ describe('ChatSession interactive loop', () => {
 
     // 2. Busy turn -> Ctrl+C interrupts
     io.send('stream job')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(
+      () =>
+        io.frames.some((f) => stripAnsi(f.lines.join('\n')).includes('Processing...')),
+      'assistant partial text',
+    )
     io.press('c', { ctrl: true })
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(
+      () => {
+        const rows = store.listChatMessages(chatSessionRow.id)
+        const meta = rows[1]?.meta as { interrupted?: boolean } | undefined
+        return rows.length >= 2 && meta?.interrupted === true
+      },
+      'the interrupted assistant message to persist',
+    )
     const msgs = store.listChatMessages(chatSessionRow.id)
     expect(msgs[1]?.meta).toMatchObject({ interrupted: true })
 
@@ -375,7 +420,10 @@ describe('ChatSession interactive loop', () => {
     await session.start()
     const runPromise = session.run()
 
-    await new Promise((r) => setTimeout(r, 120))
+    await waitFor(
+      () => pollCount > 0 && io.commits.some((c) => c.includes('Notice from poll')),
+      'the first poll tick to commit its notice',
+    )
     expect(pollCount).toBeGreaterThan(0)
     expect(io.commits.some((c) => c.includes('Notice from poll'))).toBe(true)
     // Run transitions emit exactly one compact system line.
@@ -461,17 +509,26 @@ describe('ChatSession interactive loop', () => {
 
     // 1. /status
     io.send('/status')
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () => io.commits.some((c) => c.includes(testRun.state)),
+      '/status output',
+    )
     expect(io.commits.some((c) => c.includes(testRun.state))).toBe(true)
 
     // 2. /approvals
     io.send('/approvals')
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () => io.commits.some((c) => c.includes(approval.id)),
+      '/approvals output',
+    )
     expect(io.commits.some((c) => c.includes(approval.id))).toBe(true)
 
     // 3. /approve
     io.send(`/approve ${approval.id}`)
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () => io.commits.some((c) => c.includes(`approved ${approval.id}`)),
+      '/approve output',
+    )
     expect(io.commits.some((c) => c.includes(`approved ${approval.id}`))).toBe(true)
     const approvedRow = store.getApproval(approval.id)
     expect(approvedRow.status).toBe('approved')
@@ -488,23 +545,39 @@ describe('ChatSession interactive loop', () => {
       expiresAt: null,
     })
     io.send(`/deny ${approval2.id}`)
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () => io.commits.some((c) => c.includes(`denied ${approval2.id}`)),
+      '/deny output',
+    )
     expect(io.commits.some((c) => c.includes(`denied ${approval2.id}`))).toBe(true)
 
     // 5. /run
     io.send('/run build feature Y')
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () =>
+        startedRunGoal === 'build feature Y' &&
+        io.commits.some((c) => c.includes('started run for build feature Y')),
+      '/run output',
+    )
     expect(startedRunGoal).toBe('build feature Y')
     expect(io.commits.some((c) => c.includes('started run for build feature Y'))).toBe(true)
 
     // 6. Unknown command
     io.send('/foobar')
-    await new Promise((r) => setTimeout(r, 20))
+    await waitFor(
+      () => io.commits.some((c) => c.includes("unknown command '/foobar'")),
+      'unknown-command output',
+    )
     expect(io.commits.some((c) => c.includes("unknown command '/foobar'"))).toBe(true)
 
     // 7. /new
     io.send('/new')
-    await new Promise((r) => setTimeout(r, 40))
+    await waitFor(
+      () =>
+        store.getChatSession(chatSessionRow.id).state === 'closed' &&
+        slashCtx.session.id !== chatSessionRow.id,
+      '/new to close the old session',
+    )
     const closedOld = store.getChatSession(chatSessionRow.id)
     expect(closedOld.state).toBe('closed')
     expect(slashCtx.session.id).not.toBe(chatSessionRow.id)
