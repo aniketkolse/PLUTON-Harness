@@ -170,6 +170,53 @@ describe('ChatSession interactive loop', () => {
     await runPromise
   })
 
+  it('waits for a queued turn before resolving exit so teardown cannot race a write', async () => {
+    const chatSessionRow = store.createChatSession({ projectId, museId: muse.id })
+    const adapter = new MockEngineAdapter({
+      script: [
+        { text: 'First response', outcome: 'success' },
+        // Long enough that the old fire-and-forget drain was still sleeping
+        // when run() resolved and afterEach closed the database.
+        { delayMs: 5_000, text: 'Second response', outcome: 'success' },
+      ],
+    })
+
+    const session = new ChatSession({
+      store,
+      projectId,
+      rootDir,
+      muse,
+      adapter,
+      io,
+      session: chatSessionRow,
+      mcpServers: [],
+    })
+
+    await session.start()
+    const runPromise = session.run()
+
+    io.send('prompt 1')
+    io.send('prompt 2')
+
+    // Wait until the queued turn has persisted its user message (3 rows).
+    let msgs = store.listChatMessages(chatSessionRow.id)
+    for (let i = 0; i < 400 && msgs.length < 3; i++) {
+      await new Promise((r) => setTimeout(r, 5))
+      msgs = store.listChatMessages(chatSessionRow.id)
+    }
+    expect(msgs.length).toBe(3)
+
+    io.press('d', { ctrl: true })
+    const exitCode = await runPromise
+    expect(exitCode).toBe(0)
+
+    // Exit must settle the interrupted queued turn, not just resolve while it
+    // is still in flight (the `database is not open` coverage flake).
+    const finalMsgs = store.listChatMessages(chatSessionRow.id)
+    expect(finalMsgs.length).toBe(4)
+    expect(finalMsgs[3]?.meta).toMatchObject({ interrupted: true })
+  })
+
   it('interrupts turn with Escape: marks block interrupted and records in meta', async () => {
     const chatSessionRow = store.createChatSession({ projectId, museId: muse.id })
     const adapter = new MockEngineAdapter({

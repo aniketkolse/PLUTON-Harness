@@ -135,6 +135,10 @@ export class ChatSession {
   private pollTimer: NodeJS.Timeout | null = null
   private resolveExit: ((code: number) => void) | null = null
   private activeTurnPromise: Promise<void> | null = null
+  /** True once exit/teardown starts: no queue drain or poll tick touches state. */
+  private stopped = false
+  /** Poll ticks currently awaiting the backend, settled by exit before close. */
+  private readonly pollTicks = new Set<Promise<void>>()
   private sigintExitPending = false
   private sigintTimer: NodeJS.Timeout | null = null
   private transcriptLines: string[] = []
@@ -290,7 +294,12 @@ export class ChatSession {
       if (this.deps.poll) {
         const intervalMs = this.deps.pollIntervalMs ?? 1500
         this.pollTimer = setInterval(() => {
-          void this.runPollTick()
+          const tick = this.runPollTick()
+          this.pollTicks.add(tick)
+          void tick.then(
+            () => this.pollTicks.delete(tick),
+            () => this.pollTicks.delete(tick),
+          )
         }, intervalMs)
       }
 
@@ -752,10 +761,18 @@ export class ChatSession {
 
     this.scheduleRedraw()
 
-    // Drain queue
-    if (this.viewState.queue.length > 0) {
+    // Drain queue. Chain onto the promise the caller already holds so exit()
+    // can await every turn; starting the next turn fire-and-forget let run()
+    // resolve (and the DB close) while a queued turn was still persisting.
+    if (!this.stopped && this.viewState.queue.length > 0) {
       const nextPrompt = this.viewState.queue.shift()!
-      this.activeTurnPromise = this.dispatchTurn(nextPrompt)
+      const current = this.activeTurnPromise ?? Promise.resolve()
+      this.activeTurnPromise = current
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .then(() => this.dispatchTurn(nextPrompt))
     }
   }
 
@@ -763,6 +780,7 @@ export class ChatSession {
     if (!this.deps.poll) return
     try {
       const res = await this.deps.poll()
+      if (this.stopped) return
       const { columns } = this.deps.io.size()
 
       // Lifecycle events feed the Orchestra inspector only. They are never
@@ -1097,6 +1115,7 @@ export class ChatSession {
   }
 
   stop(): void {
+    this.stopped = true
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer)
       this.pollTimer = null
@@ -1111,6 +1130,21 @@ export class ChatSession {
 
   private async exit(code: number): Promise<void> {
     this.stop()
+    // Stop the engine first so an in-flight turn cannot hold exit open, then
+    // settle all work that can still touch the store. Without this, run()
+    // resolved (and the caller closed the DB) while a queued turn or poll tick
+    // was still writing, surfacing as an unhandled `database is not open`.
+    try {
+      await this.engineSession?.interrupt()
+    } catch {
+      // best-effort: exit must not be blocked by an unresponsive engine
+    }
+    try {
+      await this.activeTurnPromise
+    } catch {
+      // a failed turn must not block exit
+    }
+    await Promise.allSettled([...this.pollTicks])
     try {
       await this.engineSession?.close()
     } catch {
