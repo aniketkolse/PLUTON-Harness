@@ -6,22 +6,32 @@ import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../
 import type { JsonValue, ShipRecord } from '../domain/models.ts'
 import { copyAllowlistedEnv } from '../engines/acp/env.ts'
 import type { Store } from '../store/store.ts'
+import { detectCapabilities } from './capabilities.ts'
 import {
   NativeExecutionProvider,
+  type ExecutionBridgeSpec,
   type ExecutionEvent,
   type ExecutionNetworkPolicy,
   type ExecutionSessionSpec,
   type NativeSpawnFn,
 } from './native.ts'
+import {
+  assertPolicySupported,
+  platformKey,
+  resolveEffectiveMode,
+  resolveEffectiveNetwork,
+  type NativeCapabilities,
+} from './policy.ts'
 
 /**
  * Native execution factory and config gates.
  *
- * The native provider is never selected implicitly: `sandbox.kind` must be
- * `native`, both partial-enforcement acknowledgements must be present, and the
- * effective network policy must be `open`. When those gates fail, dispatch
- * fails closed with actionable text; it never falls back to Docker,
- * local-process, or an unrestricted host run.
+ * The native provider is the only execution substrate. `sandbox.kind` must be
+ * `native`; Docker and local-process configs fail with migration guidance
+ * instead of falling back to a weaker runtime. Every effective mode/network
+ * pair is checked against the host capability report before any run row or
+ * process exists. `unconfined` additionally requires an explicit operator
+ * acknowledgement on every platform.
  */
 
 const NATIVE_PIDS_LIMIT = 512
@@ -35,59 +45,88 @@ function canonicalPath(path: string): string {
   return existsSync(path) ? realpathSync.native(path) : resolve(path)
 }
 
-/**
- * Validate the native sandbox policy before any run row, container, or engine
- * process is created. Throws when the operator has not acknowledged the
- * provider's real limits.
- */
-export function assertNativeSandboxConfig(config: PlutonConfig): void {
-  if (config.sandbox.kind !== 'native') {
-    throw new ValidationError(
-      `native execution requested but sandbox.kind is '${config.sandbox.kind}'`,
-    )
-  }
+/** Effective policy pairs a config can produce on this host. */
+function configPolicies(config: PlutonConfig): Array<{
+  id: string
+  mode: ReturnType<typeof resolveEffectiveMode>
+  network: ExecutionNetworkPolicy
+}> {
   const native = config.sandbox.native
-  if (!native.acknowledge_partial_enforcement) {
-    throw new SandboxUnavailableError(
-      'sandbox.kind: native runs engine processes directly on the host with partial enforcement ' +
-        '(no OS filesystem, network, or resource confinement)',
+  const mode = resolveEffectiveMode({
+    mode: native.mode,
+    modeByPlatform: native.mode_by_platform,
+  })
+  const ships = config.ships ?? config.muses ?? {}
+  const entries = Object.entries(ships)
+  if (entries.length === 0) {
+    return [
       {
-        fix:
-          'set sandbox.native.acknowledge_partial_enforcement: true after reading docs/NATIVE_EXECUTION.md, ' +
-          'or use sandbox.kind: docker',
+        id: '(runtime)',
+        mode,
+        network: resolveEffectiveNetwork({ runtimePolicy: config.runtime.network_policy }),
       },
-    )
+    ]
   }
-  if (!native.acknowledge_host_network) {
+  return entries.map(([id, ship]) => ({
+    id,
+    mode,
+    network: resolveEffectiveNetwork({
+      runtimePolicy: config.runtime.network_policy,
+      shipPolicy: ship.network_policy,
+    }),
+  }))
+}
+
+/**
+ * Reject a legacy container/dev config before any provider exists. Cheap (no
+ * capability probe, no process): callers that only plan or describe work use
+ * this so a config that cannot execute is never reported as a usable runtime.
+ */
+export function assertNativeSandboxKind(config: PlutonConfig): void {
+  if (config.sandbox.kind === 'native') return
+  const legacy = config.sandbox.kind
+  throw new SandboxUnavailableError(
+    `sandbox.kind '${legacy}' is no longer supported: native execution is the only substrate`,
+    {
+      fix:
+        legacy === 'docker'
+          ? 'remove sandbox.image/worker-image settings and set sandbox.kind: native; see docs/NATIVE_EXECUTION.md for the migration'
+          : 'set sandbox.kind: native and choose sandbox.native.mode: unconfined with acknowledge_unconfined: true for development',
+    },
+  )
+}
+
+/**
+ * Validate the native sandbox policy before any run row, helper process or
+ * engine process is created. Throws when the operator has not acknowledged
+ * `unconfined`, or when this host cannot enforce an effective policy.
+ */
+export function assertNativeSandboxConfig(
+  config: PlutonConfig,
+  capabilities: NativeCapabilities = detectCapabilities(),
+): void {
+  assertNativeSandboxKind(config)
+  const native = config.sandbox.native
+  const effectiveMode = resolveEffectiveMode({
+    mode: native.mode,
+    modeByPlatform: native.mode_by_platform,
+  })
+  if (effectiveMode === 'unconfined' && native.acknowledge_unconfined !== true) {
     throw new SandboxUnavailableError(
-      'sandbox.kind: native uses the host network; network isolation is not available',
+      `native execution mode 'unconfined' runs engine processes with no filesystem or network confinement on ${process.platform}`,
       {
         fix:
-          'set sandbox.native.acknowledge_host_network: true and runtime.network_policy: open, ' +
-          'or use sandbox.kind: docker when network isolation is required',
+          'set sandbox.native.acknowledge_unconfined: true after reading docs/NATIVE_EXECUTION.md, ' +
+          'or choose read-only/workspace-write on Linux',
       },
     )
   }
 
-  const policies: Array<{ id: string; policy: ExecutionNetworkPolicy }> = []
-  const ships = config.ships ?? config.muses ?? {}
-  for (const [id, ship] of Object.entries(ships)) {
-    policies.push({ id, policy: ship.network_policy ?? config.runtime.network_policy })
-  }
-  if (policies.length === 0) {
-    policies.push({ id: '(runtime)', policy: config.runtime.network_policy })
-  }
-  for (const { id, policy } of policies) {
-    if (policy !== 'open') {
-      throw new SandboxUnavailableError(
-        `native execution cannot enforce network_policy '${policy}' for ${id}: host processes share the host network`,
-        {
-          fix:
-            'set runtime.network_policy: open (and remove per-Ship restricted/none overrides) and ' +
-            'sandbox.native.acknowledge_host_network: true, or use sandbox.kind: docker',
-        },
-      )
-    }
+  for (const policy of configPolicies(config)) {
+    assertPolicySupported(
+      { platform: capabilities.platform, mode: policy.mode, network: policy.network },
+      capabilities,
+    )
   }
 }
 
@@ -95,18 +134,30 @@ export function assertNativeSandboxConfig(config: PlutonConfig): void {
 export function createNativeExecutionProvider(args: {
   config: PlutonConfig
   rootDir: string
+  /**
+   * Additional super-roots a session's allowed roots may live under. Needed for
+   * session workspaces outside the server project root: the provider still
+   * rejects every path outside `rootDir ∪ extraRoots`.
+   */
+  extraRoots?: string[]
   hostEnv?: Record<string, string | undefined>
   onEvent?: (event: ExecutionEvent) => void
   spawnFn?: NativeSpawnFn
   killTreeFn?: (pid: number, signal: NodeJS.Signals) => Promise<void>
   now?: () => Date
+  /** Test seam: reuse a capability report instead of probing again. */
+  capabilities?: NativeCapabilities
 }): NativeExecutionProvider {
-  assertNativeSandboxConfig(args.config)
+  const capabilities = args.capabilities ?? detectCapabilities()
+  assertNativeSandboxConfig(args.config, capabilities)
   const native = args.config.sandbox.native
   mkdirSync(workspaceDir(args.rootDir), { recursive: true })
   mkdirSync(engineHomesDir(args.rootDir), { recursive: true })
+  mkdirSync(join(args.rootDir, '.pluton', 'tmp', 'sessions'), { recursive: true, mode: 0o700 })
   return new NativeExecutionProvider({
     rootDir: args.rootDir,
+    capabilities,
+    ...(args.extraRoots !== undefined ? { extraRoots: args.extraRoots } : {}),
     ...(args.hostEnv !== undefined ? { hostEnv: args.hostEnv } : {}),
     ...(args.onEvent !== undefined ? { onEvent: args.onEvent } : {}),
     ...(args.spawnFn !== undefined ? { spawnFn: args.spawnFn } : {}),
@@ -123,8 +174,8 @@ export function createNativeExecutionProvider(args: {
  *
  * The mode is a hard ceiling, not a hint: chat and coordinator sessions are
  * read-only, and only a worker with a proven isolated task checkout receives
- * workspace-write. The provider cannot enforce writes, so reporting the
- * narrower mode is deliberate and the facts still say `partial`.
+ * workspace-write. On a platform whose effective mode is `unconfined`, that
+ * explicit mode wins because the operator acknowledged it in config.
  */
 export function nativeSpecForShip(args: {
   config: PlutonConfig
@@ -137,6 +188,10 @@ export function nativeSpecForShip(args: {
   engineHome: string
   isolatedCheckout: boolean
   sessionKind: 'run' | 'chat'
+  /** Extra absolute roots this session may use as its cwd (session workspace). */
+  extraAllowedRoots?: string[]
+  /** Host tool-bridge endpoint; required for restricted network sessions. */
+  bridge?: ExecutionBridgeSpec
   hostEnv?: Record<string, string | undefined>
 }): ExecutionSessionSpec {
   if (args.config.sandbox.kind !== 'native') {
@@ -148,15 +203,10 @@ export function nativeSpecForShip(args: {
   }
   const native = args.config.sandbox.native
   const shipConfig = args.config.ships[ship.id]
-  const network: ExecutionNetworkPolicy =
-    shipConfig?.network_policy ?? args.config.runtime.network_policy
-  if (network !== 'open') {
-    throw new PolicyDeniedError(
-      `native execution cannot run ship '${ship.id}' with network_policy '${network}'; ` +
-        'host processes share the host network. Set runtime.network_policy: open and ' +
-        'sandbox.native.acknowledge_host_network: true, or use sandbox.kind: docker.',
-    )
-  }
+  const network: ExecutionNetworkPolicy = resolveEffectiveNetwork({
+    runtimePolicy: args.config.runtime.network_policy,
+    shipPolicy: shipConfig?.network_policy,
+  })
 
   const requiresIsolatedCheckout =
     args.sessionKind === 'run' && ship.workspacePolicy === 'isolated-task-checkout'
@@ -167,14 +217,27 @@ export function nativeSpecForShip(args: {
     )
   }
 
+  const effectiveMode = resolveEffectiveMode({
+    mode: native.mode,
+    modeByPlatform: native.mode_by_platform,
+  })
   const mode =
-    native.mode === 'read-only'
-      ? 'read-only'
-      : args.sessionKind === 'chat'
+    effectiveMode === 'unconfined'
+      ? 'unconfined'
+      : effectiveMode === 'read-only'
         ? 'read-only'
-        : args.isolatedCheckout && ship.workspacePolicy === 'isolated-task-checkout'
-          ? 'workspace-write'
-          : 'read-only'
+        : args.sessionKind === 'chat'
+          ? 'read-only'
+          : args.isolatedCheckout && ship.workspacePolicy === 'isolated-task-checkout'
+            ? 'workspace-write'
+            : 'read-only'
+
+  if (network === 'restricted' && args.bridge === undefined) {
+    throw new PolicyDeniedError(
+      `ship '${ship.id}' uses network_policy: restricted but no session tool bridge is available; ` +
+        'orchestrated sessions must provide an AF_UNIX bridge endpoint for the loopback proxy',
+    )
+  }
 
   // An isolated worker must run in its own task checkout, not merely somewhere
   // inside the (broader) provider roots. The supervisor already passes the
@@ -206,9 +269,11 @@ export function nativeSpecForShip(args: {
       args.rootDir,
       workspaceDir(args.rootDir),
       join(engineHomesDir(args.rootDir)),
+      ...(args.extraAllowedRoots ?? []),
     ],
     mode,
     network,
+    ...(args.bridge !== undefined && network === 'restricted' ? { bridge: args.bridge } : {}),
     env: copyAllowlistedEnv(native.env_allowlist, args.hostEnv ?? process.env),
     limits: {
       cpus: shipConfig?.limits?.cpu ?? args.config.runtime.default_cpu_limit,
@@ -249,3 +314,6 @@ export function appendExecutionEvent(
     payload,
   })
 }
+
+/** Export for doctor/status callers that need the effective platform key. */
+export { platformKey }

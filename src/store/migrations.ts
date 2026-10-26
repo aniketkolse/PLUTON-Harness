@@ -1,5 +1,6 @@
 import { InternalError } from '../domain/errors.ts'
 import { getUserVersion, setUserVersion, withTx, type DatabaseSync } from './db.ts'
+import { createVerifiedBackup, type BackupResult } from './backup.ts'
 
 /**
  * Forward-only numbered migrations (ADR-0002). Rules:
@@ -363,6 +364,46 @@ export const MIGRATIONS: Migration[] = [
       `CREATE UNIQUE INDEX idx_terminals_project_ship ON terminals(project_id, IFNULL(ship_id, ''))`,
     ],
   },
+  {
+    version: 9,
+    name: 'session-workspaces',
+    // Chat sessions own the workspace they operate on. NULL means "inherit the
+    // server project root" for sessions created before this migration; new
+    // sessions persist their root explicitly. A run records the workspace and
+    // originating session it was started from so background work stays bound
+    // to that session even when the operator switches the visible session.
+    statements: [
+      `ALTER TABLE chat_sessions ADD COLUMN workspace_root TEXT`,
+      `ALTER TABLE runs ADD COLUMN workspace_root TEXT`,
+      `ALTER TABLE runs ADD COLUMN origin_session_id TEXT`,
+    ],
+  },
+  {
+    version: 10,
+    name: 'native-execution-sessions',
+    // Additive table changes only. Legacy Docker/local-process rows stay in
+    // place as read-only history; the active-row partial index lets a shipped
+    // row and a new native session coexist without deleting the old one or
+    // breaking terminals.sandbox_id references. No table is rebuilt or dropped.
+    statements: [
+      `ALTER TABLE sandboxes ADD COLUMN active INTEGER NOT NULL DEFAULT 1`,
+      `ALTER TABLE sandboxes ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE sandboxes ADD COLUMN execution_mode TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN network_policy TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN helper_version TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN policy_json TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN session_state TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN last_seen_at TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN exit_code INTEGER`,
+      `ALTER TABLE sandboxes ADD COLUMN started_at TEXT`,
+      `ALTER TABLE sandboxes ADD COLUMN ended_at TEXT`,
+      `UPDATE sandboxes SET legacy = 1, active = 0, session_state = 'legacy'
+       WHERE kind IN ('docker', 'local-process')`,
+      `DROP INDEX IF EXISTS idx_sandboxes_project_ship`,
+      `CREATE UNIQUE INDEX idx_sandboxes_active_ship
+       ON sandboxes(project_id, IFNULL(ship_id, '')) WHERE active = 1`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version
@@ -381,14 +422,57 @@ export function migrate(db: DatabaseSync): MigrationResult {
       { details: { dbVersion: from, supported: SCHEMA_VERSION } },
     )
   }
-  const applied: string[] = []
-  for (const migration of MIGRATIONS) {
-    if (migration.version <= from) continue
-    withTx(db, () => {
+  const pending = MIGRATIONS.filter((migration) => migration.version > from)
+  if (pending.length === 0) return { from, to: from, applied: [] }
+
+  // One transaction for the whole pending set: a crash or a failing statement
+  // leaves the database exactly at `from`, not at an intermediate version.
+  withTx(db, () => {
+    for (const migration of pending) {
       for (const sql of migration.statements) db.exec(sql)
       setUserVersion(db, migration.version)
-    })
-    applied.push(`v${migration.version}:${migration.name}`)
+    }
+  })
+  return {
+    from,
+    to: getUserVersion(db),
+    applied: pending.map((migration) => `v${migration.version}:${migration.name}`),
   }
-  return { from, to: getUserVersion(db), applied }
+}
+
+export interface MigrateWithBackupResult extends MigrationResult {
+  backup: BackupResult | null
+}
+
+/**
+ * Bootstrap entry point: verify a pre-migration snapshot before running any
+ * pending migration. New databases (version 0) have nothing to preserve and are
+ * created directly; in-memory test databases are explicitly exempt.
+ */
+export function migrateWithBackup(
+  db: DatabaseSync,
+  args: {
+    dbPath: string
+    backupDir: string
+    now?: () => Date
+  },
+): MigrateWithBackupResult {
+  const from = getUserVersion(db)
+  if (from > SCHEMA_VERSION) {
+    throw new InternalError(
+      `database schema version ${from} is newer than this build supports (${SCHEMA_VERSION}) — upgrade Pluton-Harness`,
+      { details: { dbVersion: from, supported: SCHEMA_VERSION } },
+    )
+  }
+  const backup =
+    from > 0 && from < SCHEMA_VERSION
+      ? createVerifiedBackup(db, {
+          dbPath: args.dbPath,
+          backupDir: args.backupDir,
+          label: `pre-v${SCHEMA_VERSION}`,
+          ...(args.now !== undefined ? { now: args.now } : {}),
+        })
+      : null
+  const result = migrate(db)
+  return { ...result, backup }
 }

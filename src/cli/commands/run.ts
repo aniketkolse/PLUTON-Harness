@@ -4,7 +4,6 @@ import {
   ConfigError,
   InternalError,
   NotFoundError,
-  SandboxUnavailableError,
   StateTransitionError,
   ValidationError,
 } from '../../domain/errors.ts'
@@ -12,10 +11,7 @@ import type { JsonValue, ShipRecord, RunRecord } from '../../domain/models.ts'
 import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../../domain/state.ts'
 import { redactProseSecrets } from '../../util/redact.ts'
 import { stripControlChars } from '../../util/sanitize.ts'
-import type { AcpSpawnFn } from '../../engines/acp/client.ts'
-import { engineAdapterForShip, type EngineIsolationFacts } from '../../engines/approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
-import { dockerExecSpawn, mapHostPathToContainer, type DockerExecContext } from '../../engines/docker-exec.ts'
 import { nativeAdapterFor } from '../../execution/adapter.ts'
 import {
   appendExecutionEvent,
@@ -23,6 +19,7 @@ import {
   nativeSpecForShip,
 } from '../../execution/factory.ts'
 import type { NativeExecutionProvider } from '../../execution/native.ts'
+import type { ExecutionBridgeSpec } from '../../execution/native.ts'
 import {
   runBudgetFromRuntime,
   supervisorSettingsFromRuntime,
@@ -36,25 +33,14 @@ import {
   type WorkerLifecycleEvent,
 } from '../../orchestrator/supervisor.ts'
 import { WakeupRegistry } from '../../orchestrator/wakeups.ts'
-import { createSandboxManager } from '../../sandbox/factory.ts'
-import {
-  DEFAULT_WORKER_IMAGE_TAG,
-  dispatchReadiness,
-  WorkerImageManager,
-  type WorkerImageProbe,
-} from '../../sandbox/image.ts'
-import { HOST_GATEWAY_HOSTNAME } from '../../sandbox/ship-containers.ts'
-import type { ShipContainerSpec } from '../../sandbox/ship-containers.ts'
-import { planShipNetwork, verifyRestrictedEgress } from '../../sandbox/network.ts'
-import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime, type ToolBridgeLimits } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
+import { bridgeEndpointOf } from '../../tools/http-transport.ts'
 import { PLUTON_VERSION } from '../../version.ts'
 import { GitWorkspaceManager } from '../../workspace/manager.ts'
 import type { ProjectContext } from '../context.ts'
 import { resolveShipByRef } from './mcp.ts'
-import { shipContainerMounts, provisionShipContainer } from './ship-provision.ts'
 
 /**
  * `pluton run` — the CLI entry into supervised execution (Phase 6, ADR-0006/0007).
@@ -69,11 +55,9 @@ import { shipContainerMounts, provisionShipContainer } from './ship-provision.ts
  *   retried command can never create a second run.
  * - Engine auth lives in per-Ship engine homes (ADR-0008); `engineEnv` adds
  *   nothing on top of each adapter's own allowlist.
- * - `sandbox.kind: native` (the default) runs engines as host processes under
- *   the native execution provider. Legacy `sandbox.kind: docker` runs engines
- *   inside per-Ship containers through `docker exec`, with pinned in-image
- *   binaries and the bridge exposed on the host gateway; the acknowledged
- *   dev-only `local-process` mode keeps host child processes.
+ * - Native host execution is the only substrate: `createNativeExecutionProvider`
+ *   rejects legacy `docker` / `local-process` configs with migration guidance
+ *   before any run row or process exists.
  */
 
 export interface RunCommandOptions {
@@ -84,14 +68,8 @@ export interface RunCommandOptions {
 }
 
 export interface RunDeps {
-  /** Test seam: adapter per Ship; default = the built-in engine registry. */
+  /** Test seam: adapter per Ship; default = the native provider. */
   adapterFor?: (ship: ShipRecord) => EngineAdapter
-  /** Test seam: replaces the Docker sandbox manager in container mode. */
-  sandboxManager?: SandboxManager
-  /** Test seam: replaces the worker-image probe in container mode. */
-  workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
-  /** Test seam: replaces the process spawn behind `docker exec` children. */
-  dockerSpawn?: AcpSpawnFn
   /**
    * Live inspector sink (the SPA server wires this to its SSE broadcaster).
    * Headless CLI runs leave it unset.
@@ -111,13 +89,6 @@ export interface RunSummary {
   blockedTasks: string[]
   verificationPending: boolean
 }
-
-/** Engine binaries pinned by the worker image's `engines` profile (docker/worker/Dockerfile). */
-const CONTAINER_ENGINE_BINARIES: Readonly<Record<string, string>> = {
-  opencode: '/usr/local/bin/opencode',
-}
-
-const CONTAINER_PIDS_LIMIT = 512
 
 export function resolveManager(ctx: ProjectContext, store: Store, managerRef: string | undefined): ShipRecord {
   if (managerRef !== undefined) return resolveShipByRef(store, managerRef)
@@ -226,120 +197,6 @@ export function installRunCancelSignals(store: Store, runId: string): () => void
 }
 
 /**
- * Container mode: fail closed before any run row exists — daemon probe, worker
- * image readiness (the `engines` profile is required), then one long-lived
- * container and a `docker exec` spawn context per enabled Ship. Mount
- * construction and provisioning live in `ship-provision.ts` (shared with the
- * approvals inbox); the once-per-run probe/readiness checks stay here.
- */
-export async function prepareContainerMode(
-  ctx: ProjectContext,
-  store: Store,
-  projectId: string,
-  manager: SandboxManager,
-  imageProbeOverride: ((rootDir: string) => Promise<WorkerImageProbe>) | undefined,
-  opts?: { shipIds?: string[] },
-): Promise<Map<string, DockerExecContext>> {
-  const probe = await manager.probe()
-  if (!probe.available) {
-    throw new SandboxUnavailableError(`container-mode runs need a reachable sandbox: ${probe.detail}`, {
-      fix: probe.fix,
-    })
-  }
-  const imageTag = ctx.loaded.config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
-  const imageProbe =
-    imageProbeOverride !== undefined
-      ? await imageProbeOverride(ctx.rootDir)
-      : await new WorkerImageManager().probe(ctx.rootDir, imageTag)
-  const readiness = dispatchReadiness(true, imageProbe, { requireEngines: true })
-  if (!readiness.ready) {
-    throw new SandboxUnavailableError(
-      `worker image '${imageTag}' is not ready for container-mode runs:\n  - ${readiness.warnings.join('\n  - ')}`,
-    )
-  }
-
-  const runtime = ctx.loaded.config.runtime
-  const workspacesRoot = workspaceDir(ctx.rootDir)
-  const byShip = new Map<string, DockerExecContext>()
-  const ensuredNetworks = new Set<string>()
-  const allowed = opts?.shipIds ? new Set(opts.shipIds) : null
-  for (const ship of store.listShips()) {
-    if (!ship.enabled) continue
-    if (allowed !== null && !allowed.has(ship.id)) continue
-    const mounts = shipContainerMounts({ ship, rootDir: ctx.rootDir, workspacesRoot })
-    const plan = await planShipNetwork({
-      manager,
-      config: ctx.loaded.config,
-      shipId: ship.id,
-      projectId,
-      ensured: ensuredNetworks,
-    })
-    await provisionShipContainer({
-      manager,
-      store,
-      projectId,
-      ship,
-      image: imageTag,
-      ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
-      limits: {
-        cpus: runtime.default_cpu_limit,
-        memoryMb: runtime.default_memory_mb,
-        pids: CONTAINER_PIDS_LIMIT,
-      },
-      network: plan.policy,
-      ...(plan.customNetwork !== undefined ? { customNetwork: plan.customNetwork } : {}),
-      rootDir: ctx.rootDir,
-      workspacesRoot,
-    })
-    const containerName = sandboxContainerName(projectId, ship.id)
-    // Prove the kernel/Docker denial from inside before any engine session
-    // starts. A container that can still reach the internet must never be
-    // used for a `restricted` run.
-    if (plan.policy === 'restricted') await verifyRestrictedEgress(manager, containerName)
-    byShip.set(ship.id, {
-      containerName,
-      mounts: mounts.map((mount) => ({ hostPath: mount.hostPath, containerPath: mount.containerPath })),
-      env: {},
-    })
-  }
-  return byShip
-}
-
-/**
- * The container-mode adapter per Ship: pinned in-image binaries, `docker exec`
- * as the process spawn, Linux platform env construction (the engine process
- * runs inside the container, never on the host). `session` carries the proven
- * isolation fact through to the approval policy — a container alone is not
- * isolation (chat/SPA sessions are mounted at the project root inside it).
- */
-export function containerAdapterFor(
-  ship: ShipRecord,
-  contexts: Map<string, DockerExecContext>,
-  dockerSpawn: AcpSpawnFn | undefined,
-  session: EngineIsolationFacts = { isolatedCheckout: false },
-): EngineAdapter {
-  const exec = contexts.get(ship.id)
-  if (exec === undefined) {
-    throw new InternalError(`container mode: no container was prepared for Ship '${ship.id}'`)
-  }
-  const binaryPath = CONTAINER_ENGINE_BINARIES[ship.engineKind]
-  if (binaryPath === undefined && ship.engineKind !== 'mock') {
-    throw new ValidationError(
-      `engine '${ship.engineKind}' cannot run in container mode: the worker image pins no binary for it (available: opencode)`,
-    )
-  }
-  return engineAdapterForShip(ship, {
-    spawnFn: dockerExecSpawn(exec, dockerSpawn),
-    platform: 'linux',
-    isolatedCheckout: session.isolatedCheckout,
-    // The ACP session cwd must name a container path; the process spawn cwd
-    // (a host path) is mapped independently inside dockerExecSpawn.
-    mapWorkdir: (hostPath: string) => mapHostPathToContainer(hostPath, exec.mounts),
-    ...(binaryPath !== undefined ? { binaryPath } : {}),
-  })
-}
-
-/**
  * Create the per-run native provider before any run row exists. Config gates
  * (acknowledgements, network policy) throw here, so a rejected native config
  * never leaves a started run behind. The event sink is bound to the run id once
@@ -354,8 +211,7 @@ function createRunNativeProvider(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
-): RunNativeProvider | null {
-  if (ctx.loaded.config.sandbox.kind !== 'native') return null
+): RunNativeProvider {
   let runId: string | null = null
   const provider = createNativeExecutionProvider({
     config: ctx.loaded.config,
@@ -381,20 +237,18 @@ export function createRunSupervisor(args: {
   wakeups: WakeupRegistry
   http: ToolHttpServer
   bridgeUrl: string
-  containerContexts: Map<string, DockerExecContext> | null
+  /** Host bridge endpoints for `restricted` native sessions (loopback proxy). */
+  executionBridge?: ExecutionBridgeSpec
   nativeProvider?: NativeExecutionProvider | null
   deps: RunDeps
   diagnostic: (line: string) => void
   skipManager?: boolean
 }): RunSupervisor {
-  const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, containerContexts, deps, diagnostic } = args
+  const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, deps, diagnostic } = args
   const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
   const budgets = usageBudgetsFromRuntime(ctx.loaded.config.runtime)
   let supervisorAdapterFor: SupervisorAdapterFactory | undefined = deps.adapterFor
-  if (supervisorAdapterFor === undefined && containerContexts !== null) {
-    const contexts = containerContexts
-    supervisorAdapterFor = (ship, session) => containerAdapterFor(ship, contexts, deps.dockerSpawn, session)
-  } else if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
+  if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
     const nativeProvider = args.nativeProvider
     supervisorAdapterFor = (ship, session) =>
       nativeAdapterFor(ship, {
@@ -410,6 +264,7 @@ export function createRunSupervisor(args: {
             engineHome: req.configDir,
             isolatedCheckout: session.isolatedCheckout,
             sessionKind: 'run',
+            ...(args.executionBridge !== undefined ? { bridge: args.executionBridge } : {}),
           }),
       })
   }
@@ -475,6 +330,8 @@ export interface StartRunOptions {
   acceptance: string[]
   managerRef?: string
   requestId?: string
+  workspaceRoot?: string | null
+  originSessionId?: string | null
 }
 
 /** Create a run (same admission path as runRun) and drive it in the background. */
@@ -494,13 +351,11 @@ export function startRunInBackground(
   const runtime = ctx.loaded.config.runtime
   const budget = runBudgetFromRuntime(runtime)
 
-  let native: RunNativeProvider | null = null
-  if (ctx.loaded.config.sandbox.kind === 'native') {
-    native = createRunNativeProvider(ctx, store, projectId)
-  } else if (ctx.loaded.config.sandbox.kind === 'local-process') {
-    // Gate only: throws unless local_process_acknowledged is set.
-    createSandboxManager(ctx.loaded.config)
-  }
+  const effectiveCtx: ProjectContext = opts.workspaceRoot && opts.workspaceRoot !== ctx.rootDir
+    ? { ...ctx, rootDir: opts.workspaceRoot }
+    : ctx
+
+  const native = createRunNativeProvider(effectiveCtx, store, projectId)
 
   const payload: JsonValue = {
     goal,
@@ -517,6 +372,8 @@ export function startRunInBackground(
       acceptanceCriteria: opts.acceptance,
       managerShipId: manager.id,
       budget,
+      workspaceRoot: opts.workspaceRoot ?? ctx.rootDir,
+      originSessionId: opts.originSessionId,
     })
 
   let run: RunRecord
@@ -541,12 +398,12 @@ export function startRunInBackground(
       run = createRun()
     }
   } catch (error) {
-    if (native !== null) void native.provider.close()
+    void native.provider.close()
     throw error
   }
 
   if (duplicate) {
-    if (native !== null) void native.provider.close()
+    void native.provider.close()
     store.appendEvent({
       projectId,
       runId: run.id,
@@ -558,32 +415,23 @@ export function startRunInBackground(
       done: Promise.resolve(summaryFromRecords(store, run)),
     }
   }
-  native?.setRunId(run.id)
+  native.setRunId(run.id)
 
   const done = (async (): Promise<RunSummary> => {
     try {
-    let containerContexts: Map<string, DockerExecContext> | null = null
-    if (ctx.loaded.config.sandbox.kind === 'docker') {
-      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
-      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
-    }
-
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
     const http = new ToolHttpServer({
       serverName: 'pluton-tools',
       serverVersion: PLUTON_VERSION,
-      ...(containerContexts !== null ? { host: '::' } : {}),
+      ...(process.platform === 'linux' ? { unixSocket: true } : {}),
     })
     const started = await http.start()
-    const bridgeUrl =
-      containerContexts !== null
-        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
-        : `${http.url as string}mcp`
+    const bridgeUrl = `${http.url as string}mcp`
 
     try {
       const supervisor = createRunSupervisor({
-        ctx,
+        ctx: effectiveCtx,
         store,
         projectId,
         run,
@@ -591,8 +439,10 @@ export function startRunInBackground(
         wakeups,
         http,
         bridgeUrl,
-        containerContexts,
-        nativeProvider: native?.provider ?? null,
+        ...(bridgeEndpointOf(started) !== undefined
+          ? { executionBridge: bridgeEndpointOf(started) }
+          : {}),
+        nativeProvider: native.provider,
         deps,
         diagnostic: hooks?.diagnostic ?? ((line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
@@ -613,7 +463,7 @@ export function startRunInBackground(
       await http.stop()
     }
     } finally {
-      await native?.provider.close()
+      await native.provider.close()
     }
   })()
 
@@ -691,22 +541,11 @@ export async function runRun(
     const budget = runBudgetFromRuntime(runtime)
     const settings = supervisorSettingsFromRuntime(runtime)
 
-    // Container mode (sandbox.kind: docker — the legacy container provider)
-    // provisions the per-Ship containers before the run row exists, so a daemon
-    // or image failure never leaves a started run behind. Native creates its
-    // provider and validates acknowledgements/network policy here too; an
-    // unacknowledged local-process config is refused the same way every sandbox
-    // consumer refuses it.
-    let containerContexts: Map<string, DockerExecContext> | null = null
-    if (ctx.loaded.config.sandbox.kind === 'native') {
-      native = createRunNativeProvider(ctx, store, projectId)
-    } else if (ctx.loaded.config.sandbox.kind === 'docker') {
-      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
-      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
-    } else {
-      // Gate only: throws unless local_process_acknowledged is set.
-      createSandboxManager(ctx.loaded.config)
-    }
+    // Native is the only substrate: this validates mode/network policy and the
+    // explicit `unconfined` acknowledgement before the run row exists, so a
+    // rejected config never leaves a started run behind. Legacy `docker` /
+    // `local-process` configs fail here with migration guidance.
+    native = createRunNativeProvider(ctx, store, projectId)
 
     const payload: JsonValue = {
       goal,
@@ -723,6 +562,7 @@ export async function runRun(
         acceptanceCriteria: opts.acceptance,
         managerShipId: manager.id,
         budget,
+        workspaceRoot: ctx.rootDir,
       })
 
     let run: RunRecord
@@ -755,23 +595,17 @@ export async function runRun(
       })
       return summaryFromRecords(store, run)
     }
-    native?.setRunId(run.id)
+    native.setRunId(run.id)
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
     const http = new ToolHttpServer({
       serverName: 'pluton-tools',
       serverVersion: PLUTON_VERSION,
-      // Container mode: the bridge must be reachable through the host
-      // gateway from inside the containers (per-session bearer tokens still
-      // guard every request); host mode stays loopback-only.
-      ...(containerContexts !== null ? { host: '0.0.0.0' } : {}),
+      ...(process.platform === 'linux' ? { unixSocket: true } : {}),
     })
     const started = await http.start()
-    const bridgeUrl =
-      containerContexts !== null
-        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
-        : `${http.url as string}mcp`
+    const bridgeUrl = `${http.url as string}mcp`
     try {
       const supervisor = createRunSupervisor({
         ctx,
@@ -782,8 +616,10 @@ export async function runRun(
         wakeups,
         http,
         bridgeUrl,
-        containerContexts,
-        nativeProvider: native?.provider ?? null,
+        ...(bridgeEndpointOf(started) !== undefined
+          ? { executionBridge: bridgeEndpointOf(started) }
+          : {}),
+        nativeProvider: native.provider,
         deps,
         diagnostic: (line) => {
           process.stderr.write(`run ${run.id}: ${line}\n`)
@@ -837,34 +673,27 @@ export async function resumeRun(
       throw new ValidationError(`run ${runId} is '${run.state}'; cannot resume a terminated run`)
     }
 
-    const runtime = ctx.loaded.config.runtime
-    let containerContexts: Map<string, DockerExecContext> | null = null
-    if (ctx.loaded.config.sandbox.kind === 'native') {
-      native = createRunNativeProvider(ctx, store, projectId)
-      native?.setRunId(run.id)
-    } else if (ctx.loaded.config.sandbox.kind === 'docker') {
-      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
-      containerContexts = await prepareContainerMode(ctx, store, projectId, sandboxManager, deps.workerImageProbe)
-    } else {
-      createSandboxManager(ctx.loaded.config)
-    }
+    const effectiveCtx: ProjectContext = run.workspaceRoot && run.workspaceRoot !== ctx.rootDir
+      ? { ...ctx, rootDir: run.workspaceRoot }
+      : ctx
+
+    const runtime = effectiveCtx.loaded.config.runtime
+    native = createRunNativeProvider(effectiveCtx, store, projectId)
+    native.setRunId(run.id)
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
     const http = new ToolHttpServer({
       serverName: 'pluton-tools',
       serverVersion: PLUTON_VERSION,
-      ...(containerContexts !== null ? { host: '::' } : {}),
+      ...(process.platform === 'linux' ? { unixSocket: true } : {}),
     })
     const started = await http.start()
-    const bridgeUrl =
-      containerContexts !== null
-        ? `http://${HOST_GATEWAY_HOSTNAME}:${String(started.port)}/mcp`
-        : `${http.url as string}mcp`
+    const bridgeUrl = `${http.url as string}mcp`
 
     try {
       const supervisor = createRunSupervisor({
-        ctx,
+        ctx: effectiveCtx,
         store,
         projectId,
         run,
@@ -872,8 +701,10 @@ export async function resumeRun(
         wakeups,
         http,
         bridgeUrl,
-        containerContexts,
-        nativeProvider: native?.provider ?? null,
+        ...(bridgeEndpointOf(started) !== undefined
+          ? { executionBridge: bridgeEndpointOf(started) }
+          : {}),
+        nativeProvider: native.provider,
         deps,
         skipManager: opts.skipManager ?? true,
         diagnostic: (line) => {

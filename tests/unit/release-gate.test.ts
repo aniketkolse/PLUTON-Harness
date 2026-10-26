@@ -101,7 +101,7 @@ describe('findForbiddenPackFiles', () => {
         'bin/pluton.js',
         'dist/cli/main.js',
         'dist/cli/main.js.map',
-        'docker/worker/Dockerfile',
+        'native/landlock-run/manifest.json',
         'templates/teams/full-stack.yaml',
         'README.md',
         'THIRD_PARTY_NOTICES.md',

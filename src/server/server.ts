@@ -8,12 +8,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import type { LoadedConfig } from '../config/load.ts'
 import type { Store } from '../store/store.ts'
-import type { SandboxManager } from '../sandbox/types.ts'
 import { InternalError } from '../domain/errors.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { clearServerInstance, writeServerInstance } from './instance.ts'
 import { ServerLogWatcher } from './log-watcher.ts'
-import { ApiRouter } from './routes.ts'
+import { ApiRouter, type RouteContext } from './routes.ts'
 import {
   generateServerToken,
   isLoopbackRequest,
@@ -34,8 +33,8 @@ export interface AppServerOptions {
    * tunable; the watcher's own default applies when omitted.
    */
   logWatcherIntervalMs?: number
-  /** Test seam: replaces the Docker sandbox manager for server-owned runs. */
-  sandboxManager?: SandboxManager
+  /** Test seam: replaces native folder picker. */
+  pickFolderFn?: RouteContext['pickFolderFn']
 }
 
 export interface AppServerInstance {
@@ -57,7 +56,7 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     projectId: options.projectId,
     loaded: options.loaded,
     broadcaster,
-    ...(options.sandboxManager !== undefined ? { sandboxManager: options.sandboxManager } : {}),
+    ...(options.pickFolderFn !== undefined ? { pickFolderFn: options.pickFolderFn } : {}),
   })
   const logWatcher = new ServerLogWatcher({
     store: options.store,

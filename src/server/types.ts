@@ -51,6 +51,14 @@ export interface WorkspaceSummary {
   }>
   activeRun: { id: string; state: string; goal: string } | null
   approvalsPending: number
+  /**
+   * Session-scoped workspace root, present only when the requested session
+   * overrides the server project root. NULL/absent means the server pinned
+   * the project root (the legacy behavior).
+   */
+  sessionId?: string | null
+  workspaceRoot?: string | null
+  sessionScoped?: boolean
 }
 
 export interface SessionDetailView {
@@ -134,6 +142,7 @@ export type ServerSSEEvent =
   | { type: 'approval_decided'; approval: ApprovalRecord }
   | { type: 'run_state'; runId: string; state: string; goal: string; error?: string; summary?: string }
   | { type: 'task_state'; taskId: string; runId: string; state: string; title: string }
+  | { type: 'workspace_changed'; sessionId: string; workspaceRoot: string | null }
   | { type: 'heartbeat'; timestamp: number }
   | WorkerSSEEvent
 

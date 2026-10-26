@@ -42,7 +42,7 @@ Composition is static and config-driven: one `pluton.yaml` per project, validate
 | `src/orchestrator/` | 8 | Supervisor, task-graph admission, wakeups, circuit breaker, keyed mutex, file-lease manager, usage ledger, run-setup mapping |
 | `src/engines/` | 3 + acp(5) + contract(2) + opencode(3) + mock | Engine contract, ACP stdio client, adapters, docker-exec spawn, approval-mode mapping, discovery |
 | `src/tools/` | 6 | Restricted tool catalog + handlers, authorization bridge, MCP stdio server, HTTP transport, operator tool catalog |
-| `src/sandbox/` | 6 | Docker lifecycle, worker image build/probe, Ship containers, factory, ack-gated local-process path |
+| `src/sandbox/` | 8 | Docker lifecycle, restricted-network enforcement + egress probe, worker image build/probe, Ship containers, factory, ack-gated local-process path |
 | `src/server/` | 8 | Local workspace app server (loopback + workspace-token gate): SPA assets, HTTP routes, SSE log-watcher, instance discovery/lifecycle |
 | `src/workspace/` | 2 | Per-task/integration git checkouts; protected paths |
 | `src/terminal/` | 4 | Per-Ship tmux session management inside containers; `attach` resolution |
@@ -105,7 +105,7 @@ Restart behavior: state is durable, but there is no automatic re-dispatch; the r
 - Per-call authorization (`src/tools/bridge.ts`): caller identity, permission, run graph state, budgets, pending-approval caps, path containment (realpath-checked), dependency/lockfile rules, terminal-delegation rejection.
 - Transports: MCP stdio server (`mcp-server.ts`, protocol 2024-11-05; `pluton mcp serve`) and an HTTP transport with per-session bearer tokens (`http-transport.ts`); containerized engines reach it via the host gateway, while native engines use a loopback-only binding.
 - Operator (chat) tools (`src/tools/operator-catalog.ts`): `project.status`, `run.list`, `run.get`, `run.start`, `approvals.list` (per ROADMAP §chat slice).
-- Sandbox (`src/sandbox/`): non-root, `--cap-drop ALL`, `no-new-privileges`, CPU/memory/PID limits, bounded noexec tmpfs, mount allowlist, env allowlist, Pluton-owned labels, label-guarded stop; Docker unavailable fails closed with the exact fix. `network_policy: restricted` is a bridge with DNS, **not an egress filter** (documented in `docs/SECURITY.md` / ADR-0004).
+- Sandbox (`src/sandbox/`): non-root, `--cap-drop ALL`, `no-new-privileges`, CPU/memory/PID limits, bounded noexec tmpfs, mount allowlist, env allowlist, Pluton-owned labels, label-guarded stop; Docker unavailable fails closed with the exact fix. `network_policy: restricted` attaches the container to a dedicated `--internal` Docker network (no default route, no NAT, cross-network drops) and is proven at run start by an in-container TCP probe; a container that can still reach `1.1.1.1:443` is refused, never run. `none` uses `--network none`; `open` is the explicit egress opt-in. See `docs/SECURITY.md` §8.5.
 - Workspaces: per-task clones under `.pluton/workspaces/`; the user's tree is never merged into; integration goes to `pluton/integration/<run>` (never main) with a protected-path approval gate (`src/workspace/`, ADR-0009).
 - Terminals: Docker mode uses one tmux session per Ship inside its container and resolves the exact `docker exec -it` argv; native mode uses host tmux (`src/terminal/native.ts`) and returns `tmux attach-session` argv, failing closed with an actionable error when host tmux is absent.
 
@@ -145,7 +145,7 @@ Former limitation, now resolved (2026-10-22): a cancelled prerequisite left its 
 | L4 | No transport-level retry/backoff for engine spawn/handshake | grep: no `retry`/`backoff`/`jitter` in `src/engines/` |
 | L5 | No session-log projection/query surface (no FTS, no read models) | grep: no `FTS5`/`projection` in `src/`; `store.ts` only offers `eventsSince`/`listEvents` |
 | L6 | Engine permission requests are only interactively approvable in the ask-* modes; auto-answered modes can still surface a denial as a no-op success | `engines/approval.ts`; `engines/interactive-approval.ts` |
-| L7 | `restricted` network policy is not an egress filter | `docs/SECURITY.md`; ADR-0004 |
+| L7 | `restricted` denies internet egress, but the internal network's gateway (the Docker host) stays reachable for the tool bridge; `host.docker.internal` reachability on Docker Desktop is unverified | `docs/SECURITY.md` §8.5; `src/sandbox/network.ts`; `tests/e2e/restricted-network.e2e.test.ts` |
 | L8 | No automatic restart reconciliation/replay (by policy; acceptance suite not implemented) | ADR-0006; `implementation-decisions.md` A2/A4 |
 | L9 | No SDK and no API gateway; the machine surfaces are the MCP bridge, the CLI JSON envelopes, and the loopback/token-gated workspace app server (`src/server/`) | `src/server/`; directory inventory |
 | L10 | Attach `-it` interactive leg NOT RUN (no real TTY in harness); live engine suites opt-in | `docs/ROADMAP.md`; this audit |

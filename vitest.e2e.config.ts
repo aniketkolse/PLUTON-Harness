@@ -1,8 +1,6 @@
 import { defineConfig } from 'vitest/config'
 
-// Opt-in Docker/tmux/live-engine E2E suite. Never part of normal CI:
-// requires Docker Desktop (or a Docker engine), tmux in the worker image,
-// and — for live engine tests — working engine auth or free models.
+// Orchestration and workspace E2E suite.
 export default defineConfig({
   test: {
     include: ['tests/e2e/**/*.test.ts'],

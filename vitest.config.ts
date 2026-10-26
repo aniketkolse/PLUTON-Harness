@@ -20,10 +20,10 @@ export default defineConfig({
       reporter: ['text-summary', 'json-summary'],
       reportsDirectory: 'coverage',
       // Measured on the committed suite (2026-10-26, Windows 11 / Node 24.20,
-      // 1,252 tests): statements 77.95, branches 69.36, functions 80.28,
-      // lines 79.64 (repeat runs vary by a few hundredths — async test
-      // ordering). Floors are the integer below each measurement: ~1pp of
-      // headroom for platform-specific skips (POSIX-only tests on Windows, etc.).
+      // 1,253 tests): statements 77.96, branches 69.35, functions 80.22,
+      // lines 79.65 (lowest of four full runs; runs vary by a few hundredths).
+      // Floors are the integer below each measurement: ~1pp of headroom for
+      // platform-specific skips (POSIX-only tests on Windows, etc.).
       thresholds: {
         statements: 77,
         branches: 68,

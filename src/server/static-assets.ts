@@ -133,7 +133,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
       <section id="paneFiles" class="sidebar-pane is-hidden" role="tabpanel" aria-label="Project files">
         <div class="pane-scroll">
           <div class="pane-meta">
-            <span id="filesWorkspaceLabel" class="mono truncate">—</span>
+            <span id="filesWorkspaceLabel" class="mono truncate" title="Click to change workspace folder" style="cursor: pointer;">—</span>
             <span class="pane-tag">workspace</span>
           </div>
           <div class="sub-tabs" role="tablist">
@@ -348,12 +348,12 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
         </div>
       </div>
 
-      <button id="btnJumpToLatest" class="jump-to-latest is-hidden" type="button" title="Jump to latest message">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
-        <span>Jump to latest</span>
-      </button>
-
       <div class="dock">
+        <button id="btnJumpToLatest" class="jump-to-latest is-hidden" type="button" title="Jump to latest message">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+          <span>Jump to latest</span>
+        </button>
+
         <div class="composer">
           <textarea id="promptInput" class="composer-textarea" rows="1" placeholder="Ask Pluton to plan, implement, investigate… (Enter to submit, Shift+Enter for newline)" spellcheck="false"></textarea>
 
@@ -400,7 +400,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
               <span id="thinkingText">Ready</span>
             </span>
             <span class="status-divider">|</span>
-            <span class="chip" id="workspaceChip" title="Workspace (pinned by the server) — click for details">
+            <span class="chip" id="workspaceChip" title="Workspace — click to change folder" style="cursor: pointer;">
               <span class="chip-folder" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg></span>
               <span id="workspaceName">—</span>
               <span class="chip-sep">·</span>
@@ -489,6 +489,13 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
       <label class="field">
         <span class="field-label">Session Name</span>
         <input id="newSessionNameInput" type="text" placeholder="e.g. Code Refactor &amp; Bugfix" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field-label">Workspace Folder (optional)</span>
+        <div style="display: flex; gap: 6px;">
+          <input id="newSessionWorkspaceInput" type="text" placeholder="Default project workspace" autocomplete="off" class="mono" style="flex: 1;">
+          <button id="btnNewSessionBrowseWorkspace" class="btn-secondary" type="button" title="Browse folder">Browse</button>
+        </div>
       </label>
       <div class="modal-foot">
         <span class="modal-hint">The session is persisted for this project.</span>
@@ -982,15 +989,15 @@ select.mini-select {
 .approval-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 /* ===================== Conversation ===================== */
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 20px 8px; }
-.messages { display: flex; flex-direction: column; gap: 14px; max-width: 880px; }
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 20px 8px; width: 100%; box-sizing: border-box; }
+.messages { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 100%; box-sizing: border-box; }
 #leftSidebar.is-collapsed ~ .app-main .messages,
-.app-sidebar.is-collapsed ~ .app-main .messages { max-width: 100%; }
+.app-sidebar.is-collapsed ~ .app-main .messages { width: 100%; max-width: 100%; }
 
 .jump-to-latest {
   position: absolute;
-  bottom: 84px;
-  right: 28px;
+  bottom: calc(100% + 8px);
+  right: 24px;
   z-index: 20;
   display: inline-flex;
   align-items: center;
@@ -1010,7 +1017,7 @@ select.mini-select {
 .jump-to-latest svg { width: 14px; height: 14px; }
 .jump-to-latest.is-hidden { display: none; }
 
-.msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.msg { display: flex; flex-direction: column; gap: 4px; width: 100%; max-width: 100%; box-sizing: border-box; }
 .msg-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
 .msg-avatar { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
 .msg-avatar svg { width: 14px; height: 14px; }
@@ -1018,7 +1025,9 @@ select.mini-select {
 .msg-pluton { color: var(--accent-cyan); }
 
 .msg-user {
-  align-self: flex-start;
+  align-self: stretch;
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg-message-user);
   border: 1px solid var(--border-user);
   border-radius: var(--radius-lg);
@@ -1026,6 +1035,9 @@ select.mini-select {
 }
 .msg-user .msg-head { margin-bottom: 2px; }
 .msg-ai {
+  align-self: stretch;
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg-message-ai);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1093,11 +1105,35 @@ select.mini-select {
 
 /* Tool cards & Activity Timeline */
 .tool-card {
+  align-self: stretch;
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
   max-width: 100%;
+}
+.tool-card.is-failed {
+  border-color: rgba(239,68,68,0.5);
+}
+.tool-card.is-failed .tool-card-head {
+  background: rgba(239,68,68,0.08);
+}
+.session-ws-chip {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin-left: 4px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
 }
 .tool-card summary {
   list-style: none;
@@ -1228,7 +1264,7 @@ select.mini-select {
 }
 
 /* ===================== Composer ===================== */
-.dock { flex-shrink: 0; padding: 0 16px 10px; background: var(--bg-main); border-top: 1px solid var(--border-soft); }
+.dock { position: relative; width: 100%; box-sizing: border-box; flex-shrink: 0; padding: 0 16px 10px; background: var(--bg-main); border-top: 1px solid var(--border-soft); }
 .build-confirm {
   flex-shrink: 0;
   margin: 10px 16px 0;
@@ -1251,6 +1287,8 @@ select.mini-select {
 .build-confirm-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-top: 2px; }
 .build-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 0 12px 11px; }
 .composer {
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2246,8 +2284,9 @@ select.mini-select {
   function appendToolEvent(tool) {
     var list = el('messagesList');
     if (!list) return;
-    var card = document.createElement('details');
-    card.className = 'tool-card activity-timeline-node';
+    var toolId = tool.id || tool.callId || tool.name || '';
+    var existing = toolId ? list.querySelector('.tool-card[data-tool-id="' + escapeHtml(toolId) + '"]') : null;
+
     var status = tool.status || 'succeeded';
     var name = escapeHtml(tool.name || 'tool');
     var summary = escapeHtml(redactSecrets(tool.summary || ''));
@@ -2256,9 +2295,29 @@ select.mini-select {
       name + (summary && summary !== name ? ' <span class="muted">(' + summary + ')</span>' : '') +
       '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></summary>';
     var body = output ? '<div class="tool-card-body">' + output + '</div>' : '<div class="tool-card-body muted">[No output]</div>';
-    card.innerHTML = head + body;
-    list.appendChild(card);
-    trimMessagesList();
+
+    if (existing) {
+      existing.setAttribute('data-status', status);
+      existing.innerHTML = head + body;
+      if (status === 'failed') {
+        existing.classList.add('is-failed');
+        existing.open = true;
+      } else {
+        existing.classList.remove('is-failed');
+      }
+    } else {
+      var card = document.createElement('details');
+      card.className = 'tool-card activity-timeline-node' + (status === 'failed' ? ' is-failed' : '');
+      if (toolId) {
+        card.setAttribute('data-tool-id', toolId);
+        card.setAttribute('data-call-id', toolId);
+      }
+      card.setAttribute('data-status', status);
+      card.innerHTML = head + body;
+      if (status === 'failed') card.open = true;
+      list.appendChild(card);
+      trimMessagesList();
+    }
     maybeScroll(false);
   }
 
@@ -2444,7 +2503,15 @@ select.mini-select {
       title.textContent = s.title || 'Untitled Session';
       var meta = document.createElement('div');
       meta.className = 'session-meta';
-      meta.textContent = formatTime(s.updatedAt || s.createdAt);
+      var timeStr = formatTime(s.updatedAt || s.createdAt);
+      if (s.workspaceRoot) {
+        var raw = s.workspaceRoot;
+        var lastSlash = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\\\'));
+        var base = (lastSlash >= 0 ? raw.slice(lastSlash + 1) : raw) || raw;
+        meta.innerHTML = escapeHtml(timeStr) + ' <span class="session-ws-chip" title="' + escapeHtml(s.workspaceRoot) + '">\u2022 ' + escapeHtml(base) + '</span>';
+      } else {
+        meta.textContent = timeStr;
+      }
       item.appendChild(title);
       item.appendChild(meta);
       item.addEventListener('click', function () { selectSession(s.id); });
@@ -2464,19 +2531,22 @@ select.mini-select {
       // A reload during an in-flight turn must show the real state, not a
       // false "ready": the server reports whether the engine is still busy.
       setBusy(res.session.busy === true);
+      await loadWorkspace(sessionId);
+      await loadFilesList();
       await loadApprovals();
     } catch (err) {
       toast('Failed to load session: ' + err.message, true);
     }
   }
 
-  async function createNewSession(title) {
+  async function createNewSession(title, workspaceRoot) {
     try {
       var res = await apiFetch('/api/sessions', {
         method: 'POST',
         body: JSON.stringify({
           title: title || ('Session ' + (state.sessions.length + 1)),
-          museId: state.muse ? state.muse.id : undefined
+          museId: state.muse ? state.muse.id : undefined,
+          workspaceRoot: workspaceRoot || undefined
         })
       });
       state.sessions.unshift(res.session);
@@ -2490,8 +2560,10 @@ select.mini-select {
   function openNewSessionModal() {
     var modal = el('newSessionModal');
     var input = el('newSessionNameInput');
+    var wsInput = el('newSessionWorkspaceInput');
     if (modal) modal.classList.remove('is-hidden');
     if (input) { input.value = ''; input.focus(); }
+    if (wsInput) { wsInput.value = ''; }
   }
 
   function closeNewSessionModal() {
@@ -2501,15 +2573,31 @@ select.mini-select {
 
   function confirmCreateSession() {
     var input = el('newSessionNameInput');
+    var wsInput = el('newSessionWorkspaceInput');
     var name = input && input.value.trim() ? input.value.trim() : ('Session ' + (state.sessions.length + 1));
+    var wsRoot = wsInput && wsInput.value.trim() ? wsInput.value.trim() : undefined;
     closeNewSessionModal();
-    createNewSession(name);
+    createNewSession(name, wsRoot);
+  }
+
+  async function browseNewSessionWorkspace() {
+    try {
+      var res = await apiFetch('/api/workspace/pick', { method: 'POST' });
+      if (!res.cancelled && res.path) {
+        var wsInput = el('newSessionWorkspaceInput');
+        if (wsInput) wsInput.value = res.path;
+      }
+    } catch (err) {
+      toast('Folder selection failed: ' + err.message, true);
+    }
   }
 
   // ------------------------------------------------------------- workspace
-  async function loadWorkspace() {
+  async function loadWorkspace(sessionId) {
     try {
-      var res = await apiFetch('/api/workspace');
+      var sid = sessionId || state.activeSessionId;
+      var path = sid ? ('/api/workspace?sessionId=' + encodeURIComponent(sid)) : '/api/workspace';
+      var res = await apiFetch(path);
       state.workspace = res.workspace;
       var nameNode = el('workspaceName');
       var pathNode = el('workspacePath');
@@ -2540,18 +2628,38 @@ select.mini-select {
     }
   }
 
-  /**
-   * The server pins the workspace to its project directory at startup
-   * (GET /api/workspace is the only source of truth; there is no
-   * workspace-selection API). The chip and file header therefore EXPLAIN the
-   * pin instead of pretending a client-side folder choice changed the
-   * runtime workspace — the previous picker relabeled the UI to a folder the
-   * server never confirmed while still listing the real workspace's files.
-   */
+  async function pickWorkspaceFolder() {
+    try {
+      toast('Opening folder picker\u2026');
+      var res = await apiFetch('/api/workspace/pick', { method: 'POST' });
+      if (res.cancelled || !res.path) {
+        toast('Folder selection cancelled');
+        return;
+      }
+      var targetPath = res.path;
+      if (state.activeSessionId) {
+        var patchRes = await apiFetch('/api/sessions/' + encodeURIComponent(state.activeSessionId), {
+          method: 'PATCH',
+          body: JSON.stringify({ workspaceRoot: targetPath })
+        });
+        if (patchRes.session) {
+          var idx = state.sessions.findIndex(function (s) { return s.id === state.activeSessionId; });
+          if (idx >= 0) {
+            state.sessions[idx] = patchRes.session;
+          }
+          renderSessions();
+        }
+      }
+      await loadWorkspace(state.activeSessionId);
+      await loadFilesList();
+      toast('Switched workspace to: ' + targetPath);
+    } catch (err) {
+      toast('Failed to change workspace: ' + err.message, true);
+    }
+  }
+
   function explainWorkspacePin() {
-    var ws = state.workspace || {};
-    toast('Workspace is pinned to the server project directory (' + (ws.rootDir || ws.name || 'server root') +
-      '). Switching workspaces at runtime is not supported; restart the server in the target project instead.');
+    pickWorkspaceFolder();
   }
 
   function kvRow(key, value) {
@@ -3712,7 +3820,10 @@ select.mini-select {
     var list = el('filesList');
     if (list) list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
     try {
-      var res = await apiFetch('/api/files');
+      var url = state.activeSessionId
+        ? ('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
+        : '/api/files';
+      var res = await apiFetch(url);
       state.fileList = res.files || [];
       var listNode = el('filesList');
       if (!listNode) return;
@@ -3729,7 +3840,11 @@ select.mini-select {
 
   async function openFile(path) {
     try {
-      var res = await apiFetch('/api/files/content?path=' + encodeURIComponent(path));
+      var url = '/api/files/content?path=' + encodeURIComponent(path);
+      if (state.activeSessionId) {
+        url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      }
+      var res = await apiFetch(url);
       var preview = el('filePreview');
       var nameNode = el('activeFileName');
       var bodyNode = el('fileCodeBody');
@@ -3940,17 +4055,25 @@ select.mini-select {
     var attached = state.attachments.map(function (a) {
       return a.name + ' (' + a.sizeLabel + ')';
     }).join(', ');
-    input.value = '';
-    clearAttachments();
-    // The bubble shows what the operator typed plus the attachment list; the
-    // inlined file bodies travel to the engine, they do not drown the echo.
-    appendPlain('user', text + (attached ? '\\n\\n*Attached: ' + attached + '*' : ''));
     setBusy(true);
     try {
-      await apiFetch('/api/sessions/' + encodeURIComponent(state.activeSessionId) + '/prompt', {
+      var url = new URL('/api/sessions/' + encodeURIComponent(state.activeSessionId) + '/prompt', window.location.origin);
+      if (token) url.searchParams.set('token', token);
+      var res = await fetch(url.toString(), {
         method: 'POST',
+        headers: Object.assign({ 'content-type': 'application/json' }, apiHeaders()),
         body: JSON.stringify({ text: full, mode: state.mode })
       });
+      if (res.status === 202) {
+        input.value = '';
+        input.style.height = 'auto';
+        clearAttachments();
+        appendPlain('user', text + (attached ? '\\n\\n*Attached: ' + attached + '*' : ''));
+      } else {
+        var errPayload = null;
+        try { errPayload = await res.json(); } catch (e) {}
+        throw new Error(errPayload && errPayload.error ? errPayload.error : ('Prompt failed with status ' + res.status));
+      }
     } catch (err) {
       appendPlain('system', '[Error dispatching prompt: ' + err.message + ']', 'msg-error');
       setBusy(false);
@@ -3993,17 +4116,23 @@ select.mini-select {
   }
 
   async function startBuild(goal) {
-    var input = el('promptInput');
-    input.value = '';
-    clearAttachments();
-    appendPlain('user', goal);
     state.buildDispatching = true;
     setBusy(true);
     try {
       var res = await apiFetch('/api/runs', {
         method: 'POST',
-        body: JSON.stringify({ goal: goal })
+        body: JSON.stringify({
+          goal: goal,
+          sessionId: state.activeSessionId || undefined
+        })
       });
+      var input = el('promptInput');
+      if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+      }
+      clearAttachments();
+      appendPlain('user', goal);
       var runId = res.run.id;
       state.activeRunId = runId;
       state.settledRunId = null;
@@ -4662,6 +4791,8 @@ select.mini-select {
     if (newCancel) newCancel.addEventListener('click', closeNewSessionModal);
     var newClose = el('newSessionClose');
     if (newClose) newClose.addEventListener('click', closeNewSessionModal);
+    var newBrowse = el('btnNewSessionBrowseWorkspace');
+    if (newBrowse) newBrowse.addEventListener('click', browseNewSessionWorkspace);
     var newInput = el('newSessionNameInput');
     if (newInput) {
       newInput.addEventListener('keydown', function (e) {

@@ -13,7 +13,7 @@
   "files": [
     "bin",
     "dist",
-    "docker",
+    "native",
     "templates",
     "README.md",
     "THIRD_PARTY_NOTICES.md",

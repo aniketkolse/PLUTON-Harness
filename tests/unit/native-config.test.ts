@@ -8,10 +8,10 @@ import { PolicyDeniedError, SandboxUnavailableError, ValidationError } from '../
 import type { MuseRecord } from '../../src/domain/models.ts'
 import {
   assertNativeSandboxConfig,
+  assertNativeSandboxKind,
   createNativeExecutionProvider,
   nativeSpecForMuse,
 } from '../../src/execution/factory.ts'
-import { createSandboxManager } from '../../src/sandbox/factory.ts'
 
 const tmpDirs: string[] = []
 
@@ -145,7 +145,18 @@ describe('native execution config', () => {
 
   it('tolerates unparsed native config with missing optional fields without NaN session timeouts', () => {
     const dir = root()
-    const raw = nativeConfig()
+    const raw = nativeConfig({
+      sandbox: {
+        kind: 'native',
+        native: {
+          mode: 'workspace-write',
+          mode_by_platform: { win32: 'unconfined', darwin: 'unconfined' },
+          acknowledge_unconfined: true,
+          acknowledge_partial_enforcement: true,
+          acknowledge_host_network: true,
+        },
+      },
+    })
     delete (raw.sandbox.native as Record<string, unknown>).session_timeout_minutes
     delete (raw.sandbox.native as Record<string, unknown>).terminate_grace_seconds
     delete (raw.sandbox.native as Record<string, unknown>).max_output_bytes
@@ -156,10 +167,12 @@ describe('native execution config', () => {
     expect(provider['maxOutputBytes']).toBe(1048576)
   })
 
-  it('does not select native through the Docker SandboxManager factory', () => {
+  it('rejects legacy sandbox configs with explicit migration guidance', () => {
     const dir = root()
-    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
-    expect(() => createSandboxManager(loaded.config)).toThrow(ValidationError)
+    const dockerCfg = validateConfig(nativeConfig({ sandbox: { kind: 'docker' } }), dir, join(dir, 'pluton.yaml'))
+    expect(() => assertNativeSandboxConfig(dockerCfg.config)).toThrow(SandboxUnavailableError)
+    const localCfg = validateConfig(nativeConfig({ sandbox: { kind: 'local-process' } }), dir, join(dir, 'pluton.yaml'))
+    expect(() => assertNativeSandboxConfig(localCfg.config)).toThrow(SandboxUnavailableError)
   })
 
   it('derives read-only manager/chat sessions and workspace-write isolated workers', () => {

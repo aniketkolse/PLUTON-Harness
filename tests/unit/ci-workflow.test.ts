@@ -71,12 +71,11 @@ describe('ci workflow', () => {
     expect(runs).toContain('npm run smoke:package')
   })
 
-  it('runs the opt-in Docker/tmux E2E on Linux with an explicit flag', () => {
-    const job = doc.jobs?.['e2e-docker']
+  it('runs the orchestration E2E on Linux', () => {
+    const job = doc.jobs?.['e2e']
     expect(job?.['runs-on']).toBe('ubuntu-latest')
-    const e2eStep = (job?.steps ?? []).find((s) => s.run?.includes('vitest.e2e.config.ts'))
+    const e2eStep = (job?.steps ?? []).find((s) => s.run?.includes('npm run test:e2e'))
     expect(e2eStep).toBeTruthy()
-    expect(e2eStep?.env?.['PLUTON_E2E_DOCKER']).toBe('1')
   })
 
   it('never publishes, tags or releases', () => {

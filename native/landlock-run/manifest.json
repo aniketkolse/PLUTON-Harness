@@ -1,0 +1,11 @@
+{
+  "helperAbi": 1,
+  "version": "0.1.0",
+  "targets": {
+    "linux-x64": {
+      "file": "landlock-run-linux-x64",
+      "sha256": "3c562a67f0341a2a28ab9d82a1c0f19ed151695340a297335c2e8e9aa9e404ac",
+      "size": 524976
+    }
+  }
+}

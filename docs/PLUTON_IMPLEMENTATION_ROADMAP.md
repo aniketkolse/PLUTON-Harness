@@ -125,7 +125,18 @@ G1, L2, L3, G3 closed with tests; all suites green; no config/schema break for e
 2. State-coverage test (R3): every declared state is entered/left by a test or removed. **Landed:** `tests/unit/state-coverage.test.ts`; unused engine-process vocabulary removed.
 3. Doc-drift check (O5) and dependency-boundary test (R4). **Landed:** `scripts/verify-docs.mjs` + `tests/unit/doc-links.test.ts` (also wired into `release:check`), `tests/unit/module-boundaries.test.ts`.
 4. Coverage threshold in CI; packaging and license decision (O8) before any distribution.
-5. Sandbox: egress-filter enforcement for `network_policy: restricted` (documented today as not an egress filter).
+   **Coverage gate landed 2026-10-26:** `npm run test:coverage` (Vitest v8, `src/**/*.ts`, no exclusions)
+   with floors statements 77 / branches 68 / functions 79 / lines 78 against a measured
+   baseline of 77.96 / 69.35 / 80.22 / 79.65 (lowest of four full runs; repeat runs vary by a few hundredths). CI runs it on `ubuntu-latest`; the failing-threshold
+   path is proven with an isolated `--coverage.thresholds.*=100` run. Packaging/licence (O8)
+   remains open.
+5. Sandbox: egress-filter enforcement for `network_policy: restricted`.
+   **Landed 2026-10-26:** `restricted` runs on a dedicated Docker `--internal` network (no default
+   route/NAT, cross-network drops), never falls back to bridge, and must pass an in-container TCP
+   probe before the run starts; `local-process`/`native` refuse non-open policies. Verified by
+   unit + wiring tests and a gated real-Docker E2E (`tests/e2e/restricted-network.e2e.test.ts`).
+   Residual: the internal gateway (host tool bridge) stays reachable, and Docker Desktop's
+   `host.docker.internal` path through an internal network is unverified — see `docs/SECURITY.md` §8.5.
 
 ---
 

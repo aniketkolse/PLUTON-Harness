@@ -55,6 +55,11 @@ export function normalizePermission(perm: string): string {
 export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<ShipRole, readonly Permission[]>> = {
   supervisor: [
     'project.read',
+    'project.write',
+    'tests.run',
+    'research.report',
+    'review.report',
+    'verification.report',
     'task.create',
     'task.delegate',
     'task.inspect',

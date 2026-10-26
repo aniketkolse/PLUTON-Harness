@@ -1,16 +1,14 @@
-﻿import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
-import type { SandboxManager } from '../../src/sandbox/types.ts'
-import { FakeSandbox } from '../helpers/fake-sandbox.ts'
 import { PROSE_SECRET_PATTERNS } from '../../src/util/redact.ts'
 
 /**
- * PLUTON SPA â€” reference UI replacement and functional integration.
+ * PLUTON SPA — reference UI replacement and functional integration.
  *
  * Covers the endpoints the new workspace UI binds to (MCP registry, model
  * switch, supervised-build start/cancel) and the shape of the replaced SPA
@@ -36,8 +34,14 @@ project:
   default_branch: main
   verification: []
 sandbox:
-  kind: local-process
-  local_process_acknowledged: true
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
 runtime:
   max_concurrent_workers: 2
   max_team_size: 4
@@ -72,25 +76,19 @@ muses:
 
 /**
  * Build a project config with an overridden `sandbox` block.
- *
- * The default is the local-process sandbox (dev-only, no isolation). The
- * container-mode sandbox is used by the start-failure test: a supervised run
- * whose sandbox cannot be prepared must fail, not hang.
  */
-function testConfig(sandbox?: { kind: 'docker' | 'local-process'; image?: string }): string {
+function testConfig(sandbox?: { kind: 'docker' | 'local-process' }): string {
   if (!sandbox) return TEST_CONFIG
   const lines = [`  kind: ${sandbox.kind}`]
-  if (sandbox.image !== undefined) lines.push(`  image: ${sandbox.image}`)
   if (sandbox.kind === 'local-process') lines.push('  local_process_acknowledged: true')
   return TEST_CONFIG.replace(
-    'sandbox:\n  kind: local-process\n  local_process_acknowledged: true',
+    `sandbox:\n  kind: native\n  native:\n    acknowledge_partial_enforcement: true\n    acknowledge_host_network: true\n    mode_by_platform:\n      darwin: unconfined\n      win32: unconfined\n    acknowledge_unconfined: true`,
     `sandbox:\n${lines.join('\n')}`,
   )
 }
 
 async function setupTestProject(options?: {
-  sandbox?: { kind: 'docker' | 'local-process'; image?: string }
-  sandboxManager?: SandboxManager
+  sandbox?: { kind: 'docker' | 'local-process' }
 }): Promise<{
   rootDir: string
   appServer: Promise<AppServerInstance>
@@ -109,12 +107,11 @@ async function setupTestProject(options?: {
       store: bootstrapped.store,
       projectId: bootstrapped.projectId,
       loaded,
-      ...(options?.sandboxManager !== undefined ? { sandboxManager: options.sandboxManager } : {}),
     }),
   }
 }
 
-describe('PLUTON SPA â€” MCP connection registry', () => {
+describe('PLUTON SPA — MCP connection registry', () => {
   it('reports a real (empty) registry instead of a hardcoded server list', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
@@ -132,7 +129,7 @@ describe('PLUTON SPA â€” MCP connection registry', () => {
       }
       expect(data.ok).toBe(true)
       expect(Array.isArray(data.servers)).toBe(true)
-      // Nothing is registered before an engine session exists â€” the count must
+      // Nothing is registered before an engine session exists — the count must
       // be derived from the registry, never hardcoded.
       expect(data.connected).toBe(0)
       expect(data.total).toBe(0)
@@ -158,7 +155,7 @@ describe('PLUTON SPA â€” MCP connection registry', () => {
   })
 })
 
-describe('PLUTON SPA â€” model switch', () => {
+describe('PLUTON SPA — model switch', () => {
   it('switches a Muse to a model the engine actually offers', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
@@ -220,12 +217,12 @@ describe('PLUTON SPA â€” model switch', () => {
   })
 })
 
-describe('PLUTON SPA — supervised build control', () => {
+describe('PLUTON SPA � supervised build control', () => {
   it('surfaces a stranded run in run detail (supervisorStale) without fabricating any state', async () => {
     // Defect 2026-10-21: a run whose supervisor died mid-run stayed `active`
     // forever with no signal other than reading raw DB heartbeats. The run
     // detail API now exposes the stranded condition; recovery stays the
-    // operator's explicit Resume decision — nothing on the server writes a
+    // operator's explicit Resume decision � nothing on the server writes a
     // terminal state from this flag.
     const { rootDir, appServer } = await setupTestProject()
     const server = await appServer
@@ -292,27 +289,11 @@ describe('PLUTON SPA — supervised build control', () => {
   })
 
   it('settles a run whose supervised start failed, instead of leaving it pending forever', async () => {
-    // A container-mode project whose sandbox cannot be prepared: the
+    // A legacy-configured project whose sandbox cannot be prepared: the
     // supervised start cannot succeed, so the run MUST reach a terminal
-    // state. Before the fix the rejection was swallowed, the run stayed in
-    // `created`, and the client waited on a run that could never move.
-    //
-    // The failure is scripted through the existing `RunDeps.sandboxManager`
-    // seam instead of pointing at a missing image. A real cold `docker info`
-    // probe costs 8-11s on the Windows CI runner (bounded at 20s), which made
-    // this assertion measure daemon start latency rather than settlement. The
-    // route, store, background driver and broadcaster under test stay real;
-    // only the runtime probe is a fake.
-    const sandbox = new FakeSandbox()
-    sandbox.probeResult = {
-      available: false,
-      kind: 'docker',
-      detail: 'sandbox probe failed (test fixture)',
-      fix: 'start the container runtime',
-    }
+    // state.
     const { rootDir, appServer } = await setupTestProject({
       sandbox: { kind: 'docker' },
-      sandboxManager: sandbox,
     })
     const server = await appServer
     const loaded = loadConfig(rootDir)
@@ -360,17 +341,13 @@ describe('PLUTON SPA — supervised build control', () => {
       // The durable record agrees with what the client is told.
       const settled = store.getRun(run.id)
       expect(settled.state).toBe('failed')
-      expect(settled.finalSummary).toContain('supervised start failed')
+      expect(settled.finalSummary).toContain("sandbox.kind 'docker' is no longer supported")
 
       // A run.finished event is what the SSE log-watcher turns into the
       // terminal run_state frame the client needs to stop waiting.
       const events = store.eventsSince(projectId, 0, 500)
       const finished = events.find((e) => e.type === 'run.finished' && e.runId === run.id)
       expect(finished).toBeDefined()
-
-      // The failure came from the injected runtime probe, proving the start
-      // really was attempted (and rejected) rather than never dispatched.
-      expect(sandbox.methods()).toEqual(['probe'])
     } finally {
       store.close()
       await server.close()
@@ -478,7 +455,7 @@ describe('PLUTON SPA - request contract', () => {
   })
 })
 
-describe('PLUTON SPA â€” replaced assets', () => {
+describe('PLUTON SPA — replaced assets', () => {
   it('serves the reference layout and drops the elements the brief removed', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
@@ -593,8 +570,8 @@ describe('PLUTON SPA â€” replaced assets', () => {
       const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
 
       // Presentation order ranking exists. The former flat
-      // COWORKER_PRESENTATION_ORDER array was defined but never read —
-      // coworkerRank computes the order from role/id/name — and was removed;
+      // COWORKER_PRESENTATION_ORDER array was defined but never read �
+      // coworkerRank computes the order from role/id/name � and was removed;
       // nothing may reintroduce an unused ordering table.
       expect(js).not.toContain('COWORKER_PRESENTATION_ORDER')
       expect(js).toContain('coworkerRank')
@@ -780,7 +757,7 @@ describe('PLUTON SPA â€” replaced assets', () => {
     }
   })
 
-  it('pins workspace labels to server-confirmed state and explains the pin on click (Medium A)', async () => {
+  it('binds workspace to server-confirmed state and supports native folder selection per session', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
     try {
@@ -794,18 +771,54 @@ describe('PLUTON SPA â€” replaced assets', () => {
       expect(data.ok).toBe(true)
       expect(data.workspace.rootDir.length).toBeGreaterThan(0)
 
-      // No client-side selection artifacts remain: nothing in the page may
-      // relabel the workspace to a folder the server never confirmed.
+      // No browser input directory selection artifacts remain: folder picking is handled
+      // server-side via the native folder picker endpoint (/api/workspace/pick).
       expect(html).not.toContain('webkitdirectory')
       expect(js).not.toContain('showDirectoryPicker')
       expect(js).not.toContain('openPcWorkspacePicker')
 
-      // Labels are written ONLY from /api/workspace state...
+      // Labels are written from server workspace state
       expect(js).toContain('state.workspace.rootDir')
-      // ...and the pin explainer states the real contract (restart to switch).
-      expect(js).toContain('Workspace is pinned to the server project directory')
-      expect(js).toContain('restart the server in the target project instead')
-      expect(html).toContain('Workspace (pinned by the server)')
+      // Native picker integration and session workspace binding
+      expect(js).toContain('/api/workspace/pick')
+      expect(js).toContain('pickWorkspaceFolder')
+      expect(js).toContain('browseNewSessionWorkspace')
+      expect(html).toContain('id="btnNewSessionBrowseWorkspace"')
+      expect(html).toContain('id="newSessionWorkspaceInput"')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('enforces full-width layout, correlated tool cards, dock-anchored jump button, and 202-gated composer reset', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Full-width layout for messages and composer
+      expect(css).toContain('.messages { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 100%; box-sizing: border-box; }')
+      expect(css).toContain('.composer {\n  width: 100%;\n  box-sizing: border-box;')
+      expect(css).toContain('.msg-user {\n  align-self: stretch;\n  width: 100%;')
+      expect(css).toContain('.msg-ai {\n  align-self: stretch;\n  width: 100%;')
+
+      // Jump-to-latest button anchored relative to dock
+      expect(css).toContain('.dock { position: relative;')
+      expect(css).toContain('bottom: calc(100% + 8px);')
+      expect(html).toContain('<div class="dock">\n        <button id="btnJumpToLatest"')
+
+      // Correlated tool cards with id lifecycle and failure presentation
+      expect(js).toContain('data-tool-id')
+      expect(js).toContain('data-call-id')
+      expect(js).toContain("existing.setAttribute('data-status', status)")
+      expect(js).toContain("card.className = 'tool-card activity-timeline-node' + (status === 'failed' ? ' is-failed' : '')")
+      expect(css).toContain('.tool-card.is-failed')
+
+      // Composer only clears and resets height on HTTP 202 Accepted
+      expect(js).toContain('res.status === 202')
+      expect(js).toContain("input.style.height = 'auto'")
     } finally {
       await server.close()
     }
@@ -901,7 +914,7 @@ describe('PLUTON SPA â€” replaced assets', () => {
       const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
 
       // The server redacts at-rest surfaces and the SPA redacts at display.
-      // Both copies must keep the same three patterns in lockstep — changing
+      // Both copies must keep the same three patterns in lockstep � changing
       // one side fails this test until the other side is updated (the sync
       // requirement is documented in both files).
       expect(PROSE_SECRET_PATTERNS).toHaveLength(3)

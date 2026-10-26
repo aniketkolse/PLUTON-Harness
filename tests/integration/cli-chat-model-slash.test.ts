@@ -28,8 +28,14 @@ project:
   default_branch: main
   verification: []
 sandbox:
-  kind: local-process
-  local_process_acknowledged: true
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
 runtime:
   max_concurrent_workers: 1
   max_team_size: 2

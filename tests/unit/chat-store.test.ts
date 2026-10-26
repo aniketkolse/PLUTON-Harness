@@ -72,8 +72,8 @@ describe('chat migrations', () => {
     const db = openDatabase(path)
     openDbs.push(db)
     const result = migrate(db)
-    expect(SCHEMA_VERSION).toBe(8)
-    expect(result.to).toBe(8)
+    expect(SCHEMA_VERSION).toBe(10)
+    expect(result.to).toBe(10)
     expect(result.applied).toEqual([
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
@@ -83,6 +83,8 @@ describe('chat migrations', () => {
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
       'v8:muse-to-ship-terminology',
+      'v9:session-workspaces',
+      'v10:native-execution-sessions',
     ])
     const tables = (
       db
@@ -119,6 +121,7 @@ describe('chat sessions', () => {
       nativeSessionId: null,
       resumeToken: null,
       engineSessionId: null,
+      workspaceRoot: null,
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
     })

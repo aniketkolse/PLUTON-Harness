@@ -132,19 +132,12 @@ export const runtimeConfigSchema = z
     /** Per-task cap on manager-requested revisions of failed tasks; 0 = revisions disabled. */
     max_revisions_per_task: z.number().int().min(0).max(10).default(1),
     /**
-     * Worker network policy. `open` = Docker bridge (explicit egress opt-in); `none` = `--network none`;
-     * `restricted` = a dedicated `--internal` Docker network with no default route, verified at run start by
-     * an in-container egress probe (see docs/SECURITY.md §8.5 and src/sandbox/network.ts).
+     * Worker network policy. `open` = host network (explicit egress opt-in);
+     * `restricted` = private network namespace with loopback only, where the
+     * session tool bridge is reached through a per-session proxy; `none` = no
+     * network at all. See docs/NATIVE_EXECUTION.md and src/execution/policy.ts.
      */
     network_policy: z.enum(['restricted', 'none', 'open']).default('open'),
-    /**
-     * Name of the Docker network used by `restricted`. It must exist (or be creatable) with `--internal`;
-     * an existing non-internal network is refused. Defaults to `pluton-restricted-<projectId>`.
-     */
-    internal_network_name: z
-      .string()
-      .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, 'valid docker network name')
-      .optional(),
     max_prompt_chars: z.number().int().min(1_000).max(1_000_000).default(60_000),
     max_event_payload_chars: z.number().int().min(1_000).max(1_000_000).default(8_000),
     max_tool_result_chars: z.number().int().min(1_000).max(4_000_000).default(120_000),
@@ -173,18 +166,35 @@ export const runtimeConfigSchema = z
   .prefault({})
 
 /**
- * Native host execution policy. This provider runs engine processes directly on
- * the host; it is deliberately explicit about its partial enforcement. There is
- * no OS filesystem/network/resource confinement, so the two acknowledgements
- * are hard gates rather than defaults. Docker remains an optional isolation
- * provider; native is the default substrate.
+ * Native host execution policy.
+ *
+ * `mode` is the filesystem policy. Confined modes require the verified native
+ * helper; `unconfined` is an explicit escape hatch for platforms without a
+ * verified filesystem/network sandbox (currently macOS and Windows). The old
+ * acknowledgement fields are read only so existing configs keep loading; they
+ * no longer grant any capability.
  */
 export const nativeSandboxConfigSchema = z
   .object({
-    mode: z.enum(['read-only', 'workspace-write']).default('workspace-write'),
-    /** Required: the operator must acknowledge process-level enforcement is partial. */
+    mode: z.enum(['read-only', 'workspace-write', 'unconfined']).default('workspace-write'),
+    /**
+     * Per-platform mode override. A single checkout can run confined on Linux
+     * and explicitly unconfined on a developer desktop without silently
+     * weakening the Linux policy.
+     */
+    mode_by_platform: z
+      .object({
+        linux: z.enum(['read-only', 'workspace-write', 'unconfined']).optional(),
+        darwin: z.enum(['read-only', 'workspace-write', 'unconfined']).optional(),
+        win32: z.enum(['read-only', 'workspace-write', 'unconfined']).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Required before an effective `unconfined` mode can run anywhere. */
+    acknowledge_unconfined: z.boolean().optional(),
+    /** @deprecated Retained for config compatibility; no longer grants enforcement. */
     acknowledge_partial_enforcement: z.boolean().default(false),
-    /** Required: native processes use the host network (network_policy must be 'open'). */
+    /** @deprecated Retained for config compatibility; use runtime.network_policy. */
     acknowledge_host_network: z.boolean().default(false),
     /** Additional host environment variable NAMES copied into native processes. */
     env_allowlist: z
@@ -203,14 +213,15 @@ export const nativeSandboxConfigSchema = z
 export const sandboxConfigSchema = z
   .object({
     /**
-     * docker = legacy container provider during the native migration;
-     * local-process = acknowledged dev mode;
-     * native = first-class host process provider (partial enforcement).
+     * Native host execution is the only supported substrate. The legacy values
+     * are accepted by the schema so an existing config fails with explicit
+     * migration guidance from `assertNativeSandboxConfig`, never with a generic
+     * parse error and never by silently falling back to a weaker runtime.
      */
     kind: z.enum(['docker', 'local-process', 'native']).default('native'),
-    /** Digest-pinned worker image reference; resolved by scripts/build-worker-image. */
+    /** @deprecated Docker worker-image key; retained only so legacy configs load and are rejected with guidance. */
     image: z.string().min(1).optional(),
-    /** local-process sandbox is dev-only and must be explicitly acknowledged. */
+    /** @deprecated Legacy local-process acknowledgement; ignored. */
     local_process_acknowledged: z.boolean().default(false),
     native: nativeSandboxConfigSchema,
   })
@@ -268,6 +279,22 @@ export const plutonConfigSchema = z.preprocess(
             path: ['ships', id, 'workspace_policy'],
           })
         }
+      }
+      const native = cfg.sandbox.native
+      const configuredModes = [
+        native.mode,
+        ...Object.values(native.mode_by_platform ?? {}).filter(
+          (mode): mode is 'read-only' | 'workspace-write' | 'unconfined' => mode !== undefined,
+        ),
+      ]
+      if (configuredModes.includes('unconfined') && native.acknowledge_unconfined !== true) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            "mode 'unconfined' runs engines directly on the host with no filesystem or network confinement; " +
+            'set sandbox.native.acknowledge_unconfined: true to confirm this is intentional',
+          path: ['sandbox', 'native', 'acknowledge_unconfined'],
+        })
       }
     })
 )

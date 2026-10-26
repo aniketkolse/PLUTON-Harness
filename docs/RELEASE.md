@@ -5,9 +5,12 @@ This document is the staged procedure for a controlled public release. It
 separates **technical validation** (what tooling can prove) from **publication
 authorization** (an owner decision that tooling never makes).
 
-Nothing in this repository or its tooling has published, tagged, pushed or
-released anything. `"private": true` and `"license": "UNLICENSED"` remain in
-`package.json` on purpose (see the owner-decisions table below).
+Nothing in this repository or its tooling has published a package, created a
+release tag or released anything. Pushing source commits to `main` for CI
+verification is not a release; publication remains a separate owner-approved
+step. The package is Apache-2.0 with a tracked `LICENSE` and no `private` flag,
+so the remaining owner decisions below are registry access and reading an
+authenticated CI result for the release commit.
 
 ## Current owner decisions (blockers for the *first* public publish)
 
@@ -16,14 +19,14 @@ impossible until the owner decides them:
 
 | Item | Current state | Required action |
 |---|---|---|
-| `private` flag | `"private": true` in `package.json` | Owner removes it in the release commit (keeps accidental `npm publish` impossible until then) |
-| Outbound license | `"license": "UNLICENSED"`; **no `LICENSE` file exists and MIT has not been applied** | Owner chooses a license, adds the `LICENSE` file, updates `package.json`, `THIRD_PARTY_NOTICES.md` and ADR-0011 |
+| `private` flag | Absent from `package.json` (resolved) | — |
+| Outbound license | `"license": "Apache-2.0"` with a tracked `LICENSE` (resolved) | — |
 | Registry account | Not configured (no `publishConfig`, no `.npmrc`) | Owner holds the npm account + 2FA; provenance recommended if publishing from CI |
-| CI execution | Workflow committed at `.github/workflows/ci.yml`; repository has **no git remote**, so GitHub never runs it yet | Owner adds a remote on GitHub; until then the gate runs locally (below) |
+| CI execution | Workflow committed at `.github/workflows/ci.yml`; an `origin` remote exists, but **no authenticated CI result has been read for the current commit** | Confirm the workflow ran green for the exact release commit (authenticated check); until then the gate runs locally (below) |
 
-`npm run release:check` reports the first two as `[BLOCKED] owner decision`
-lines with remediation. They cannot pass silently, and the gate's summary
-stays `PUBLICATION: BLOCKED` while they exist.
+`npm run release:check` reports unresolved owner decisions as `[BLOCKED] owner
+decision` lines with remediation. They cannot pass silently, and the gate's
+summary stays `PUBLICATION: BLOCKED` while they exist.
 
 ## Technical validation vs publication authorization
 
@@ -65,12 +68,48 @@ runs without credentials. Checks and their failure classes:
 | 11 | `package contents: no local paths or credentials` | shipped files contain no host home/checkout paths, OS user-profile paths or credential-shaped strings | — | FAIL |
 | 12 | `dependency audit (production)` | `npm audit --omit=dev` reports 0 vulnerabilities | npm registry (network) | PASS / FAIL / **NOT TESTED** (registry unreachable) |
 | 13 | `file permission enforcement (POSIX 0600)` | the platform really honors `0600` on a probe file in the OS temp directory (token/instance files rely on this; the probe does not cover the workspace/state filesystem) | POSIX filesystem | PASS / FAIL / **NOT TESTED** on Windows |
-| 14 | `owner decision: private flag` | `private: true` removed | owner | **BLOCKED** until resolved |
-| 15 | `owner decision: license` | an outbound license chosen and applied | owner | **BLOCKED** until resolved |
+| 14 | `owner decision: private flag` | `private` absent from `package.json` | owner | PASS (resolved) / BLOCKED |
+| 15 | `owner decision: license` | an outbound license (`Apache-2.0`) and `LICENSE` file applied | owner | PASS (resolved) / BLOCKED |
 
-`npm pack --dry-run` runs the `prepack` build but never uploads anything; it
-works with `"private": true` in place, which is why package inspection is
-possible before the owner removes the flag.
+`npm pack --dry-run` runs the `prepack` build but never uploads anything; use
+it to inspect the exact tarball before publishing.
+
+### Coverage gate
+
+`npm run test:coverage` runs the full suite under Vitest's v8 provider and
+fails on a drop below the committed floors:
+
+| Metric | Floor | Measured baseline (2026-10-26, Windows 11 / Node 24.20, 1,253 tests) |
+|---|---|---|
+| Statements | 77 | 77.96 |
+| Branches | 68 | 69.35 |
+| Functions | 79 | 80.22 |
+| Lines | 78 | 79.65 |
+
+The baseline is the lowest observed value for each metric across four repeated
+full runs. Repeat measurements move by a few statements because a handful of
+tests exercise timing-dependent paths; timing-sensitive chat tests poll
+observable state instead of sleeping fixed intervals, so the result does not
+depend on worker scheduling. All four consecutive runs passed. The floors keep
+roughly one point of headroom, so that jitter cannot flip the gate.
+
+`coverage.include` is `src/**/*.ts` with **no exclusions**, so moving a module
+out of the gate is not a way to raise the number. The floors sit roughly one
+point below the measurement to absorb platform-specific skips (POSIX-only tests
+on Windows) while still failing on a real regression. CI enforces the gate on
+`ubuntu-latest` only; the other matrix legs still run the full suite through
+`release:check`. The failing path is proven locally with an isolated run:
+
+```bash
+npx vitest run tests/unit/sandbox.test.ts --coverage \
+  --coverage.thresholds.lines=100 --coverage.thresholds.statements=100 \
+  --coverage.thresholds.functions=100 --coverage.thresholds.branches=100
+# exits 1 with "does not meet global threshold" for every metric
+```
+
+When coverage legitimately changes, update the floors in `vitest.config.ts`
+with the new measured baseline, noting the host and date in the comment. Do not
+lower a floor to make a red gate green without recording why coverage dropped.
 
 ### Reading the result states
 
@@ -106,19 +145,22 @@ executed on a native macOS machine** in this project's history.
 | SSE and auth/host validation | validated locally | CI job | CI job |
 | File permissions (0600 token/instance) | NOT TESTED — mode bits unenforced; gate says so | gate check 13 | gate check 13 |
 | Docker worker containers + tmux | executed via Docker Desktop (Linux containers on a Windows host — *not* a native Linux host) | CI `e2e-docker` job | not covered (Docker Desktop only; native engines unverified) |
+| `restricted` network egress denial | unit + wiring tests pass; real-container adversarial E2E **NOT RUN** (Docker daemon unavailable) | CI `e2e-docker` job — authoritative result | NOT TESTED; Docker Desktop's internal-network gateway path is unverified |
 | Browser app-mode launcher | validated locally (Edge/Chrome) | PATH-probing logic unit-tested; native launch NOT TESTED | bundle paths unit-tested; native launch NOT TESTED |
 | Signals and process cleanup | validated locally (Node emulation) | CI job | CI job |
 | Package install from tarball | validated locally (`npm run smoke:package`, path with a space) | CI job | CI job |
 
 "CI job" means the workflow is committed and will run the check; the results
-become real only once a GitHub remote exists and the workflow has actually
-executed. Until then those cells are NOT TESTED — do not claim otherwise.
+become real only once the workflow has actually executed for that commit and
+its result has been read. Until then those cells are NOT TESTED — do not claim
+otherwise.
 
 ## Local reproduction
 
 ```bash
 npm ci                       # deterministic install from the lockfile
 npm run check                # typecheck + full unit/integration suite
+npm run test:coverage        # same suite + v8 coverage gate (src/**/*.ts, no exclusions)
 npm run build                # production build into dist/
 npm run release:check        # the full gate (clean tree required)
 npm run release:check -- --allow-dirty
@@ -130,6 +172,9 @@ npm audit --omit=dev         # production dependency audit (needs registry)
 # opt-in suites (excluded from `npm run check`; read their headers first):
 npx vitest run --config vitest.e2e.config.ts   # Docker + tmux E2E — set PLUTON_E2E_DOCKER=1,
                                                # requires a worker image: docker build -t pluton-worker:local docker/worker
+                                               # includes tests/e2e/restricted-network.e2e.test.ts: proves from inside a
+                                               # real container that `restricted` denies direct, DNS-resolved and
+                                               # child-process egress (internal network + runtime probe)
 PLUTON_E2E_DOCKER=1 npx vitest run --config vitest.e2e.config.ts \
   tests/e2e/linux-bind-mount.e2e.test.ts       # native Linux only — bind-mount ownership/uid assertions;
                                                # procedure: docs/LINUX_BIND_MOUNT_VALIDATION.md
@@ -149,13 +194,14 @@ dispatch, with `permissions: contents: read`, no secrets, and
 `persist-credentials: false` on checkout:
 
 - **validate** (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`,
-  Node 24): `npm ci` → `npm run release:check` → `npm run smoke:package`.
-  This is where check 12 (registry-backed audit) and check 13 (POSIX
-  permissions) get their real results, and where the cross-platform runs
-  above become real.
+  Node 24): `npm ci` → `npm run release:check` → `npm run test:coverage`
+  (ubuntu only) → `npm run smoke:package`. This is where check 12
+  (registry-backed audit), check 13 (POSIX permissions) and the coverage gate
+  get their real results, and where the cross-platform runs above become real.
 - **e2e-docker** (`ubuntu-latest`): builds `pluton-worker:local` from
   `docker/worker/Dockerfile`, then runs the opt-in Docker/tmux E2E with
-  `PLUTON_E2E_DOCKER=1`.
+  `PLUTON_E2E_DOCKER=1`, including the restricted-network egress-denial
+  assertions (`tests/e2e/restricted-network.e2e.test.ts`).
 
 No failure artifacts are uploaded (test and gate output already lands in the
 job log; nothing in the build contains secrets — check 11 enforces that).
@@ -225,7 +271,7 @@ window, unpublishing.
 
 - Native Linux and native macOS runs have not happened in this repository's
   history; the CI jobs above are the mechanism, and they are NOT TESTED until
-  a remote exists and the jobs execute.
+  the jobs execute for the release commit and their results are read.
 - Docker-based validation on this project so far used Docker Desktop (Linux
   containers on a Windows host): useful for the container/tmux layer, **not**
   evidence of native Linux host behavior. The native-Linux ownership check is
@@ -234,5 +280,14 @@ window, unpublishing.
   genuine Linux host — a skipped or Docker Desktop run is not evidence.
 - `--browser` mode exposes the session token in the address bar; mitigated by
   `Referrer-Policy: no-referrer` and loopback binding — see `docs/SECURITY.md`.
+- `restricted` network policy denies internet egress, but the internal network's
+  gateway is the Docker host, so the Pluton tool bridge stays reachable. A
+  compromised engine can still attempt host services bound to that gateway;
+  `restricted` denies the internet, not the host. Whether
+  `host.docker.internal` is reachable through an internal network on Docker
+  Desktop is unverified — if it is not, restricted container sessions fail to
+  reach the tool bridge and do not fall back to `open` (see `docs/SECURITY.md`
+  §8.5). Engines that need model-provider access cannot run under `restricted`;
+  set an explicit per-Ship `network_policy: open` for those.
 - Cancellation of an actively streaming turn via the HTTP API is not fully
   proven (documented race, see `docs/ROADMAP.md`).

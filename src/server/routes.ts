@@ -11,7 +11,6 @@ import { NotFoundError, PlutonError, ValidationError } from '../domain/errors.ts
 import { isTerminalRunState } from '../domain/state.ts'
 import type { ApprovalRecord, ShipRecord, RunRecord } from '../domain/models.ts'
 import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
-import { engineAdapterForShip } from '../engines/approval.ts'
 import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
 import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
@@ -23,10 +22,13 @@ import {
   nativeSpecForShip,
 } from '../execution/factory.ts'
 import type { NativeExecutionProvider } from '../execution/native.ts'
+import type { ExecutionBridgeSpec } from '../execution/native.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { run as execRun } from '../util/exec.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath } from './security.ts'
+import { pickNativeFolder } from './folder-picker.ts'
+import { describeWorkspace, resolveWorkspaceRoot } from './workspace.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
 import {
@@ -36,13 +38,13 @@ import {
   startRunInBackground,
   type RunDeps,
 } from '../cli/commands/run.ts'
-import type { SandboxManager } from '../sandbox/types.ts'
 import type { ProjectContext } from '../cli/context.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
 import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../tools/bridge.ts'
 import { ToolHttpServer } from '../tools/http-transport.ts'
+import { bridgeEndpointOf } from '../tools/http-transport.ts'
 import { isSupervisorStale, wakeSupervisor } from '../orchestrator/supervisor.ts'
 import type { TaskGraph } from '../orchestrator/task-graph.ts'
 import type {
@@ -59,11 +61,7 @@ export interface RouteContext {
   projectId: string
   loaded: LoadedConfig
   broadcaster: ServerEventBroadcaster
-  /**
-   * Test seam: replaces the Docker sandbox manager for server-owned runs, so
-   * tests can script probe/start failures without a container runtime.
-   */
-  sandboxManager?: SandboxManager
+  pickFolderFn?: typeof pickNativeFolder
 }
 
 /**
@@ -122,8 +120,13 @@ export class ApiRouter {
   private readonly mcpRegistrations = new Map<string, McpRegistration>()
   /** Runs started from the SPA's Build mode, so Stop can cancel the right one. */
   private readonly activeRunTasks = new Map<string, string>()
-  /** Lazily created host execution provider for native-mode chat (never Docker). */
-  private nativeProvider: NativeExecutionProvider | null = null
+  /**
+   * Live native execution providers, one per distinct workspace root. The
+   * provider enforces that every session's cwd is inside a root it was built
+   * for, so a provider created for the project root cannot serve an external
+   * session workspace.
+   */
+  private readonly nativeProviders = new Map<string, NativeExecutionProvider>()
 
   /** Runtime settings and account state for SPA configuration (ADR-0014). */
   private accountSettings = {
@@ -175,7 +178,7 @@ export class ApiRouter {
         return true
       }
 
-      // 2. Workspace Summary
+      // 2. Workspace Summary (optionally scoped to a session's workspace)
       if (method === 'GET' && pathname === '/api/workspace') {
         const store = this.ctx.store
         const project = store.getProject(this.ctx.projectId)
@@ -188,9 +191,13 @@ export class ApiRouter {
         const activeRun = runs.find((r) => !isTerminalRunState(r.state)) ?? null
         const approvals = store.listApprovalsByProject(this.ctx.projectId, { status: 'pending' })
 
+        const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
+        const sessionScoped = sessionId !== undefined && sessionId !== null
+        const resolved = sessionId ? this.sessionWorkspaceRoot(sessionId) : resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+        const sessionRecord = sessionId ? this.ctx.store.getChatSessionOrNull(sessionId) : null
         const summary: WorkspaceSummary = {
           name: project?.name ?? this.ctx.loaded.config.project.name,
-          rootDir: this.ctx.loaded.rootDir,
+          rootDir: resolved,
           projectId: this.ctx.projectId,
           defaultBranch: project?.defaultBranch ?? this.ctx.loaded.config.project.default_branch,
           ships: ships.map((m) => ({
@@ -213,26 +220,46 @@ export class ApiRouter {
           })),
           activeRun: activeRun ? { id: activeRun.id, state: activeRun.state, goal: activeRun.goal } : null,
           approvalsPending: approvals.length,
+          sessionId: sessionScoped ? sessionId ?? null : (sessionRecord?.id ?? null),
+          workspaceRoot: sessionScoped ? sessionRecord?.workspaceRoot ?? null : null,
+          sessionScoped,
         }
         this.sendJson(res, 200, { ok: true, workspace: summary })
         return true
       }
 
-      // 3. Workspace Files
-      if (method === 'GET' && pathname === '/api/files') {
-        const files = this.listWorkspaceFiles(this.ctx.loaded.rootDir)
-        this.sendJson(res, 200, { ok: true, files })
-        return true
+      // 2b. Native folder picker: returns an absolute path or a cancellation.
+      if (method === 'POST' && pathname === '/api/workspace/pick') {
+        try {
+          const picker = this.ctx.pickFolderFn ?? pickNativeFolder
+          const result = await picker()
+          if (result.cancelled) {
+            this.sendJson(res, 200, { ok: true, cancelled: true })
+            return true
+          }
+          this.sendJson(res, 200, { ok: true, path: result.path })
+          return true
+        } catch (err) {
+          this.sendJson(res, 200, { ok: false, cancelled: true, error: err instanceof Error ? err.message : String(err) })
+          return true
+        }
       }
 
-      // 4. File Content
-      if (method === 'GET' && pathname === '/api/files/content') {
+      // 2c/2d. Workspace Files and File Content (session-scoped when sessionId supplied)
+      if (method === 'GET' && (pathname === '/api/files' || pathname === '/api/files/content')) {
+        const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
+        const rootDir = this.workspaceRootFor(sessionId ?? null)
+        if (pathname === '/api/files') {
+          const files = this.listWorkspaceFiles(rootDir)
+          this.sendJson(res, 200, { ok: true, files, rootDir })
+          return true
+        }
         const target = parsedUrl.searchParams.get('path')
         if (!target) {
           this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
           return true
         }
-        const resolved = safeResolvePath(this.ctx.loaded.rootDir, target)
+        const resolved = safeResolvePath(rootDir, target)
         if (!resolved) {
           this.sendJson(res, 403, { ok: false, error: 'access denied: path outside workspace' })
           return true
@@ -243,7 +270,7 @@ export class ApiRouter {
         let canonical: string
         let canonicalRoot: string
         try {
-          canonicalRoot = realpathSync(this.ctx.loaded.rootDir)
+          canonicalRoot = realpathSync(rootDir)
           canonical = realpathSync(resolved)
         } catch {
           this.sendJson(res, 404, { ok: false, error: 'file not found' })
@@ -282,17 +309,27 @@ export class ApiRouter {
           return true
         }
         if (method === 'POST') {
-          const payload = await this.readJsonBody<{ shipId?: string; museId?: string; title?: string }>(req)
+          const payload = await this.readJsonBody<{ shipId?: string; museId?: string; title?: string; workspaceRoot?: string }>(req)
           const ships = this.getStoreShips()
           const shipId = payload.shipId ?? payload.museId ?? ships[0]?.id
           if (!shipId) {
             this.sendJson(res, 400, { ok: false, error: 'no ship available for session' })
             return true
           }
+          let workspaceRoot: string
+          try {
+            workspaceRoot = payload.workspaceRoot
+              ? resolveWorkspaceRoot(payload.workspaceRoot)
+              : resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+          } catch (err) {
+            this.sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : 'invalid workspace' })
+            return true
+          }
           const session = this.ctx.store.createChatSession({
             projectId: this.ctx.projectId,
             shipId,
             title: payload.title ?? 'New Session',
+            workspaceRoot,
           })
           this.sendJson(res, 201, { ok: true, session })
           return true
@@ -301,18 +338,57 @@ export class ApiRouter {
 
       // 6. Session Detail
       const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/)
-      if (sessionMatch && method === 'GET') {
+      if (sessionMatch && (method === 'GET' || method === 'PATCH')) {
         const sessionId = sessionMatch[1]!
         const session = this.ctx.store.getChatSessionOrNull(sessionId)
         if (!session) {
           this.sendJson(res, 404, { ok: false, error: `session '${sessionId}' not found` })
           return true
         }
-        const messages = this.ctx.store.listChatMessages(sessionId)
         const ship = this.ctx.store.getShip(session.shipId)
         if (!ship) {
           this.sendJson(res, 404, { ok: false, error: `ship '${session.shipId}' not found` })
           return true
+        }
+        if (method === 'PATCH') {
+          const payload = await this.readJsonBody<{ workspaceRoot?: string | null; title?: string | null }>(req)
+          const active = this.activeEngineSessions.get(sessionId)
+          if (payload.workspaceRoot !== undefined) {
+            if (active) {
+              this.sendJson(res, 409, { ok: false, error: 'switching workspace while the session is busy is not supported' })
+              return true
+            }
+            let nextRoot: string | null = null
+            try {
+              nextRoot = payload.workspaceRoot === null
+                ? resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+                : resolveWorkspaceRoot(payload.workspaceRoot)
+            } catch (err) {
+              this.sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : 'invalid workspace' })
+              return true
+            }
+            const updated = this.ctx.store.updateChatSession(sessionId, { workspaceRoot: nextRoot })
+            this.dropMcpRegistration(sessionId)
+            const entry = this.activeEngineSessions.get(sessionId)
+            if (entry) { void entry.session.close(); this.activeEngineSessions.delete(sessionId) }
+            this.ctx.broadcaster.broadcast({ type: 'workspace_changed', sessionId, workspaceRoot: updated.workspaceRoot })
+            this.sendJson(res, 200, { ok: true, session: updated })
+            return true
+          }
+          if (payload.title !== undefined) {
+            const updated = this.ctx.store.updateChatSession(sessionId, { title: payload.title })
+            this.sendJson(res, 200, { ok: true, session: updated })
+            return true
+          }
+          this.sendJson(res, 200, { ok: true, session })
+          return true
+        }
+        const messages = this.ctx.store.listChatMessages(sessionId)
+        let workspaceRoot: string | null
+        try {
+          workspaceRoot = this.sessionWorkspaceRoot(sessionId)
+        } catch {
+          workspaceRoot = session.workspaceRoot ?? null
         }
         const detail: SessionDetailView = {
           session,
@@ -326,6 +402,7 @@ export class ApiRouter {
             model: ship.model,
           },
           busy: this.activeEngineSessions.get(sessionId)?.busy === true,
+          ...(workspaceRoot !== null ? { workspaceRoot } : {}),
         }
         this.sendJson(res, 200, { ok: true, session: detail })
         return true
@@ -393,7 +470,13 @@ export class ApiRouter {
           return true
         }
         if (method === 'POST') {
-          const payload = await this.readJsonBody<{ goal?: string; managerShipId?: string; managerMuseId?: string }>(req)
+          const payload = await this.readJsonBody<{
+            goal?: string
+            managerShipId?: string
+            managerMuseId?: string
+            sessionId?: string
+            workspaceRoot?: string
+          }>(req)
           const goal = payload.goal?.trim()
           if (!goal) {
             this.sendJson(res, 400, { ok: false, error: 'goal is required' })
@@ -403,6 +486,17 @@ export class ApiRouter {
           const manager = ships.find((m) => m.role === 'supervisor') ?? ships[0]
           if (!manager) {
             this.sendJson(res, 400, { ok: false, error: 'no manager ship configured' })
+            return true
+          }
+          let workspaceRoot: string
+          try {
+            workspaceRoot = payload.workspaceRoot
+              ? resolveWorkspaceRoot(payload.workspaceRoot)
+              : payload.sessionId
+                ? this.workspaceRootFor(payload.sessionId)
+                : resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+          } catch (err) {
+            this.sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : 'invalid workspace' })
             return true
           }
           const run = this.ctx.store.createRun({
@@ -419,6 +513,8 @@ export class ApiRouter {
               maxRunMinutes: 60,
               defaultTaskMinutes: 10,
             },
+            workspaceRoot,
+            originSessionId: payload.sessionId ?? null,
           })
           this.sendJson(res, 201, { ok: true, run })
           return true
@@ -636,12 +732,7 @@ export class ApiRouter {
         const finalVerdict = finalizeRunVerdict(this.ctx.store, runId)
         let resumed = null
         if (payload.dispatch && finalVerdict !== null && finalVerdict.outcome === 'redispatched') {
-          const projectCtx: ProjectContext = {
-            rootDir: this.ctx.loaded.rootDir,
-            configPath: this.ctx.loaded.configPath,
-            loaded: this.ctx.loaded,
-          }
-          resumed = await resumeRun(projectCtx, runId, { skipManager: true }, this.runDeps())
+          resumed = await resumeRun(this.runProjectContext(run), runId, { skipManager: true }, this.runDeps())
         }
         this.sendJson(res, 200, {
           ok: true,
@@ -661,12 +752,7 @@ export class ApiRouter {
           this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
           return true
         }
-        const projectCtx: ProjectContext = {
-          rootDir: this.ctx.loaded.rootDir,
-          configPath: this.ctx.loaded.configPath,
-          loaded: this.ctx.loaded,
-        }
-        const summary = await resumeRun(projectCtx, runId, { skipManager: true }, this.runDeps())
+        const summary = await resumeRun(this.runProjectContext(run), runId, { skipManager: true }, this.runDeps())
         this.sendJson(res, 200, { ok: true, summary })
         return true
       }
@@ -799,7 +885,7 @@ export class ApiRouter {
           return true
         }
         const isCustom = this.customModels.some((m) => m.id === requested)
-        const adapter = this.adapterForShip(ship)
+        const adapter = this.adapterForShip(ship, this.ctx.loaded.rootDir)
         if (!isCustom && adapter.capabilities().modelList) {
           const available = await adapter.listModels()
           const known = available.some((m) => m.id === requested || m.label === requested)
@@ -857,7 +943,7 @@ export class ApiRouter {
         // manager Ship actually plans the run. Progress reaches the SPA over
         // the existing run_state/task_state SSE frames.
         this.activeRunTasks.set(runId, runId)
-        void resumeRun(this.projectContext(), runId, { skipManager: false }, this.runDeps()).then(
+        void resumeRun(this.runProjectContext(run), runId, { skipManager: false }, this.runDeps()).then(
           () => {
             this.activeRunTasks.delete(runId)
           },
@@ -1011,10 +1097,10 @@ export class ApiRouter {
    * the client waits on a run that can never move.
    *
    * Start failures (`via='start_failure'`): `resumeRun` rejects before any
-   * task exists when the substrate is not usable — the Docker daemon is
-   * unreachable, the worker image is missing or drifted, the manager engine
-   * refuses to start. A run stuck in `created` has no task to time out and no
-   * `run.` event to emit.
+   * task exists when the substrate is not usable — the native execution helper
+   * is missing or unverified, the configured mode/network pair is unsupported
+   * on this host, or the manager engine refuses to start. A run stuck in
+   * `created` has no task to time out and no `run.` event to emit.
    *
    * Background crashes (`via='background_crash'`): the in-process supervisor
    * promise rejected after creation (defect 2026-10-21: the rejection was
@@ -1067,7 +1153,6 @@ export class ApiRouter {
       onWorkerEvent: (event) => {
         this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId)
       },
-      ...(this.ctx.sandboxManager !== undefined ? { sandboxManager: this.ctx.sandboxManager } : {}),
     }
   }
 
@@ -1086,6 +1171,7 @@ export class ApiRouter {
         const server = new ToolHttpServer({
           serverName: 'pluton-tools',
           serverVersion: PLUTON_VERSION,
+          ...(process.platform === 'linux' ? { unixSocket: true } : {}),
         })
         await server.start()
         this.toolHttp = server
@@ -1129,6 +1215,7 @@ export class ApiRouter {
     sessionId: string,
     ship: ShipRecord,
     adapter: { capabilities(): { mcpServers: boolean } },
+    workspaceRoot?: string,
   ): Promise<McpServerSpec[]> {
     if (!adapter.capabilities().mcpServers) return []
     let http: ToolHttpServer
@@ -1143,19 +1230,25 @@ export class ApiRouter {
     // Operator scope (no runId): the bridge exposes the operator tool set and
     // may start a supervised run — the same scope `pluton chat` uses.
     let bridge: PlutonToolBridge
+    const effectiveRoot = workspaceRoot ?? this.ctx.loaded.rootDir
     try {
       bridge = new PlutonToolBridge({
         store: this.ctx.store,
         projectId: this.ctx.projectId,
-        rootDir: this.ctx.loaded.rootDir,
+        rootDir: effectiveRoot,
         callerShipId: ship.id,
         limits: toolBridgeLimitsFromRuntime(this.ctx.loaded.config.runtime),
         startRun: async (input) => {
           const started = startRunInBackground(
-            this.projectContext(),
+            { ...this.projectContext(), rootDir: effectiveRoot },
             this.ctx.store,
             this.ctx.projectId,
-            { goal: input.goal, acceptance: input.acceptance },
+            {
+              goal: input.goal,
+              acceptance: input.acceptance,
+              workspaceRoot: effectiveRoot,
+              originSessionId: sessionId,
+            },
             this.runDeps(),
           )
           this.watchBackgroundRun(started)
@@ -1232,25 +1325,70 @@ export class ApiRouter {
   }
 
   /**
-   * Build the engine adapter for the configured execution provider. Docker and
-   * acknowledged local-process keep their existing host/container adapters;
-   * native wraps real engine spawns in the native provider so SPA chat cannot
-   * bypass the execution policy through a host adapter.
+   * Resolve (and lazily persist) the workspace a session operates on.
+   *
+   * Legacy sessions carry NULL and inherit the project root; persisting the
+   * resolved root on first use makes the session's workspace explicit from
+   * then on instead of depending on the server's startup directory forever.
+   * An unreadable/deleted persisted folder fails loudly — silently falling
+   * back would point the engine at a different tree than the operator chose.
    */
-  private adapterForShip(ship: ShipRecord): EngineAdapter {
-    if (this.ctx.loaded.config.sandbox.kind !== 'native') {
-      return engineAdapterForShip(ship)
+  private sessionWorkspaceRoot(sessionId: string): string {
+    const session = this.ctx.store.getChatSessionOrNull(sessionId)
+    if (session === null) throw new NotFoundError('chat session', sessionId)
+    if (session.workspaceRoot === null) {
+      const projectRoot = resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+      this.ctx.store.updateChatSession(sessionId, { workspaceRoot: projectRoot })
+      return projectRoot
     }
-    if (this.nativeProvider === null) {
-      this.nativeProvider = createNativeExecutionProvider({
+    return resolveWorkspaceRoot(session.workspaceRoot)
+  }
+
+  /** Workspace for an optional session id: no id means the project root. */
+  private workspaceRootFor(sessionId: string | null): string {
+    if (sessionId === null) return resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+    return this.sessionWorkspaceRoot(sessionId)
+  }
+
+  /**
+   * Bridge endpoints for `restricted` native sessions. Null until the shared
+   * tool transport is listening; `restricted` dispatch then fails closed
+   * instead of downgrading the network policy.
+   */
+  private executionBridgeEndpoint(): ExecutionBridgeSpec | undefined {
+    const endpoint = this.toolHttp?.endpoint ?? null
+    if (endpoint === null) return undefined
+    return bridgeEndpointOf({ port: endpoint.port, ...(endpoint.unixPath !== undefined ? { unixPath: endpoint.unixPath } : {}) })
+  }
+
+  /** Project context bound to a run's workspace (background work stays bound). */
+  private runProjectContext(run: RunRecord): ProjectContext {
+    const rootDir = resolveWorkspaceRoot(run.workspaceRoot ?? this.ctx.loaded.rootDir)
+    return {
+      rootDir,
+      configPath: this.ctx.loaded.configPath,
+      loaded: this.ctx.loaded,
+    }
+  }
+
+  /**
+   * Build the engine adapter for the native execution provider. There is no
+   * host-process fallback: SPA chat cannot bypass the execution policy through
+   * a plain adapter.
+   */
+  private adapterForShip(ship: ShipRecord, workspaceRoot: string): EngineAdapter {
+    let provider = this.nativeProviders.get(workspaceRoot)
+    if (provider === undefined) {
+      provider = createNativeExecutionProvider({
         config: this.ctx.loaded.config,
         rootDir: this.ctx.loaded.rootDir,
+        extraRoots: [workspaceRoot],
         onEvent: (event) => {
           appendExecutionEvent(this.ctx.store, this.ctx.projectId, null, event)
         },
       })
+      this.nativeProviders.set(workspaceRoot, provider)
     }
-    const provider = this.nativeProvider
     return nativeAdapterFor(ship, {
       provider,
       isolatedCheckout: false,
@@ -1264,6 +1402,10 @@ export class ApiRouter {
           engineHome: req.configDir,
           isolatedCheckout: false,
           sessionKind: 'chat',
+          extraAllowedRoots: [workspaceRoot],
+          ...(this.executionBridgeEndpoint() !== undefined
+            ? { bridge: this.executionBridgeEndpoint() }
+            : {}),
         }),
     })
   }
@@ -1288,7 +1430,8 @@ export class ApiRouter {
       this.dropMcpRegistration(sessionId)
       const ship = this.ctx.store.getShip(shipId)
       if (ship === null) continue
-      const adapter = this.adapterForShip(ship)
+      const sessionWorkspace = this.workspaceRootFor(sessionId)
+      const adapter = this.adapterForShip(ship, sessionWorkspace)
       const approvals = createEngineApprovalChannel({
         store: this.ctx.store,
         projectId: this.ctx.projectId,
@@ -1306,13 +1449,13 @@ export class ApiRouter {
         },
       })
       try {
-      const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter)
+        const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter, sessionWorkspace)
         const next = await adapter.startSession({
           ship: { id: ship.id, slug: ship.slug, role: ship.role, model },
-          workdir: this.ctx.loaded.rootDir,
+          workdir: sessionWorkspace,
           env: {},
           configDir: ship.engineHome,
-          instructions: `You are ${ship.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          instructions: `You are ${ship.displayName}, working inside ${sessionWorkspace}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
@@ -1365,7 +1508,8 @@ export class ApiRouter {
       return
     }
 
-    const adapter = this.adapterForShip(ship)
+    const sessionWorkspace = this.workspaceRootFor(sessionId)
+    const adapter = this.adapterForShip(ship, sessionWorkspace)
 
     let entry = this.activeEngineSessions.get(sessionId)
     if (!entry) {
@@ -1392,7 +1536,7 @@ export class ApiRouter {
       })
       let session: EngineSession
       try {
-      const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter)
+        const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter, sessionWorkspace)
         session = await adapter.startSession({
           ship: {
             id: ship.id,
@@ -1400,10 +1544,10 @@ export class ApiRouter {
             role: ship.role,
             model: ship.model,
           },
-          workdir: this.ctx.loaded.rootDir,
+          workdir: sessionWorkspace,
           env: {},
           configDir: ship.engineHome,
-          instructions: `You are ${ship.displayName}, working inside ${this.ctx.loaded.rootDir}. Assist the user directly with code and tasks.`,
+          instructions: `You are ${ship.displayName}, working inside ${sessionWorkspace}. Assist the user directly with code and tasks.`,
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
@@ -1598,10 +1742,14 @@ export class ApiRouter {
       }
     }
     this.activeEngineSessions.clear()
-    if (this.nativeProvider !== null) {
-      const provider = this.nativeProvider
-      this.nativeProvider = null
-      await provider.close()
+    const providers = [...this.nativeProviders.values()]
+    this.nativeProviders.clear()
+    for (const provider of providers) {
+      try {
+        await provider.close()
+      } catch {
+        // Ignore close errors
+      }
     }
     for (const sessionId of [...this.mcpRegistrations.keys()]) {
       this.dropMcpRegistration(sessionId)

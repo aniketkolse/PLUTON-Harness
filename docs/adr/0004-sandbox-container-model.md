@@ -25,8 +25,14 @@ be running (observed: Docker Desktop installed, daemon stopped at recon time).
   `io.pluton.project=<id>`, `io.pluton.muse=<id>`; stop/kill revalidates label + container ID
   before acting; graceful stop with bounded timeout, then terminate; cleanup failures are
   recorded and block unsafe replacement.
-- **Network policy:** default `restricted` (bridge network; documented honestly as *not* an
-  egress filter), `none` available, `open` opt-in per project config.
+- **Network policy:** `open` is the runtime default (explicit opt-in to egress); `restricted`
+  attaches the container to a dedicated `--internal` Docker network
+  (`runtime.internal_network_name`, else `pluton-restricted-<projectId>`) with no default route,
+  no masquerading and Docker's cross-network drops, and is proven at run start by an in-container
+  TCP probe; `none` uses `--network none`. A restricted container never falls back to `bridge`,
+  and managers that cannot enforce a policy (`local-process`, `native`) refuse it. The internal
+  gateway stays reachable by design (the tool bridge), so `restricted` denies the internet, not
+  the host — see `docs/SECURITY.md` §8.5 and `src/sandbox/network.ts`.
 - **Failure posture:** if Docker is unavailable, worker dispatch **fails closed** with an exact
   fix message in `pluton doctor` / run errors. There is one explicitly dev-only degraded
   sandbox, `local-process`, gated behind a config flag and labeled non-isolated; it exists to

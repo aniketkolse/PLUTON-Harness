@@ -12,7 +12,7 @@ export const REQUIRED_PACK_FILES = [
   'bin/pluton.js',
   'dist/cli/main.js',
   'dist/server/static-assets.js',
-  'docker/worker/Dockerfile',
+  'native/landlock-run/manifest.json',
   'templates/teams/full-stack.yaml',
   'templates/roles/manager.md',
   'README.md',

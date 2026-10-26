@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { engineHomesDir, stateDir, type LoadedConfig } from './config/load.ts'
 import { slugify } from './domain/ids.ts'
 import { openDatabase } from './store/db.ts'
-import { migrate } from './store/migrations.ts'
+import { migrateWithBackup } from './store/migrations.ts'
 import { Store, type ShipSyncSpec } from './store/store.ts'
 import { ROLE_DEFAULT_WORKSPACE_POLICIES } from './domain/models.ts'
 import { ROLE_DEFAULT_PERMISSIONS } from './domain/permissions.ts'
@@ -24,9 +24,10 @@ export interface Bootstrapped {
 export function bootstrapStore(loaded: LoadedConfig): Bootstrapped {
   const dir = stateDir(loaded.rootDir)
   mkdirSync(dir, { recursive: true })
-  const db = openDatabase(join(dir, 'pluton.sqlite'))
+  const dbPath = join(dir, 'pluton.sqlite')
+  const db = openDatabase(dbPath)
   try {
-    migrate(db)
+    migrateWithBackup(db, { dbPath, backupDir: join(dir, 'backups') })
   } catch (e) {
     db.close()
     throw e

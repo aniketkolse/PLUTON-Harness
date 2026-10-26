@@ -44,7 +44,7 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
+    permissions: [project.read, project.write, tests.run, research.report, review.report, verification.report, task.create, task.delegate, task.inspect, task.cancel, result.collect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list]
     approval_mode: ask-for-sensitive-actions
 
   researcher:

@@ -10,9 +10,6 @@ import { NotFoundError, ValidationError } from '../../src/domain/errors.ts'
 import { MockEngineAdapter } from '../../src/engines/mock/adapter.ts'
 import { ScriptedIo } from '../helpers/scripted-io.ts'
 import { stripAnsi } from '../../src/tui/width.ts'
-import { FakeSandbox } from '../helpers/fake-sandbox.ts'
-import { fakeSpawn } from '../helpers/fake-acp-agent.ts'
-import type { WorkerImageProbe } from '../../src/sandbox/image.ts'
 
 const tmpDirs: string[] = []
 
@@ -26,15 +23,17 @@ afterEach(() => {
   }
 })
 
-const CONFIG_LOCAL = `version: 1
+const CONFIG_NATIVE = `version: 1
 project:
   name: cli-chat-it
   repository: .
   default_branch: main
   verification: []
 sandbox:
-  kind: local-process
-  local_process_acknowledged: true
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
 runtime:
   max_concurrent_workers: 2
   max_team_size: 4
@@ -67,44 +66,9 @@ muses:
       - approvals.list
 `
 
-const CONFIG_CONTAINER = `version: 1
-project:
-  name: cli-chat-it
-  repository: .
-  default_branch: main
-  verification: []
-sandbox:
-  kind: docker
-runtime:
-  max_concurrent_workers: 2
-  max_team_size: 4
-  max_delegation_depth: 3
-  max_child_tasks_per_task: 5
-  max_tasks_per_run: 10
-  max_run_minutes: 30
-  default_task_minutes: 10
-  default_cpu_limit: 2
-  default_memory_mb: 2048
-  max_retries_per_task: 1
-  network_policy: restricted
-  max_prompt_chars: 60000
-  max_event_payload_chars: 8000
-  max_tool_result_chars: 120000
-  heartbeat_seconds: 30
-muses:
-  supervisor:
-    display_name: Supervisor
-    role: supervisor
-    engine: mock
-    model: mock/model-a
-    workspace_policy: coordinator-read-only
-    approval_mode: autonomous-bounded
-    permissions:
-      - project.status
-      - run.list
-`
+const CONFIG_LOCAL = CONFIG_NATIVE
 
-function makeFixture(yaml = CONFIG_LOCAL): { ctx: ProjectContext; dir: string } {
+function makeFixture(yaml = CONFIG_NATIVE): { ctx: ProjectContext; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'pluton-chat-test-'))
   tmpDirs.push(dir)
   writeFileSync(join(dir, 'pluton.yaml'), yaml, 'utf8')
@@ -117,7 +81,7 @@ describe('pluton chat CLI command', () => {
     const { ctx } = makeFixture()
     const { plan } = await chatRun(ctx, { json: true })
     expect(plan.museSlug).toBe('supervisor')
-    expect(plan.mode).toBe('local-process')
+    expect(plan.mode).toBe('native')
     expect(plan.resumed).toBe(false)
     expect(plan.messageCount).toBe(0)
     expect(plan.bridge).toBeNull()
@@ -169,7 +133,7 @@ describe('pluton chat CLI command', () => {
       museSlug: 'supervisor',
       engineKind: 'mock',
       model: 'mock/model-a',
-      mode: 'local-process',
+      mode: 'native',
       resumed: false,
       messageCount: 0,
       bridge: null,
@@ -221,37 +185,12 @@ describe('pluton chat CLI command', () => {
     await expect(chatRun(ctx, { resume: foreignSession.id, json: true })).rejects.toThrow(/another project/)
   })
 
-  it('takes container adapter path in docker mode and resolves containerName', async () => {
-    const { ctx } = makeFixture(CONFIG_CONTAINER)
-    const sandbox = new FakeSandbox()
-    const probe: WorkerImageProbe = {
-      present: true,
-      image: 'pluton-worker:local',
-      imageId: 'sha256:fakeimage123',
-      record: {
-        image: 'pluton-worker:local',
-        imageId: 'sha256:fakeimage123',
-        profile: 'engines',
-        tmuxVersion: 'tmux 3.3a',
-        nodeVersion: 'v24.0.0',
-        builtAt: '2026-01-01T00:00:00.000Z',
-      },
-      matchesRecord: true,
-      detail: 'fixture: engines profile present',
-    }
+  it('takes native adapter path and resolves native plan with no container', async () => {
+    const { ctx } = makeFixture()
+    const { plan } = await chatRun(ctx, { json: true })
 
-    const { plan } = await chatRun(
-      ctx,
-      { json: true },
-      {
-        sandboxManager: sandbox as any,
-        workerImageProbe: async () => probe,
-        dockerSpawn: fakeSpawn().spawnFn,
-      },
-    )
-
-    expect(plan.mode).toBe('docker')
-    expect(plan.containerName).toContain('supervisor')
+    expect(plan.mode).toBe('native')
+    expect(plan.containerName).toBeNull()
   })
 
   it('runs interactive loop: sends user prompt, receives response, handles /exit', async () => {

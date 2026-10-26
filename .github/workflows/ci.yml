@@ -2,8 +2,7 @@ name: CI
 
 # Local technical validation lives in `npm run release:check` (docs/RELEASE.md).
 # This workflow runs it plus the clean-install smoke on all three supported
-# host platforms, a coverage threshold on Linux, and the opt-in Docker/tmux
-# E2E on Linux.
+# host platforms, a coverage threshold on Linux, and the orchestration E2E on Linux.
 #
 # It never publishes, tags or releases anything; permissions are read-only and
 # no repository secrets are referenced.
@@ -54,8 +53,8 @@ jobs:
       - name: Package smoke (clean temporary install)
         run: npm run smoke:package
 
-  e2e-docker:
-    name: e2e (docker sandbox + tmux)
+  e2e:
+    name: e2e (orchestration + workspaces)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -72,10 +71,5 @@ jobs:
       - name: Install dependencies (lockfile-pinned)
         run: npm ci
 
-      - name: Build worker image
-        run: docker build -t pluton-worker:local docker/worker
-
-      - name: Run opt-in Docker/tmux E2E
-        env:
-          PLUTON_E2E_DOCKER: '1'
-        run: npx vitest run --config vitest.e2e.config.ts
+      - name: Run orchestration E2E
+        run: npm run test:e2e

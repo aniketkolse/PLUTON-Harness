@@ -30,9 +30,8 @@ import { collectLogType, formatLogsHuman, logsView } from './commands/logs.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createShip, editShip, engineList, listShips, modelList, showShip } from './commands/ship.ts'
-import { sandboxBuildImage, sandboxProbe } from './commands/sandbox.ts'
+import { sandboxProbe } from './commands/sandbox.ts'
 import { workspaceClean } from './commands/workspace.ts'
-import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProfile } from '../sandbox/image.ts'
 import {
   graphHuman,
   graphView,
@@ -522,16 +521,16 @@ engineCmd
   })
 
 // ---------------------------------------------------------------------------
-// sandbox — execution substrate probe and worker image (Phase 5, ADR-0004)
+// sandbox — execution substrate probe (Phase 5, ADR-0013)
 // ---------------------------------------------------------------------------
 
 const sandboxCmd = program
   .command('sandbox')
-  .description('probe the execution substrate (native or Docker) and provision optional worker images')
+  .description('probe the native execution substrate and its confinement capabilities')
 
 sandboxCmd
   .command('probe')
-  .description('report execution sandbox state and host engine provider capabilities')
+  .description('report native execution state and host engine provider capabilities')
   .action(async (_opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
@@ -540,44 +539,11 @@ sandboxCmd
       const lines = [
         `sandbox: ${report.sandbox.kind} — ${report.sandbox.available ? 'available' : 'UNAVAILABLE'}`,
         `detail:  ${report.sandbox.detail}`,
-        report.image ? `image:   ${report.image.image} — ${report.image.detail}` : '',
         ...report.warnings.map((w) => `warning: ${w}`),
         report.dispatchReady ? 'dispatch: ready' : 'dispatch: NOT ready',
       ].filter((s) => s.length > 0)
       emitOk(io, json, lines.join('\n'), report)
       return report.dispatchReady ? 0 : 1
-    })
-  })
-
-sandboxCmd
-  .command('build-image')
-  .description('build the worker image, verify tmux/node inside it, and record the image id')
-  .option('--tag <tag>', `image tag (default: sandbox.image from pluton.yaml, else ${DEFAULT_WORKER_IMAGE_TAG})`)
-  .option('--base <ref>', 'override the base image, e.g. an exact digest reference')
-  .option('--engines', 'engines profile: also install the pinned engine CLIs for container-mode runs')
-  .action(async (opts: { tag?: string; base?: string; engines?: boolean }, cmd: Command) => {
-    const json = jsonMode(cmd)
-    await runCommand(io, json, async () => {
-      const ctx = requireProject(process.cwd())
-      const { record, configTagMismatch } = await sandboxBuildImage(ctx, {
-        ...(opts.tag !== undefined ? { tag: opts.tag } : {}),
-        ...(opts.base !== undefined ? { base: opts.base } : {}),
-        ...(opts.engines === true ? { profile: 'engines' satisfies WorkerImageProfile } : {}),
-      })
-      const human = [
-        `built ${record.image}`,
-        `image id: ${record.imageId}`,
-        `profile: ${record.profile}`,
-        `tmux: ${record.tmuxVersion}   node: ${record.nodeVersion}`,
-        'recorded in .pluton/state/worker-image.json',
-        record.profile === 'engines'
-          ? ''
-          : 'note: container-mode runs need the engines profile — rebuild with `pluton sandbox build-image --engines`',
-        configTagMismatch
-          ? `note: pluton.yaml pins a different tag — set sandbox.image: ${record.image} to use this build`
-          : '',
-      ].filter((s) => s.length > 0)
-      emitOk(io, json, human.join('\n'), record)
     })
   })
 
@@ -1088,7 +1054,7 @@ program
 program
   .command('attach')
   .description(
-    "attach this terminal to a Ship's tmux session (host session in native mode, or container in docker mode; interactive; --json resolves the target without attaching)",
+    "attach this terminal to a Ship's host tmux session (interactive; --json resolves the target without attaching)",
   )
   .argument('<ship>', 'ship id, slug or unique id suffix')
   .option('--window <name>', 'attach to (or create) a named tmux window')

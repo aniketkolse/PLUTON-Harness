@@ -40,6 +40,10 @@ sandbox:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
     mode: workspace-write
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
     session_timeout_minutes: 5
     env_allowlist:
       - CUSTOM_ALLOWED_TEST_VAR
@@ -262,11 +266,16 @@ describe('Native execution integration: manager & worker across isolated Git che
       const probe = await provider.probe()
       expect(probe.available).toBe(true)
       expect(probe.provider).toBe('native')
-      expect(probe.backend).toBe('process-policy')
-      expect(probe.enforcement).toBe('partial')
-      expect(probe.capabilities.processTreeKill).toBe(true)
-      expect(probe.capabilities.filesystemConfinement).toBe(false)
-      expect(probe.capabilities.networkConfinement).toBe(false)
+      if (process.platform === 'linux' && probe.capabilities.filesystemConfinement) {
+        expect(probe.backend).toBe('landlock')
+        expect(probe.enforcement).toBe('os-confinement')
+        expect(probe.capabilities.networkConfinement).toBe(true)
+      } else {
+        expect(probe.backend).toBe('unconfined')
+        expect(probe.enforcement).toBe('unconfined')
+        expect(probe.capabilities.filesystemConfinement).toBe(false)
+        expect(probe.capabilities.networkConfinement).toBe(false)
+      }
     } finally {
       await provider.close()
     }

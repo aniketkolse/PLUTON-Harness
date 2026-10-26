@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { TerminalUnavailableError, ValidationError } from '../../src/domain/errors.ts'
 import {
-  attachToMuseTerminal,
+  attachToShipTerminal,
   buildAttachArgv,
   inheritStdioSpawn,
   type AttachTarget,
@@ -18,16 +18,15 @@ import type {
 import type { RunResult } from '../../src/util/exec.ts'
 
 /**
- * Attach core (ADR-0005): the interactive seam is `docker exec -it <container>
- * tmux attach-session` — never a host shell, never a shell string. Every tmux
+ * Attach core (ADR-0005): the interactive seam is native host `tmux attach-session`
+ * — never a host shell, never a shell string, never Docker. Every tmux
  * interaction is asserted against a recording manager and the spawned argv is
  * captured verbatim; the plan mode (no spawn fn) still ensures the session.
  */
 
-const CONTAINER = 'pluton-pluton-cdef12'
 const SESSION = 'pluton_pluton_cdef12'
 const WINDOW = 'task-abc123'
-const TARGET: AttachTarget = { containerName: CONTAINER, sessionName: SESSION }
+const TARGET: AttachTarget = { sessionName: SESSION }
 
 class RecordingTerminalManager implements TerminalManager {
   readonly calls: string[] = []
@@ -61,12 +60,8 @@ class RecordingTerminalManager implements TerminalManager {
 }
 
 describe('buildAttachArgv', () => {
-  it('builds the exact docker exec -it argv for a session target', () => {
+  it('builds the exact host tmux attach-session argv for a session target', () => {
     expect(buildAttachArgv(TARGET)).toEqual([
-      'docker',
-      'exec',
-      '-it',
-      CONTAINER,
       'tmux',
       'attach-session',
       '-t',
@@ -76,10 +71,6 @@ describe('buildAttachArgv', () => {
 
   it('targets the window exactly when one is named', () => {
     expect(buildAttachArgv({ ...TARGET, windowName: WINDOW })).toEqual([
-      'docker',
-      'exec',
-      '-it',
-      CONTAINER,
       'tmux',
       'attach-session',
       '-t',
@@ -87,55 +78,17 @@ describe('buildAttachArgv', () => {
     ])
   })
 
-  it('refuses unsafe session, window and container names', () => {
+  it('refuses unsafe session and window names', () => {
     expect(() => buildAttachArgv({ ...TARGET, sessionName: 'evil:target' })).toThrow(ValidationError)
     expect(() => buildAttachArgv({ ...TARGET, windowName: 'evil.window' })).toThrow(ValidationError)
-    expect(() => buildAttachArgv({ ...TARGET, containerName: 'Bad Container!' })).toThrow(ValidationError)
-    expect(() => buildAttachArgv({ ...TARGET, containerName: '-leading' })).toThrow(ValidationError)
-    expect(() => buildAttachArgv({ ...TARGET, containerName: '' })).toThrow(ValidationError)
-  })
-
-  it('builds direct tmux attach-session argv on host when sandboxKind is native', () => {
-    expect(buildAttachArgv(TARGET, 'native')).toEqual([
-      'tmux',
-      'attach-session',
-      '-t',
-      `=${SESSION}`,
-    ])
-    expect(buildAttachArgv({ ...TARGET, windowName: WINDOW }, 'native')).toEqual([
-      'tmux',
-      'attach-session',
-      '-t',
-      `=${SESSION}:=${WINDOW}`,
-    ])
-  })
-
-  it('builds direct tmux attach-session argv when containerName is host', () => {
-    expect(buildAttachArgv({ containerName: 'host', sessionName: SESSION })).toEqual([
-      'tmux',
-      'attach-session',
-      '-t',
-      `=${SESSION}`,
-    ])
   })
 })
 
-describe('attachToMuseTerminal', () => {
-  it('refuses local-process configs before touching any manager', async () => {
-    const manager = new RecordingTerminalManager()
-    const err = await attachToMuseTerminal({ sandboxKind: 'local-process', manager, target: TARGET }).catch(
-      (e: unknown) => e,
-    )
-    expect(err).toBeInstanceOf(ValidationError)
-    expect((err as ValidationError).message).toContain('sandbox.kind: docker')
-    expect(manager.calls).toEqual([])
-  })
-
+describe('attachToShipTerminal', () => {
   it('ensures the session, spawns the interactive attach and returns the child exit code', async () => {
     const manager = new RecordingTerminalManager()
     const spawned: string[][] = []
-    const outcome = await attachToMuseTerminal({
-      sandboxKind: 'docker',
+    const outcome = await attachToShipTerminal({
       manager,
       target: TARGET,
       spawnAttach: (argv) => {
@@ -144,12 +97,12 @@ describe('attachToMuseTerminal', () => {
       },
     })
 
-    expect(manager.calls).toEqual([`ensureSession:${CONTAINER}:${SESSION}`])
+    expect(manager.calls).toEqual([`ensureSession:host:${SESSION}`])
     expect(spawned).toEqual([
-      ['docker', 'exec', '-it', CONTAINER, 'tmux', 'attach-session', '-t', `=${SESSION}`],
+      ['tmux', 'attach-session', '-t', `=${SESSION}`],
     ])
     expect(outcome).toEqual({
-      containerName: CONTAINER,
+      containerName: 'host',
       sessionName: SESSION,
       windowName: null,
       sessionCreated: true,
@@ -160,73 +113,9 @@ describe('attachToMuseTerminal', () => {
   it('ensures the window after the session and targets =session:=window', async () => {
     const manager = new RecordingTerminalManager()
     const spawned: string[][] = []
-    const outcome = await attachToMuseTerminal({
-      sandboxKind: 'docker',
+    const outcome = await attachToShipTerminal({
       manager,
       target: { ...TARGET, windowName: WINDOW },
-      spawnAttach: (argv) => {
-        spawned.push(argv)
-        return Promise.resolve(0)
-      },
-    })
-
-    expect(manager.calls).toEqual([
-      `ensureSession:${CONTAINER}:${SESSION}`,
-      `ensureWindow:${CONTAINER}:${SESSION}:${WINDOW}`,
-    ])
-    expect(spawned[0]?.at(-1)).toBe(`=${SESSION}:=${WINDOW}`)
-    expect(outcome.windowName).toBe(WINDOW)
-    expect(outcome.exitCode).toBe(0)
-  })
-
-  it('plan mode (no spawn fn) ensures the session but never spawns', async () => {
-    const manager = new RecordingTerminalManager()
-    const outcome = await attachToMuseTerminal({ sandboxKind: 'docker', manager, target: TARGET })
-
-    expect(outcome.exitCode).toBeNull()
-    expect(manager.calls).toEqual([`ensureSession:${CONTAINER}:${SESSION}`])
-  })
-
-  it('maps a spawn failure to a fixable terminal_unavailable', async () => {
-    const manager = new RecordingTerminalManager()
-    const err = await attachToMuseTerminal({
-      sandboxKind: 'docker',
-      manager,
-      target: TARGET,
-      spawnAttach: () => Promise.reject(new Error('spawn docker ENOENT')),
-    }).catch((e: unknown) => e)
-
-    expect(err).toBeInstanceOf(TerminalUnavailableError)
-    expect((err as TerminalUnavailableError).details).toMatchObject({ reason: 'exec_failed' })
-    expect((err as Error).message).toContain('could not start docker exec')
-    expect((err as Error).message).toContain('docker version')
-  })
-
-  it('supports sandboxKind native in plan mode without Docker', async () => {
-    const manager = new RecordingTerminalManager()
-    const outcome = await attachToMuseTerminal({
-      sandboxKind: 'native',
-      manager,
-      target: { containerName: 'host', sessionName: SESSION },
-    })
-
-    expect(outcome).toEqual({
-      containerName: 'host',
-      sessionName: SESSION,
-      windowName: null,
-      sessionCreated: true,
-      exitCode: null,
-    })
-    expect(manager.calls).toEqual([`ensureSession:host:${SESSION}`])
-  })
-
-  it('supports sandboxKind native in interactive spawn mode', async () => {
-    const manager = new RecordingTerminalManager()
-    const spawned: string[][] = []
-    const outcome = await attachToMuseTerminal({
-      sandboxKind: 'native',
-      manager,
-      target: { containerName: 'host', sessionName: SESSION, windowName: WINDOW },
       spawnAttach: (argv) => {
         spawned.push(argv)
         return Promise.resolve(0)
@@ -237,24 +126,30 @@ describe('attachToMuseTerminal', () => {
       `ensureSession:host:${SESSION}`,
       `ensureWindow:host:${SESSION}:${WINDOW}`,
     ])
-    expect(spawned).toEqual([
-      ['tmux', 'attach-session', '-t', `=${SESSION}:=${WINDOW}`],
-    ])
+    expect(spawned[0]?.at(-1)).toBe(`=${SESSION}:=${WINDOW}`)
+    expect(outcome.windowName).toBe(WINDOW)
     expect(outcome.exitCode).toBe(0)
   })
 
-  it('maps spawn failure in native mode to terminal_unavailable with fix', async () => {
+  it('plan mode (no spawn fn) ensures the session but never spawns', async () => {
     const manager = new RecordingTerminalManager()
-    const err = await attachToMuseTerminal({
-      sandboxKind: 'native',
+    const outcome = await attachToShipTerminal({ manager, target: TARGET })
+
+    expect(outcome.exitCode).toBeNull()
+    expect(manager.calls).toEqual([`ensureSession:host:${SESSION}`])
+  })
+
+  it('maps a spawn failure to a fixable terminal_unavailable', async () => {
+    const manager = new RecordingTerminalManager()
+    const err = await attachToShipTerminal({
       manager,
-      target: { containerName: 'host', sessionName: SESSION },
+      target: TARGET,
       spawnAttach: () => Promise.reject(new Error('spawn tmux ENOENT')),
     }).catch((e: unknown) => e)
 
     expect(err).toBeInstanceOf(TerminalUnavailableError)
     expect((err as TerminalUnavailableError).details).toMatchObject({ reason: 'tmux_not_installed' })
-    expect((err as Error).message).toContain('install tmux')
+    expect((err as Error).message).toContain('could not attach to host tmux session')
   })
 })
 

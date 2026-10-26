@@ -24,6 +24,12 @@ export interface ToolEnv {
   store: Store
   projectId: string
   rootDir: string
+  /**
+   * Filesystem roots this session's read tools may resolve against. Derived
+   * server-side from the caller's task/checkout identity; tool arguments can
+   * never widen it. Empty means no read scope is available yet.
+   */
+  readRoots: readonly string[]
   runId: string
   callerShipId: string
   callerTaskId: string | null
@@ -209,12 +215,17 @@ function resolveShip(env: ToolEnv, ref: string): ShipRecord {
   throw new ValidationError(`unknown or disabled Ship '${ref}': use an id or slug from the project's team`)
 }
 
-function assertInsideRoot(rootDir: string, path: string): void {
-  const root = resolve(rootDir)
+function sessionReadRoots(env: ToolEnv): string[] {
+  return env.readRoots.map((root) => resolve(root))
+}
+
+function assertInsideSessionRoots(env: ToolEnv, path: string): void {
   const abs = resolve(path)
-  const rel = relative(root, abs)
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return
-  throw new ExternalToolError('path guard', `stored path escapes the project root: ${path}`, { path })
+  for (const root of sessionReadRoots(env)) {
+    const rel = relative(root, abs)
+    if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return
+  }
+  throw new PolicyDeniedError(`stored path escapes this session's read roots: ${path}`)
 }
 
 /**
@@ -755,7 +766,7 @@ export const TOOL_HANDLERS: ToolHandlers = {
     if (!ws || ws.state !== 'active') {
       return { taskId: task.id, workspace: null, note: 'no active checkout for this task yet' }
     }
-    assertInsideRoot(env.rootDir, ws.path)
+    assertInsideSessionRoots(env, ws.path)
     // A revision must never be parsed as a git option (`--output=…` etc.).
     if (!BASE_COMMIT_RE.test(ws.baseCommit)) {
       throw new ValidationError(`workspace ${ws.id} has a malformed base commit; refusing to pass it to git`)
@@ -791,27 +802,40 @@ export const TOOL_HANDLERS: ToolHandlers = {
     if (rel !== '' && (isAbsolute(rel) || rel.split(/[\\/]+/).includes('..'))) {
       throw new PolicyDeniedError(`path must be relative and inside the project (no absolute paths, no '..'): '${rel}'`)
     }
-    const root = resolve(env.rootDir)
-    const abs = resolve(root, rel)
-    const relFromRoot = relative(root, abs)
-    if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) {
-      throw new PolicyDeniedError(`path escapes the project root: '${rel}'`)
+    const roots = sessionReadRoots(env)
+    if (roots.length === 0) {
+      throw new PolicyDeniedError(
+        'no read scope is available for this session yet: wait for the task checkout to be provisioned',
+      )
     }
-    const refused = refusedRelativePath(relFromRoot)
-    if (refused !== null) {
-      throw new PolicyDeniedError(`'${relFromRoot}' is inside a refused area ('${refused}') and can never be read through Pluton tools`)
-    }
-    // Canonicalize through the real filesystem before trusting the path:
+    // Resolve against every root the session is allowed to read (normally one)
+    // and canonicalize through the real filesystem before trusting the path:
     // junctions/symlinks (`link -> C:\elsewhere`), case variants (`.PLUTON`)
-    // and 8.3 aliases (`PLUTON~1`) must not smuggle anything out of the root or
+    // and 8.3 aliases (`PLUTON~1`) must not smuggle anything out of a root or
     // into a refused area. Both sides are realpath'd so the comparison is
-    // apples-to-apples; the lexical checks above stay as the cheap pre-filter.
-    const canonicalRoot = await realpath(root)
-    const canonical = await realpath(abs).catch(() => null)
-    if (canonical === null) throw new NotFoundError('path', rel === '' ? '.' : rel)
-    const canonicalRel = relative(canonicalRoot, canonical)
-    if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
-      throw new PolicyDeniedError(`path resolves outside the project root (via a link): '${rel}'`)
+    // apples-to-apples; the lexical checks stay as the cheap pre-filter.
+    let canonicalRoot: string | null = null
+    let canonical: string | null = null
+    let canonicalRel = ''
+    for (const root of roots) {
+      const abs = resolve(root, rel)
+      const lexicalRel = relative(root, abs)
+      if (lexicalRel.startsWith('..') || isAbsolute(lexicalRel)) continue
+      const realRoot = await realpath(root).catch(() => null)
+      if (realRoot === null) continue
+      const realTarget = await realpath(abs).catch(() => null)
+      if (realTarget === null) continue
+      const relFromRoot = relative(realRoot, realTarget)
+      if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+      canonicalRoot = realRoot
+      canonical = realTarget
+      canonicalRel = relFromRoot
+      break
+    }
+    if (canonical === null || canonicalRoot === null) {
+      const exists = await realpath(resolve(roots[0] as string, rel)).catch(() => null)
+      if (exists === null) throw new NotFoundError('path', rel === '' ? '.' : rel)
+      throw new PolicyDeniedError(`path resolves outside this session's read roots (via a link): '${rel}'`)
     }
     const refusedCanonical = refusedRelativePath(canonicalRel)
     if (refusedCanonical !== null) {

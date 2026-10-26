@@ -364,11 +364,26 @@ export function buildManagerPrompt(
     ...team,
     '',
     'Rules:',
-    '- Plan first: create the minimal set of tasks with the task.create tool (assign each to the right Ship; use dependsOn for ordering; an assignee may never own an ancestor task).',
+    '- Plan first: create tasks with task.create or perform direct research, coding, review, and verification within your declared permissions.',
     '- Delegate only through the Pluton tools; Pluton state, not your prose, is authoritative.',
     '- Use task.wait to wait for your team: it returns once every requested task has settled (completed, failed, cancelled, or awaiting verification).',
     "- A task in 'verifying' has finished its work and awaits the operator's verification gate — report it as awaiting verification; never keep waiting for it to become completed.",
-    '- Finish by collecting the settled tasks with task.get_result, then end your turn with a concise report: what is done, what is awaiting verification, what remains. Never claim a result the task records do not support.',
+    '- Finish by collecting the settled tasks with task.get_result.',
+    '- Never claim a result that is not backed by real task records or execution output.',
+    '',
+    'Response Format Contract:',
+    'Format your final report following this exact structure:',
+    '### Summary',
+    'Brief overview of what was requested and accomplished.',
+    '',
+    '### Changes',
+    'List of files modified, created, or deleted, or specific changes executed.',
+    '',
+    '### Verification',
+    'Checks, tests, or validations performed, and their real outcomes. Never claim a result that was not actually verified.',
+    '',
+    '### Remaining issues',
+    'Any known limitations, unresolved items, or next steps (or "None" if all tasks succeeded).',
   )
   const text = lines.join('\n')
   if (text.length <= maxChars) return text
@@ -1368,6 +1383,15 @@ export class RunSupervisor {
     // CS-9: register the manager session as an interrupt target while its prompt
     // is in flight (a terminal run must stop its manager too).
     this.managerSessionRef = session
+    this.emitWorkerEvent({
+      type: 'worker.started',
+      runId: this.runId,
+      taskId: 'manager',
+      role: 'supervisor',
+      model: ship.model,
+      workspace: this.rootDir,
+      payload: { step: `session started (${adapter.kind})` },
+    })
     const prompt = buildManagerPrompt(
       run.goal,
       ship,
@@ -1376,7 +1400,77 @@ export class RunSupervisor {
       this.limits.maxBriefChars,
     )
     try {
-      return await this.runPrompt(session, { text: prompt, timeoutMs: this.runDeadlineMs }, { shipId: ship.id })
+      const out = await this.runPrompt(
+        session,
+        { text: prompt, timeoutMs: this.runDeadlineMs },
+        {
+          shipId: ship.id,
+          onTool: (tool) => {
+            const label =
+              tool.summary !== undefined && tool.summary !== '' ? `${tool.name}: ${tool.summary}` : tool.name
+            this.emitWorkerEvent({
+              type: 'worker.progress',
+              runId: this.runId,
+              taskId: 'manager',
+              role: 'supervisor',
+              model: ship.model,
+              workspace: this.rootDir,
+              payload: {
+                step: tool.phase === 'end' ? `${label} (finished${tool.isError ? ' with error' : ''})` : label,
+                phase: tool.phase,
+                tool: tool.name,
+                isError: tool.isError,
+              },
+            })
+          },
+        },
+      )
+      if (out.outcome === 'success') {
+        this.emitWorkerEvent({
+          type: 'worker.completed',
+          runId: this.runId,
+          taskId: 'manager',
+          role: 'supervisor',
+          model: ship.model,
+          workspace: this.rootDir,
+          payload: {
+            ...(out.summary !== null ? { summary: out.summary } : {}),
+            ...(out.text ? { text: out.text.slice(0, 4_000) } : {}),
+          },
+        })
+      } else if (out.outcome === 'cancelled') {
+        this.emitWorkerEvent({
+          type: 'worker.cancelled',
+          runId: this.runId,
+          taskId: 'manager',
+          role: 'supervisor',
+          model: ship.model,
+          workspace: this.rootDir,
+          ...(out.summary !== null ? { payload: { summary: out.summary } } : {}),
+        })
+      } else {
+        this.emitWorkerEvent({
+          type: 'worker.failed',
+          runId: this.runId,
+          taskId: 'manager',
+          role: 'supervisor',
+          model: ship.model,
+          workspace: this.rootDir,
+          payload: { error: out.errorCode ?? 'manager session failed' },
+        })
+      }
+      return out
+    } catch (err) {
+      this.emitWorkerEvent({
+        type: 'worker.failed',
+        runId: this.runId,
+        taskId: 'manager',
+        role: 'supervisor',
+        model: ship.model,
+        workspace: this.rootDir,
+        payload: { error: err instanceof Error ? err.message : String(err) },
+      })
+      throw err
     } finally {
       // CS-9: deregister before closing — the session is no longer an interrupt
       // target, and the manager's interrupt slot is free for nothing else to use.

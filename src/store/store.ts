@@ -19,6 +19,10 @@ import {
   APPROVAL_STATUSES,
   CHAT_MESSAGE_ROLES,
   CHAT_SESSION_STATES,
+  EXECUTION_MODES,
+  EXECUTION_NETWORK_POLICIES,
+  SANDBOX_KINDS,
+  SANDBOX_SESSION_STATES,
   type ApprovalRecord,
   type ApprovalStatus,
   type ChatMessageRecord,
@@ -26,6 +30,8 @@ import {
   type ChatSessionRecord,
   type ChatSessionState,
   type EventRecord,
+  type ExecutionMode,
+  type ExecutionNetworkPolicy,
   type JsonValue,
   type ShipRecord,
   type ProjectRecord,
@@ -34,6 +40,7 @@ import {
   type RunBudget,
   type RunRecord,
   type SandboxRecord,
+  type SandboxSessionState,
   type TaskEdgeRecord,
   type TaskRecord,
   type TerminalRecord,
@@ -50,7 +57,7 @@ import { withTx } from './db.ts'
  * BEGIN IMMEDIATE transaction, so receipts, state and events are committed
  * atomically: a crash either leaves everything or nothing.
  *
- * Rule enforced here (prompt §5): the store never invents success. Transitions
+ * Rule enforced here (prompt Â§5): the store never invents success. Transitions
  * go through the domain state machine; unknown strings from the database are
  * `InternalError`, not silently coerced.
  */
@@ -98,6 +105,22 @@ function parseJsonText<T>(text: string | null, fallback: T): T {
   }
 }
 
+function bool01(row: Row, key: string): boolean {
+  const v = row[key]
+  if (v === 0 || v === 0n) return false
+  if (v === 1 || v === 1n) return true
+  throw new InternalError(`db row: expected 0|1 at '${key}', got ${typeof v}`)
+}
+
+function nenum<T extends string>(row: Row, key: string, allowed: readonly T[], label: string): T | null {
+  const value = nstr(row, key)
+  if (value === null) return null
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new InternalError(`db row: invalid ${label} '${value}'`)
+  }
+  return value as T
+}
+
 function stringifyJson(v: unknown): string {
   const text = JSON.stringify(v)
   if (text === undefined) throw new InternalError('cannot serialize undefined to JSON')
@@ -111,7 +134,7 @@ const nowIso = (): string => new Date().toISOString()
  * INSERT ... SELECT's WHERE): it proves, inside the same statement, that the
  * `runs` row still carries the fence's supervisor token. A statement that
  * matches no row is therefore the durable proof that this process lost
- * ownership — no separate check, no read-modify-write window.
+ * ownership â€” no separate check, no read-modify-write window.
  */
 function fenceClause(fence: SupervisorFence): { sql: string; params: [string, string] } {
   return {
@@ -158,6 +181,10 @@ export interface NewRunSpec {
   /** @deprecated Use `managerShipId`; kept for backward compatibility. */
   managerMuseId?: string
   budget: RunBudget
+  /** Workspace the run operates on; omitted/NULL means the server project root. */
+  workspaceRoot?: string | null
+  /** Chat session that started the run (background work stays bound to it). */
+  originSessionId?: string | null
 }
 
 export interface NewTaskSpec {
@@ -182,7 +209,7 @@ export interface AppendEventInput {
   museId?: string | null
   type: string
   payload?: JsonValue
-  /** Hard cap for the serialized payload (prompt §2.4 bounded payloads). */
+  /** Hard cap for the serialized payload (prompt Â§2.4 bounded payloads). */
   maxChars?: number
 }
 
@@ -219,7 +246,7 @@ export interface NewVerificationCheckSpec {
   runId: string
   taskId: string | null
   name: string
-  /** argv array — never a shell string. */
+  /** argv array â€” never a shell string. */
   command: string[]
   cwd: string | null
   workspaceId: string | null
@@ -236,6 +263,29 @@ export interface UpsertSandboxSpec {
   image: string | null
   state: SandboxState
   createdBy: string
+  /** Defaults to true; a history row is inserted with `false` explicitly. */
+  active?: boolean
+  legacy?: boolean
+  executionMode?: ExecutionMode | null
+  networkPolicy?: ExecutionNetworkPolicy | null
+  helperVersion?: string | null
+  policy?: JsonValue | null
+  sessionState?: SandboxSessionState | null
+  lastSeenAt?: string | null
+  exitCode?: number | null
+  startedAt?: string | null
+  endedAt?: string | null
+}
+
+export interface StartSandboxSessionSpec
+  extends Omit<
+    UpsertSandboxSpec,
+    'active' | 'legacy' | 'executionMode' | 'networkPolicy' | 'sessionState' | 'startedAt'
+  > {
+  executionMode: ExecutionMode
+  networkPolicy: ExecutionNetworkPolicy
+  sessionState?: SandboxSessionState
+  startedAt?: string
 }
 
 export interface UpsertTerminalSpec {
@@ -456,8 +506,9 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json, manager_ship_id,
-                           budget_json, supervisor_pid, created_at, started_at, completed_at, final_summary)
-         VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, NULL, NULL, NULL)`,
+                           budget_json, supervisor_pid, created_at, started_at, completed_at, final_summary,
+                           workspace_root, origin_session_id)
+         VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?)`,
       )
       .run(
         id,
@@ -469,6 +520,8 @@ export class Store {
         managerShipId,
         stringifyJson(spec.budget),
         now,
+        spec.workspaceRoot ?? null,
+        spec.originSessionId ?? null,
       )
     return this.getRun(id)
   }
@@ -499,12 +552,12 @@ export class Store {
    * - The `runs` row is the only authority. `supervisor_token` is the fencing
    *   token; the only way in is heartbeat expiry (or a NULL heartbeat).
    * - The boundary is intentional: unfenced writes are the control plane
-   *   (operator/tool actions, routes, chat) — state-driven by design. Only
+   *   (operator/tool actions, routes, chat) â€” state-driven by design. Only
    *   supervisor duty paths pass a fence. On any doubt the claim fails closed.
    */
 
   /**
-   * Claim the run for `pid`. Returns null — no waiting, no queueing — when a
+   * Claim the run for `pid`. Returns null â€” no waiting, no queueing â€” when a
    * live owner holds it: takeover is possible only once the previous heartbeat
    * is at or before `nowMs - ttlMs` (a NULL heartbeat counts as expired).
    */
@@ -703,13 +756,13 @@ export class Store {
 
   /**
    * Compare-and-swap task transition: only moves when the task is currently in
-   * `from`. A mismatch (a lost race — e.g. a repeated dispatch, or another
+   * `from`. A mismatch (a lost race â€” e.g. a repeated dispatch, or another
    * supervisor) returns null without throwing or mutating; an illegal `to`
    * transition from the matching state still throws. The UPDATE repeats the
    * expected state in its WHERE clause, so two claimants can never both win.
    * The CAS covers the state column only: timestamps and patch defaults are
    * still derived from the pre-update snapshot read above. With a fence, every
-   * miss — pre-read mismatch or 0-row CAS — is classified against the run's
+   * miss â€” pre-read mismatch or 0-row CAS â€” is classified against the run's
    * current token, so a stale owner throws instead of reading a silent null.
    */
   setTaskStateIf(
@@ -752,7 +805,7 @@ export class Store {
         ...(guard ? guard.params : []),
       )
     if (Number(res.changes) !== 1) {
-      // A state-CAS miss stays a plain null; only a missed fence throws — the
+      // A state-CAS miss stays a plain null; only a missed fence throws â€” the
       // two losses must remain distinguishable to the caller.
       this.assertFenceAtEnd(fence)
       return null
@@ -883,32 +936,48 @@ export class Store {
     return this.getWorkspace(id)
   }
 
-  // -- sandboxes (one long-lived container per Ship, ADR-0004) --------------
+  // -- sandboxes (execution sessions, ADR-0004/ADR-0013) --------------------
 
   /**
-   * One sandbox row per (project, ship), re-upserting keeps the same record id.
-   * Backed by the NULL-safe unique index `idx_sandboxes_project_ship` (v2, renamed from `idx_sandboxes_project_muse` in v8): the
-   * insert and the conflicting update are one atomic statement, so two
-   * concurrent writers cannot both insert — the loser updates the winner's row
-   * (excluded.id is never assigned, so id/created_by/created_at stay stable).
+   * Upsert the current sandbox row for (project, ship), keeping its id stable.
+   *
+   * v10 replaced the table-wide unique index with the partial unique index
+   * `idx_sandboxes_active_ship(project_id, IFNULL(ship_id,'')) WHERE active = 1`,
+   * so legacy Docker rows and a new native session for the same Ship can
+   * coexist. The conflict target names that partial index explicitly; a history
+   * row (`active: false`) never conflicts with the live session.
    */
   upsertSandbox(spec: UpsertSandboxSpec): SandboxRecord {
     const now = nowIso()
     const shipId = spec.shipId !== undefined ? spec.shipId : (spec.museId ?? null)
-    this.db
+    const inserted = this.db
       .prepare(
         `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
-                                created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, IFNULL(ship_id,'')) DO UPDATE SET
+                                created_by, created_at, updated_at, active, legacy, execution_mode,
+                                network_policy, helper_version, policy_json, session_state, last_seen_at,
+                                exit_code, started_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, IFNULL(ship_id,'')) WHERE active = 1 DO UPDATE SET
            kind = excluded.kind,
            container_name = excluded.container_name,
            container_id = excluded.container_id,
            image = excluded.image,
            state = excluded.state,
-           updated_at = excluded.updated_at`,
+           active = excluded.active,
+           legacy = excluded.legacy,
+           execution_mode = excluded.execution_mode,
+           network_policy = excluded.network_policy,
+           helper_version = excluded.helper_version,
+           policy_json = excluded.policy_json,
+           session_state = excluded.session_state,
+           last_seen_at = excluded.last_seen_at,
+           exit_code = excluded.exit_code,
+           started_at = excluded.started_at,
+           ended_at = excluded.ended_at,
+           updated_at = excluded.updated_at
+         RETURNING id`,
       )
-      .run(
+      .get(
         newId('sandbox'),
         spec.projectId,
         shipId,
@@ -920,10 +989,77 @@ export class Store {
         spec.createdBy,
         now,
         now,
-      )
-    const saved = this.getSandboxForShip(spec.projectId, shipId)
-    if (!saved) throw new InternalError('sandbox row disappeared inside upsert')
-    return saved
+        spec.active === false ? 0 : 1,
+        spec.legacy === true ? 1 : 0,
+        spec.executionMode ?? null,
+        spec.networkPolicy ?? null,
+        spec.helperVersion ?? null,
+        spec.policy !== undefined && spec.policy !== null ? stringifyJson(spec.policy) : null,
+        spec.sessionState ?? null,
+        spec.lastSeenAt ?? null,
+        spec.exitCode ?? null,
+        spec.startedAt ?? null,
+        spec.endedAt ?? null,
+      ) as { id: string } | undefined
+    if (inserted === undefined) throw new InternalError('sandbox row disappeared inside upsert')
+    return this.getSandbox(inserted.id)
+  }
+
+  /**
+   * Start a new execution session for (project, ship): deactivate the previous
+   * active row and insert the new session row in one transaction. The partial
+   * unique index makes a concurrent second active row impossible.
+   */
+  startSandboxSession(spec: StartSandboxSessionSpec): SandboxRecord {
+    const now = nowIso()
+    const shipId = spec.shipId !== undefined ? spec.shipId : (spec.museId ?? null)
+    const id = newId('sandbox')
+    withTx(this.db, () => {
+      this.db
+        .prepare(
+          `UPDATE sandboxes
+           SET active = 0,
+               session_state = CASE
+                 WHEN session_state IN ('starting', 'running') THEN 'exited'
+                 ELSE session_state
+               END,
+               ended_at = COALESCE(ended_at, ?),
+               updated_at = ?
+           WHERE project_id = ? AND ship_id IS ? AND active = 1`,
+        )
+        .run(now, now, spec.projectId, shipId)
+      this.db
+        .prepare(
+          `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
+                                  created_by, created_at, updated_at, active, legacy, execution_mode,
+                                  network_policy, helper_version, policy_json, session_state, last_seen_at,
+                                  exit_code, started_at, ended_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          spec.projectId,
+          shipId,
+          spec.kind,
+          spec.containerName,
+          spec.containerId,
+          spec.image,
+          spec.state,
+          spec.createdBy,
+          now,
+          now,
+          spec.executionMode,
+          spec.networkPolicy,
+          spec.helperVersion ?? null,
+          spec.policy !== undefined && spec.policy !== null ? stringifyJson(spec.policy) : null,
+          spec.sessionState ?? 'starting',
+          spec.lastSeenAt ?? now,
+          spec.exitCode ?? null,
+          spec.startedAt ?? now,
+          spec.endedAt ?? null,
+        )
+    })
+    return this.getSandbox(id)
   }
 
   getSandbox(id: string): SandboxRecord {
@@ -937,9 +1073,17 @@ export class Store {
     return row ? rowToSandbox(row) : null
   }
 
+  /**
+   * The Ship's live session. Legacy rows (`active = 0`) are history and are
+   * never returned here, even when no new session exists yet.
+   */
   getSandboxForShip(projectId: string, shipId: string | null): SandboxRecord | null {
     const row = this.db
-      .prepare('SELECT * FROM sandboxes WHERE project_id = ? AND ship_id IS ? ORDER BY created_at DESC LIMIT 1')
+      .prepare(
+        `SELECT * FROM sandboxes
+         WHERE project_id = ? AND ship_id IS ? AND active = 1
+         ORDER BY created_at DESC LIMIT 1`,
+      )
       .get(projectId, shipId) as Row | undefined
     return row ? rowToSandbox(row) : null
   }
@@ -951,21 +1095,53 @@ export class Store {
     return rows.map(rowToSandbox)
   }
 
+  listActiveSandboxes(projectId: string): SandboxRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM sandboxes WHERE project_id = ? AND active = 1 ORDER BY created_at DESC, id DESC',
+      )
+      .all(projectId) as Row[]
+    return rows.map(rowToSandbox)
+  }
+
+  touchSandbox(id: string, at: string = nowIso()): void {
+    this.db.prepare('UPDATE sandboxes SET last_seen_at = ?, updated_at = ? WHERE id = ? AND active = 1').run(at, at, id)
+  }
+
   setSandboxState(
     id: string,
     state: SandboxState,
-    patch: { containerId?: string | null; containerName?: string | null; image?: string | null } = {},
+    patch: {
+      containerId?: string | null
+      containerName?: string | null
+      image?: string | null
+      active?: boolean
+      sessionState?: SandboxSessionState | null
+      lastSeenAt?: string | null
+      exitCode?: number | null
+      startedAt?: string | null
+      endedAt?: string | null
+    } = {},
   ): SandboxRecord {
     const sb = this.getSandbox(id)
     this.db
       .prepare(
-        `UPDATE sandboxes SET state = ?, container_id = ?, container_name = ?, image = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE sandboxes SET state = ?, container_id = ?, container_name = ?, image = ?,
+                             active = ?, session_state = ?, last_seen_at = ?, exit_code = ?,
+                             started_at = ?, ended_at = ?, updated_at = ?
+         WHERE id = ?`,
       )
       .run(
         state,
         patch.containerId !== undefined ? patch.containerId : sb.containerId,
         patch.containerName !== undefined ? patch.containerName : sb.containerName,
         patch.image !== undefined ? patch.image : sb.image,
+        patch.active !== undefined ? (patch.active ? 1 : 0) : sb.active ? 1 : 0,
+        patch.sessionState !== undefined ? patch.sessionState : sb.sessionState,
+        patch.lastSeenAt !== undefined ? patch.lastSeenAt : sb.lastSeenAt,
+        patch.exitCode !== undefined ? patch.exitCode : sb.exitCode,
+        patch.startedAt !== undefined ? patch.startedAt : sb.startedAt,
+        patch.endedAt !== undefined ? patch.endedAt : sb.endedAt,
         nowIso(),
         id,
       )
@@ -1037,7 +1213,7 @@ export class Store {
     return this.getTerminal(id)
   }
 
-  // -- approvals (human gate, prompt §4/§7) ----------------------------------
+  // -- approvals (human gate, prompt Â§4/Â§7) ----------------------------------
 
   createApproval(spec: NewApprovalSpec, fence?: SupervisorFence): ApprovalRecord {
     const id = newId('approval')
@@ -1045,8 +1221,8 @@ export class Store {
     const guard = fence ? fenceClause(fence) : null
     const requestedByShipId = spec.requestedByShipId !== undefined ? spec.requestedByShipId : (spec.requestedByMuseId ?? null)
     // Persistence boundary: approval text is model/engine-authored. Strip
-    // terminal control bytes and bidi controls here — the single choke point
-    // every writer (tool bridge, engine channel, gate) goes through — so no
+    // terminal control bytes and bidi controls here â€” the single choke point
+    // every writer (tool bridge, engine channel, gate) goes through â€” so no
     // stored string can drive a terminal when a CLI/TUI/SPA later renders it.
     const res = this.db
       .prepare(
@@ -1107,7 +1283,7 @@ export class Store {
 
   /**
    * Timeout-to-denied sweep: every `pending` approval whose `expires_at` has
-   * arrived is flipped to `expired` (fail-closed — it can never be approved),
+   * arrived is flipped to `expired` (fail-closed â€” it can never be approved),
    * stamped `decided_by: 'pluton:timeout'` at the given time. Rows without an
    * expiry never move, and a second sweep returns nothing.
    */
@@ -1189,7 +1365,7 @@ export class Store {
   /**
    * Record a check's outcome. Only `pending` may move to a final status; a
    * re-set of the same status is an idempotent no-op, and a decided check is
-   * final — the evidence must not be rewritten.
+   * final â€” the evidence must not be rewritten.
    */
   setVerificationCheckResult(
     id: string,
@@ -1276,7 +1452,7 @@ export class Store {
     const maxChars = input.maxChars ?? DEFAULT_MAX_EVENT_CHARS
     if (payloadJson.length > maxChars) {
       throw new ValidationError(
-        `event payload too large: ${payloadJson.length} chars > ${maxChars} (type '${input.type}') — bound the payload at the writer`,
+        `event payload too large: ${payloadJson.length} chars > ${maxChars} (type '${input.type}') â€” bound the payload at the writer`,
         { details: { type: input.type, size: payloadJson.length, maxChars } },
       )
     }
@@ -1349,6 +1525,8 @@ export class Store {
     /** @deprecated Use `shipId`; kept for backward compatibility. */
     museId?: string
     title?: string | null
+    /** Absolute workspace root for this session; NULL/omitted = project root. */
+    workspaceRoot?: string | null
   }): ChatSessionRecord {
     const id = newId('chat')
     const now = nowIso()
@@ -1357,10 +1535,10 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO chat_sessions (id, project_id, ship_id, title, state, native_session_id, resume_token,
-                                    engine_session_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
+                                    engine_session_id, workspace_root, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?, ?)`,
       )
-      .run(id, spec.projectId, shipId, spec.title ?? null, now, now)
+      .run(id, spec.projectId, shipId, spec.title ?? null, spec.workspaceRoot ?? null, now, now)
     return this.getChatSession(id)
   }
 
@@ -1384,6 +1562,7 @@ export class Store {
       nativeSessionId?: string | null
       resumeToken?: string | null
       engineSessionId?: string | null
+      workspaceRoot?: string | null
     },
   ): ChatSessionRecord {
     this.getChatSession(id) // NotFoundError before any write
@@ -1408,6 +1587,10 @@ export class Store {
     if (patch.engineSessionId !== undefined) {
       sets.push('engine_session_id = ?')
       values.push(patch.engineSessionId)
+    }
+    if (patch.workspaceRoot !== undefined) {
+      sets.push('workspace_root = ?')
+      values.push(patch.workspaceRoot)
     }
     sets.push('updated_at = ?')
     values.push(nowIso())
@@ -1576,7 +1759,7 @@ export class Store {
     return this.getPlan(id)
   }
 
-  // -- receipts (idempotency core, §5) ---------------------------------------
+  // -- receipts (idempotency core, Â§5) ---------------------------------------
 
   getReceipt(id: string): RequestReceiptRecord | null {
     const row = this.db.prepare('SELECT * FROM receipts WHERE id = ?').get(id) as Row | undefined
@@ -1669,7 +1852,7 @@ export class Store {
     const now = nowIso()
     const guard = fence ? fenceClause(fence) : null
     // Advisory/accounting write: a missed fence skips silently (callers live in
-    // finally blocks and engine event pumps — they must never throw from here).
+    // finally blocks and engine event pumps â€” they must never throw from here).
     this.db
       .prepare(
         `INSERT OR REPLACE INTO file_leases (id, run_id, task_id, ship_id, path, symbols_json, acquired_at, state)
@@ -1896,7 +2079,7 @@ function isApprovalStatus(value: string): value is ApprovalStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Row mappers — the only place DB text becomes typed records.
+// Row mappers â€” the only place DB text becomes typed records.
 // ---------------------------------------------------------------------------
 
 function rowToProject(r: Row): ProjectRecord {
@@ -1960,6 +2143,8 @@ function rowToRun(r: Row): RunRecord {
     supervisorPid: nnum(r, 'supervisor_pid'),
     supervisorToken: nstr(r, 'supervisor_token'),
     supervisorHeartbeatAt: nnum(r, 'supervisor_heartbeat_at'),
+    workspaceRoot: nstr(r, 'workspace_root'),
+    originSessionId: nstr(r, 'origin_session_id'),
     createdAt: str(r, 'created_at'),
     startedAt: nstr(r, 'started_at'),
     completedAt: nstr(r, 'completed_at'),
@@ -2026,7 +2211,7 @@ function rowToWorkspace(r: Row): WorkspaceRecord {
 
 function rowToSandbox(r: Row): SandboxRecord {
   const kind = str(r, 'kind')
-  if (kind !== 'docker' && kind !== 'local-process') {
+  if (!(SANDBOX_KINDS as readonly string[]).includes(kind)) {
     throw new InternalError(`db row: invalid sandbox kind '${kind}'`)
   }
   const state = str(r, 'state')
@@ -2039,7 +2224,7 @@ function rowToSandbox(r: Row): SandboxRecord {
     projectId: str(r, 'project_id'),
     shipId,
     museId: shipId,
-    kind,
+    kind: kind as SandboxRecord['kind'],
     containerName: nstr(r, 'container_name'),
     containerId: nstr(r, 'container_id'),
     image: nstr(r, 'image'),
@@ -2047,6 +2232,17 @@ function rowToSandbox(r: Row): SandboxRecord {
     createdBy: str(r, 'created_by'),
     createdAt: str(r, 'created_at'),
     updatedAt: str(r, 'updated_at'),
+    active: bool01(r, 'active'),
+    legacy: bool01(r, 'legacy'),
+    executionMode: nenum(r, 'execution_mode', EXECUTION_MODES, 'sandbox execution mode'),
+    networkPolicy: nenum(r, 'network_policy', EXECUTION_NETWORK_POLICIES, 'sandbox network policy'),
+    helperVersion: nstr(r, 'helper_version'),
+    policy: parseJsonText<JsonValue | null>(nstr(r, 'policy_json'), null),
+    sessionState: nenum(r, 'session_state', SANDBOX_SESSION_STATES, 'sandbox session state'),
+    lastSeenAt: nstr(r, 'last_seen_at'),
+    exitCode: nnum(r, 'exit_code'),
+    startedAt: nstr(r, 'started_at'),
+    endedAt: nstr(r, 'ended_at'),
   }
 }
 
@@ -2175,6 +2371,7 @@ function rowToChatSession(r: Row): ChatSessionRecord {
     nativeSessionId: nstr(r, 'native_session_id'),
     resumeToken: nstr(r, 'resume_token'),
     engineSessionId: nstr(r, 'engine_session_id'),
+    workspaceRoot: nstr(r, 'workspace_root'),
     createdAt: str(r, 'created_at'),
     updatedAt: str(r, 'updated_at'),
   }

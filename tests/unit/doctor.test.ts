@@ -11,7 +11,16 @@ afterEach(() => {
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function makeTempProject(sandboxYaml: string): string {
+function makeTempProject(sandboxYaml = `sandbox:
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
+`): string {
   const root = mkdtempSync(join(tmpdir(), 'pluton-doctor-test-'))
   tmpDirs.push(root)
   mkdirSync(join(root, '.pluton', 'workspaces'), { recursive: true })
@@ -62,18 +71,12 @@ function mockRun(
 }
 
 describe('doctor diagnostics', () => {
-  it('does not probe docker and reports it as optional when sandbox is native', async () => {
-    const root = makeTempProject(`sandbox:
-  kind: native
-  native:
-    acknowledge_partial_enforcement: true
-    acknowledge_host_network: true
-`)
+  it('probes native substrate and never probes Docker CLI or daemon', async () => {
+    const root = makeTempProject()
     const calls: string[][] = []
     const routes = mockRun({
-      'docker --version': { exitCode: 1, stderr: 'command not found: docker' },
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
     })
     const runFn: typeof routes = async (argv, options) => {
       calls.push(argv)
@@ -81,66 +84,39 @@ describe('doctor diagnostics', () => {
     }
 
     const checks = await collectDoctorChecks({ cwd: root, runFn })
-    const dockerCli = checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli).toBeDefined()
-    expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not probed — native mode does not use Docker')
-
-    const dockerDaemon = checks.find((c) => c.id === 'docker-daemon')
-    expect(dockerDaemon).toBeUndefined()
     expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
+    expect(checks.find((c) => c.id === 'docker-cli')).toBeUndefined()
+    expect(checks.find((c) => c.id === 'docker-daemon')).toBeUndefined()
 
-    // Sandbox native probe should pass
+    // Sandbox native probe should be present
     const sandboxCheck = checks.find((c) => c.id === 'sandbox')
     expect(sandboxCheck).toBeDefined()
     expect(sandboxCheck?.status).toBe('pass')
 
-    // On Windows or when WSL fails in native mode, WSL should be info not warn
-    const wslCheck = checks.find((c) => c.id === 'wsl2')
-    if (wslCheck) {
-      expect(wslCheck.status).toBe('info')
-    }
+    // Native enforcement check should be present
+    const enforcementCheck = checks.find((c) => c.id === 'native-enforcement')
+    expect(enforcementCheck).toBeDefined()
 
-    expect(doctorExitCode(checks)).toBe(0)
+    // Platform check
+    const platformCheck = checks.find((c) => c.id === 'platform')
+    expect(platformCheck).toBeDefined()
+
+    // Git check
+    const gitCheck = checks.find((c) => c.id === 'git')
+    expect(gitCheck?.status).toBe('pass')
+
+    // Tmux check
+    const tmuxCheck = checks.find((c) => c.id === 'tmux')
+    expect(tmuxCheck?.status).toBe('pass')
   })
 
-  it('never spawns Docker in native mode even when a Docker binary is available', async () => {
-    const root = makeTempProject(`sandbox:
-  kind: native
-  native:
-    acknowledge_partial_enforcement: true
-    acknowledge_host_network: true
-`)
-    const calls: string[][] = []
-    const routes = mockRun({
-      'docker --version': { exitCode: 0, stdout: 'Docker version 27.0.0' },
-      'docker info': { exitCode: 0, stdout: '27.0.0' },
-      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 0, stdout: 'WSL is operational' },
-    })
-    const runFn: typeof routes = async (argv, options) => {
-      calls.push(argv)
-      return routes(argv, options)
-    }
-
-    const checks = await collectDoctorChecks({ cwd: root, runFn })
-    expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
-    expect(checks.find((c) => c.id === 'docker-daemon')).toBeUndefined()
-    expect(doctorExitCode(checks)).toBe(0)
-  })
-
-  it('distinguishes a config load failure from no project config when Docker is not probed', async () => {
-    const root = makeTempProject(`sandbox:
-  kind: native
-  native:
-    acknowledge_partial_enforcement: true
-    acknowledge_host_network: true
-`)
+  it('reports config failure and does not call Docker when pluton.yaml is invalid', async () => {
+    const root = makeTempProject()
     writeFileSync(join(root, 'pluton.yaml'), 'version: 1\nproject: invalid\n', 'utf8')
     const calls: string[][] = []
     const routes = mockRun({
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
     })
     const runFn: typeof routes = async (argv, options) => {
       calls.push(argv)
@@ -148,57 +124,35 @@ describe('doctor diagnostics', () => {
     }
 
     const checks = await collectDoctorChecks({ cwd: root, runFn })
-    const dockerCli = checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('project config failed to load')
     expect(calls.some((argv) => argv[0] === 'docker')).toBe(false)
+    const configCheck = checks.find((c) => c.id === 'config')
+    expect(configCheck?.status).toBe('fail')
   })
 
-  it('reports fail when docker is missing and sandbox is docker', async () => {
+  it('reports failure when legacy docker sandbox is configured', async () => {
     const root = makeTempProject(`sandbox:
   kind: docker
 `)
     const runFn = mockRun({
-      'docker --version': { exitCode: 1, stderr: 'command not found: docker' },
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
     })
 
     const checks = await collectDoctorChecks({ cwd: root, runFn })
-    const dockerCli = checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli).toBeDefined()
-    expect(dockerCli?.status).toBe('fail')
-
+    const sandboxCheck = checks.find((c) => c.id === 'sandbox')
+    expect(sandboxCheck).toBeDefined()
+    expect(sandboxCheck?.status).toBe('fail')
+    expect(sandboxCheck?.message).toContain('docker')
     expect(doctorExitCode(checks)).toBe(1)
   })
 
-  it('reports fail when docker daemon is unreachable and sandbox is docker', async () => {
-    const root = makeTempProject(`sandbox:
-  kind: docker
-`)
-    const runFn = mockRun({
-      'docker --version': { exitCode: 0, stdout: 'Docker version 27.0.0' },
-      'docker info': { exitCode: 1, stderr: 'Cannot connect to the Docker daemon' },
-      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 0, stdout: 'WSL is operational' },
-    })
-
-    const checks = await collectDoctorChecks({ cwd: root, runFn })
-    const dockerDaemon = checks.find((c) => c.id === 'docker-daemon')
-    expect(dockerDaemon).toBeDefined()
-    expect(dockerDaemon?.status).toBe('fail')
-
-    expect(doctorExitCode(checks)).toBe(1)
-  })
-
-  it('reports docker-cli as info and optional when no pluton.yaml is present', async () => {
+  it('reports info when no pluton.yaml is present', async () => {
     const emptyDir = mkdtempSync(join(tmpdir(), 'pluton-doctor-empty-'))
     tmpDirs.push(emptyDir)
 
     const runFn = mockRun({
-      'docker --version': { exitCode: 1, stderr: 'command not found: docker' },
       'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
-      'wsl --status': { exitCode: 1, stderr: 'wsl: not found' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
     })
 
     const checks = await collectDoctorChecks({ cwd: emptyDir, runFn, findProjectRoot: () => null })
@@ -206,17 +160,19 @@ describe('doctor diagnostics', () => {
     expect(configCheck).toBeDefined()
     expect(configCheck?.status).toBe('info')
     expect(configCheck?.message).toContain('no pluton.yaml found')
+  })
 
-    const dockerCli = checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli).toBeDefined()
-    expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not probed — no project config; Docker is optional')
+  it('reports info when tmux is missing (optional for attach)', async () => {
+    const root = makeTempProject()
+    const runFn = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'tmux -V': { exitCode: 1, stderr: 'tmux: command not found' },
+    })
 
-    const wslCheck = checks.find((c) => c.id === 'wsl2')
-    if (wslCheck) {
-      expect(wslCheck.status).toBe('info')
-    }
-
-    expect(doctorExitCode(checks)).toBe(0)
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    const tmuxCheck = checks.find((c) => c.id === 'tmux')
+    expect(tmuxCheck).toBeDefined()
+    expect(tmuxCheck?.status).toBe('info')
+    expect(tmuxCheck?.message).toContain('not installed')
   })
 })

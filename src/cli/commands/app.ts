@@ -221,9 +221,10 @@ export async function appRun(
     }
     child.unref()
 
-    // Poll until healthy (up to 5s)
+    // Poll until healthy (up to 15s)
     const startTime = Date.now()
-    while (Date.now() - startTime < 5000) {
+    const readinessTimeoutMs = 15_000
+    while (Date.now() - startTime < readinessTimeoutMs) {
       await new Promise((r) => setTimeout(r, 100))
       const inst = readServerInstance(rootDir)
       if (inst && (await checkServerHealth(inst, 500))) {
@@ -254,7 +255,7 @@ export async function appRun(
     } catch {
       // Ignore
     }
-    throw new InternalError(`detached app server failed to become ready within 5 seconds${detail ? `: ${detail}` : ''}`)
+    throw new InternalError(`detached app server failed to become ready within ${Math.round(readinessTimeoutMs / 1000)} seconds${detail ? `: ${detail}` : ''}`)
   }
 
   // 5. In-process server execution — claim the workspace slot first so two

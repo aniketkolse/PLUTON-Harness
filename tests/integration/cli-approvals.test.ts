@@ -10,19 +10,14 @@ import { engineHomesDir, loadConfig } from '../../src/config/load.ts'
 import { ConflictError, NotFoundError, ValidationError } from '../../src/domain/errors.ts'
 import type { ApprovalRecord, EventRecord, JsonValue, RunRecord } from '../../src/domain/models.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
-import { DEFAULT_WORKER_IMAGE_TAG, type WorkerImageProbe } from '../../src/sandbox/image.ts'
-import { sandboxContainerName } from '../../src/sandbox/types.ts'
 import type { DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
-import { FakeSandbox } from '../helpers/fake-sandbox.ts'
 
 /**
  * Integration: the operator approvals inbox (`listApprovals` / `decideApproval`)
  * against the real store and the real pluton.yaml. Approvals, runs and events
  * are seeded directly through the Store; config application goes through the
- * real `createMuse` + `loadConfig` + `syncMuses` path, and container
- * provisioning through the shared per-Muse helper with a fake sandbox manager
- * and a fake worker-image probe (the only fakes).
+ * real `createShip` + `loadConfig` + `syncShips` path natively without Docker.
  */
 
 const tmpDirs: string[] = []
@@ -48,7 +43,10 @@ project:
 runtime:
   approval_timeout_minutes: 30
 sandbox:
-  kind: docker
+  kind: native
+  native:
+    acknowledge_partial_enforcement: true
+    acknowledge_host_network: true
 muses:
   manager:
     display_name: Manager
@@ -59,31 +57,7 @@ muses:
     approval_mode: autonomous-bounded
 `
 
-/** sandbox.kind defaults to docker in BASE_CONFIG; this one is the acknowledged dev-only host mode. */
-const HOST_CONFIG = BASE_CONFIG.replace(
-  'sandbox:\n  kind: docker',
-  'sandbox:\n  kind: local-process\n  local_process_acknowledged: true',
-)
-
-const ENGINE_IMAGE_ID = `sha256:${'a'.repeat(64)}`
-
-function enginesImageProbe(): WorkerImageProbe {
-  return {
-    present: true,
-    image: 'pluton-worker:local',
-    imageId: ENGINE_IMAGE_ID,
-    record: {
-      image: 'pluton-worker:local',
-      imageId: ENGINE_IMAGE_ID,
-      profile: 'engines',
-      tmuxVersion: 'tmux 3.3a',
-      nodeVersion: 'v24.0.0',
-      builtAt: '2026-01-01T00:00:00.000Z',
-    },
-    matchesRecord: true,
-    detail: 'fixture: engines profile present',
-  }
-}
+const HOST_CONFIG = BASE_CONFIG
 
 interface Fixture {
   dir: string
@@ -421,7 +395,7 @@ describe('decideApproval — approved muse.create proposals are applied', () => 
     expect(loadConfig(fx.dir).config.muses['broken']).toBeUndefined()
   })
 
-  it('docker mode with a live run provisions the specialist container through the shared helper', async () => {
+  it('native mode with a live run materializes the specialist without containers', async () => {
     registerBuiltinEngines()
     const fx = makeProject()
     const run = seedRun(fx, 'active')
@@ -436,24 +410,15 @@ describe('decideApproval — approved muse.create proposals are applied', () => 
         model: 'mock/model-a',
       },
     })
-    const fakeSandbox = new FakeSandbox()
-    fakeSandbox.statusResult = 'missing'
 
     const report = await decideApproval(
       fx.ctx,
       { approvalRef: approval.id, decision: 'approve' },
-      { sandboxManager: fakeSandbox, workerImageProbe: () => Promise.resolve(enginesImageProbe()) },
     )
 
-    const containerName = sandboxContainerName(fx.projectId, 'db-expert')
-    expect(report.applied?.container).toEqual({ containerName, created: true })
+    expect(report.applied?.container).toBeNull()
     expect(report.applied?.containerWarning).toBeNull()
-    expect(fakeSandbox.created).toHaveLength(1)
-    expect(fakeSandbox.created[0]?.containerName).toBe(containerName)
-    expect(fakeSandbox.created[0]?.image).toBe(DEFAULT_WORKER_IMAGE_TAG)
-    const sandboxRow = fx.store.getSandboxForMuse(fx.projectId, 'db-expert')
-    expect(sandboxRow?.state).toBe('running')
-    expect(sandboxRow?.containerName).toBe(containerName)
+    expect(report.applied?.shipId).toBe('db-expert')
     expect(report.run).toMatchObject({
       id: run.id,
       stateBefore: 'active',
@@ -466,40 +431,32 @@ describe('decideApproval — approved muse.create proposals are applied', () => 
     expect(fx.store.getMuse('db-expert')?.enabled).toBe(true)
   })
 
-  it('an unreachable sandbox surfaces a container warning, never a failed decision', async () => {
+  it('supports ship.create action and records ship.applied_from_proposal event', async () => {
     registerBuiltinEngines()
     const fx = makeProject()
     const run = seedRun(fx, 'awaiting_approval')
     const approval = seedApproval(fx, {
       runId: run.id,
-      action: 'muse.create',
+      action: 'ship.create',
       scope: {
-        museId: 'db-expert',
+        shipId: 'db-expert',
         displayName: 'DB Expert',
         role: 'coder',
         engine: 'mock',
         model: 'mock/model-a',
       },
     })
-    const fakeSandbox = new FakeSandbox()
-    fakeSandbox.probeResult = {
-      available: false,
-      kind: 'docker',
-      detail: 'docker daemon not reachable: fixture',
-      fix: 'start Docker Desktop',
-    }
 
     const report = await decideApproval(
       fx.ctx,
       { approvalRef: approval.id, decision: 'approve' },
-      { sandboxManager: fakeSandbox, workerImageProbe: () => Promise.resolve(enginesImageProbe()) },
     )
 
     expect(report.approval.status).toBe('approved')
+    expect(report.applied?.shipId).toBe('db-expert')
     expect(report.applied?.container).toBeNull()
-    expect(report.applied?.containerWarning).toContain('daemon not reachable')
-    expect(fakeSandbox.created).toHaveLength(0)
-    expect(fx.store.getMuse('db-expert')?.enabled).toBe(true)
+    expect(report.applied?.containerWarning).toBeNull()
+    expect(fx.store.getShip('db-expert')?.enabled).toBe(true)
   })
 })
 

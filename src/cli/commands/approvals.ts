@@ -1,11 +1,10 @@
 import { mkdirSync } from 'node:fs'
 import { bootstrapStore, shipSpecs } from '../../bootstrap.ts'
-import { loadConfig, workspaceDir } from '../../config/load.ts'
+import { loadConfig } from '../../config/load.ts'
 import {
   ConflictError,
   InternalError,
   NotFoundError,
-  SandboxUnavailableError,
   StateTransitionError,
   ValidationError,
 } from '../../domain/errors.ts'
@@ -19,19 +18,9 @@ import type {
 } from '../../domain/models.ts'
 import { isTerminalRunState, type RunState } from '../../domain/state.ts'
 import { settleApprovalWaiter } from '../../engines/interactive-approval.ts'
-import { createSandboxManager } from '../../sandbox/factory.ts'
-import {
-  DEFAULT_WORKER_IMAGE_TAG,
-  dispatchReadiness,
-  WorkerImageManager,
-  type WorkerImageProbe,
-} from '../../sandbox/image.ts'
-import { planShipNetwork, verifyRestrictedEgress } from '../../sandbox/network.ts'
-import { sandboxContainerName, type SandboxManager } from '../../sandbox/types.ts'
 import type { Store } from '../../store/store.ts'
 import type { ProjectContext } from '../context.ts'
 import { createShip } from './ship.ts'
-import { provisionShipContainer } from './ship-provision.ts'
 import { runByRef } from './status.ts'
 import { approvalScopeTaskId, integrateRun, type IntegrateCommandOptions, type IntegrateReport } from './integrate.ts'
 import { resumeRun, type ResumeRunOptions, type RunSummary } from './run.ts'
@@ -45,8 +34,7 @@ import { resumeRun, type ResumeRunOptions, type RunSummary } from './run.ts'
  * never be mistaken for an approval and an expired row is refused with a
  * ConflictError. Decisions are recorded as events; approving a `ship.create`
  * proposal actually instantiates the specialist (pluton.yaml + store sync +
- * container provisioning against a live docker-mode run — a sandbox that
- * cannot come up is surfaced as a warning, never as a failed decision). When a
+ * engine home). Native execution has no per-Ship container to provision. When a
  * run parked in `awaiting_approval` loses its last pending approval it is
  * resumed only while its supervisor is still driving (no `run.finished`
  * recorded); otherwise it stays parked and the recorded outcome is surfaced.
@@ -92,10 +80,6 @@ export interface ApprovalDecideOptions {
 }
 
 export interface ApprovalDecideDeps {
-  /** Test seam: replaces the Docker sandbox manager in docker mode. */
-  sandboxManager?: SandboxManager
-  /** Test seam: replaces the worker-image probe in docker mode. */
-  workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
   /** Test seam: replaces integrateRun for auto-continue integration.apply. */
   integrateRunFn?: (ctx: ProjectContext, opts: IntegrateCommandOptions) => Promise<IntegrateReport>
   /** Test seam: replaces resumeRun for auto-continue run resume. */
@@ -252,82 +236,16 @@ function recordedOutcomeFrom(event: EventRecord | undefined): string | null {
 }
 
 /**
- * Container readiness for an approved specialist, mirroring `prepareContainerMode`
- * (daemon probe → worker-image probe → `dispatchReadiness` with the engines
- * profile required → shared `provisionShipContainer`). Only ever called for a
- * live docker-mode run; callers turn `SandboxUnavailableError` into a warning.
- */
-const CONTAINER_PIDS_LIMIT = 512
-
-async function provisionApprovedShip(
-  ctx: ProjectContext,
-  store: Store,
-  projectId: string,
-  ship: ShipRecord,
-  deps: ApprovalDecideDeps,
-): Promise<{ containerName: string; created: boolean }> {
-  const config = ctx.loaded.config
-  const manager = deps.sandboxManager ?? createSandboxManager(config)
-  const probe = await manager.probe()
-  if (!probe.available) {
-    throw new SandboxUnavailableError(
-      `container-mode provisioning needs a reachable sandbox: ${probe.detail}`,
-      { fix: probe.fix },
-    )
-  }
-  const imageTag = config.sandbox.image ?? DEFAULT_WORKER_IMAGE_TAG
-  const imageProbe =
-    deps.workerImageProbe !== undefined
-      ? await deps.workerImageProbe(ctx.rootDir)
-      : await new WorkerImageManager().probe(ctx.rootDir, imageTag)
-  const readiness = dispatchReadiness(true, imageProbe, { requireEngines: true })
-  if (!readiness.ready) {
-    throw new SandboxUnavailableError(
-      `worker image '${imageTag}' is not ready for container-mode runs:\n  - ${readiness.warnings.join('\n  - ')}`,
-    )
-  }
-  const runtime = config.runtime
-  const plan = await planShipNetwork({
-    manager,
-    config,
-    shipId: ship.id,
-    projectId,
-  })
-  const provisioned = await provisionShipContainer({
-    manager,
-    store,
-    projectId,
-    ship,
-    image: imageTag,
-    ...(imageProbe.imageId !== null ? { imageId: imageProbe.imageId } : {}),
-    limits: {
-      cpus: runtime.default_cpu_limit,
-      memoryMb: runtime.default_memory_mb,
-      pids: CONTAINER_PIDS_LIMIT,
-    },
-    network: plan.policy,
-    ...(plan.customNetwork !== undefined ? { customNetwork: plan.customNetwork } : {}),
-    rootDir: ctx.rootDir,
-    workspacesRoot: workspaceDir(ctx.rootDir),
-  })
-  if (plan.policy === 'restricted') {
-    await verifyRestrictedEgress(manager, sandboxContainerName(projectId, ship.id))
-  }
-  return provisioned
-}
-
-/**
  * Instantiate an approved `ship.create` proposal: pluton.yaml first (validated
- * before the file is touched), then the store sync, then — only for a live
- * docker-mode run — the specialist's container.
+ * before the file is touched), then the store sync and the engine home.
+ * Native execution needs no per-Ship provisioning; the report keeps the
+ * legacy `container`/`containerWarning` fields null for output compatibility.
  */
 async function applyShipCreate(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
   approval: ApprovalRecord,
-  runBefore: RunRecord | null,
-  deps: ApprovalDecideDeps,
 ): Promise<NonNullable<ApprovalDecideReport['applied']>> {
   const scope = parseShipCreateScope(approval)
   const created = createShip(ctx, {
@@ -344,7 +262,7 @@ async function applyShipCreate(
     throw new InternalError(`approved ship '${scope.shipId}' disappeared after syncing the store`)
   }
   // Engine homes are computed, never created, by the bootstrap/config path:
-  // materialize the directory so the container mount has a real host path.
+  // materialize the directory so the native provider has a real home to spell.
   mkdirSync(ship.engineHome, { recursive: true })
   const isLegacyMuse = approval.action === 'muse.create'
   store.appendEvent({
@@ -360,22 +278,13 @@ async function applyShipCreate(
     },
   })
 
-  let container: { containerName: string; created: boolean } | null = null
-  let containerWarning: string | null = null
-  const runState = runBefore?.state ?? null
-  const liveRun =
-    runState === 'active' || runState === 'awaiting_approval' || runState === 'awaiting_input'
-  if (approval.runId !== null && ctx.loaded.config.sandbox.kind === 'docker' && liveRun) {
-    try {
-      container = await provisionApprovedShip(ctx, store, projectId, ship, deps)
-    } catch (e) {
-      if (!(e instanceof SandboxUnavailableError)) throw e
-      // The decision stands; the next `pluton run` provisions enabled config
-      // ships anyway, so a down sandbox is a warning here, not a failure.
-      containerWarning = e.message
-    }
+  return {
+    shipId: scope.shipId,
+    museId: scope.shipId,
+    configPath: created.configPath,
+    container: null,
+    containerWarning: null,
   }
-  return { shipId: scope.shipId, museId: scope.shipId, configPath: created.configPath, container, containerWarning }
 }
 
 /** Un-park a run whose last pending approval was just decided (never re-drives an exited supervisor). */
@@ -545,7 +454,7 @@ export async function decideApproval(
 
     let applied: ApprovalDecideReport['applied'] = null
     if (decided.status === 'approved' && (decided.action === 'ship.create' || decided.action === 'muse.create')) {
-      applied = await applyShipCreate(ctx, store, projectId, decided, runBefore, deps)
+      applied = await applyShipCreate(ctx, store, projectId, decided)
     }
 
     const run = runBefore !== null ? unParkRun(store, projectId, decided, runBefore) : null

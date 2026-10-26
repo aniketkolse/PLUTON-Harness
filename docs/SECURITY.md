@@ -99,9 +99,15 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   Each Ship runs in a dedicated Linux container. When the Docker daemon or the
   worker image is unavailable, Pluton **fails closed** with `SandboxUnavailableError`
   and an exact fix — it never silently degrades to unsandboxed execution.
+  `network_policy` is enforced by the container's network namespace: `open` uses
+  the Docker bridge, `none` uses `--network none`, and `restricted` uses a
+  dedicated `--internal` network with no default route (see §8.5). A restricted
+  container that cannot prove egress denial from inside is refused before the
+  run starts.
 - **Local process development mode** (`sandbox.kind: local-process`).
   A dev-only backend requiring an explicit `local_process_acknowledged: true`
-  in the project config, refused otherwise.
+  in the project config, refused otherwise. It runs on the host network, so it
+  refuses `restricted`/`none` rather than pretending to enforce them.
 - **tmux is not a security boundary.** tmux sessions exist for visibility and
   window-targeted interruption only. In native mode, `pluton attach` connects
   directly to host native `tmux` sessions; in container mode, it connects via
@@ -156,12 +162,52 @@ Stated plainly so nobody over-reads the guarantees above:
 4. **Container hardening is Docker's defaults plus the configured resource
    limits.** No custom seccomp/AppArmor profile, no read-only root filesystem
    guarantee for the worker image beyond what the Dockerfile sets.
-5. **Network policy supports per-Ship overrides and internal network binding.**
-   The runtime default is configured in `runtime.network_policy` (`restricted` | `none` | `open`).
-   Individual Ships can override this via `network_policy: 'none' | 'restricted' | 'open'` in `ships.<id>`
-   (the legacy `muses.<id>` key is accepted as an alias).
-   When `restricted`, Pluton binds to `runtime.internal_network_name` when specified (e.g. an egress-filtered
-   or internal Docker bridge), and `--network none` disconnects egress completely for offline Ships.
+5. **`restricted` network policy is a container-level egress denial, not a label.**
+   The runtime default is configured in `runtime.network_policy` (`restricted` | `none` | `open`);
+   individual Ships may override it via `network_policy` in `ships.<id>`
+   (the legacy `muses.<id>` key is accepted as an alias). The contract is:
+   - `open` — the Docker bridge (or the configured network). Full egress; explicit opt-in.
+   - `none` — `--network none`. No network at all, including no Pluton tool bridge;
+     reserved for hermetic lifecycle/E2E paths.
+   - `restricted` — a dedicated Docker network created with `--internal`
+     (`runtime.internal_network_name`, or `pluton-restricted-<projectId>`). Docker installs
+     no default route and no masquerading rule for it, and drops traffic to other Docker
+     networks, so direct internet, registry and model-provider connections fail at the
+     routing/firewall layer. There is **no fallback to `bridge`**.
+
+   Enforcement is verified at run start, not assumed: Pluton inspects the network and
+   refuses it unless Docker reports `Internal=true`; it inspects the container and requires
+   it to be attached to exactly that network; and it executes a TCP probe inside the
+   container that tries to connect to `1.1.1.1:443`. A successful connection, a probe that
+   cannot run, or an outer timeout **refuses the run**
+   (`SandboxUnavailableError`) before any engine session starts. Reuse validation compares
+   the network set, so a container created under a different policy is recreated rather than
+   adopted. `local-process` and `native` refuse `restricted`/`none` outright.
+
+   Residual exposure and limits (not claimed as isolation beyond this):
+   - The internal network's **gateway is the Docker host**, so the Pluton tool bridge is
+     reachable; a compromised engine can still attempt connections to host services bound
+     to that gateway. `restricted` denies the internet, not the host.
+   - `host.docker.internal` reachability through an internal network is platform-dependent.
+     The gated Docker E2E (`tests/e2e/restricted-network.e2e.test.ts`) verifies egress denial
+     on Linux; Docker Desktop forwards host services through a different gateway than a
+     Linux bridge, and that path is **not verified here**. If the gateway is unreachable,
+     restricted container sessions fail to reach the tool bridge — they do not fall back to
+     `open`.
+   - Because direct egress is denied, an engine that needs to reach its model provider cannot
+     run under `restricted`. Set that Ship's `network_policy: open` explicitly (least
+     privilege is per Ship), or run it in a mode that does not need provider access.
+   - The probe target is a fixed public address (`1.1.1.1:443`). On a host with no internet
+     connectivity the denial is trivially true; that is the safe direction (no egress).
+   - Policy is **per container**. A task delegated to (or a run started for) a Ship
+     configured with `network_policy: open` runs with that Ship's egress; restricted
+     policy is not inherited across delegation.
+   - There is no application-level URL allowlist to bypass: redirects, DNS resolution and
+     child processes all sit above a routing/firewall denial, so they cannot restore
+     connectivity. The runtime probe connects to a literal IP; the gated E2E repeats the
+     attempt after DNS resolution and from a child shell.
+   - Verification is a run-start check. A container modified after the probe (for example,
+     `docker network connect` by a host operator) is outside what this check observes.
 6. **The operator's terminal is trusted.** `pluton attach`-style inspection and
    human commands are not sandboxed against the host.
 7. **Deny lists are conservative blocklists**, not capability systems. They
@@ -171,8 +217,10 @@ Stated plainly so nobody over-reads the guarantees above:
    Docker gateway, so the bridge listens on `0.0.0.0` for the run's duration.
    Per-session 256-bit bearer tokens gate every call, but the port is LAN-reachable
    while a container-mode run is live — firewall the host if the network is untrusted.
-   In contrast, native host mode (`sandbox.kind: native`) binds strictly to loopback
-   (`127.0.0.1`), eliminating this external LAN exposure.
+   `restricted` containers still receive the bridge URL and a token; they reach it only
+   through the internal network's gateway (see gap 5). In contrast, native host mode
+   (`sandbox.kind: native`) binds strictly to loopback (`127.0.0.1`), eliminating this
+   external LAN exposure.
 9. **Bind-mount ownership is untested on Linux hosts (NOT RUN).** The sandbox
    passes `--user <uid>:<gid>`; on POSIX non-root hosts `resolveContainerUser()`
    selects the host uid:gid, while Windows uses `10001:10001`. If that identity

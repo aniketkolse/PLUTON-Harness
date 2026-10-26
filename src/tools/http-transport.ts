@@ -1,18 +1,22 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { chmodSync, mkdtempSync, rmSync, rmdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { McpStdioServer, type McpDiagnosticSink, type McpToolHost } from './mcp-server.ts'
 
 /**
- * Per-session HTTP transport for the restricted Pluton tool bridge (Phase 6).
+ * Per-session HTTP transport for the Pluton tool bridge (Phase 6).
  * One PlutonToolBridge is registered per engine session behind a random bearer
  * token; the HTTP layer is dumb multiplexing — every authorization decision
  * still happens inside the bridge on every call.
  *
  * Deliberate surface: POST-only single JSON-RPC messages (MCP "Streamable
  * HTTP" minimal subset), `application/json` responses, no server-initiated
- * SSE stream. Bound to loopback by default; Docker Desktop reaches it from
- * containers via host.docker.internal. Tokens are compared timing-safe and are
- * never logged.
+ * SSE stream. The TCP listener is loopback-only (`127.0.0.1`); restricted
+ * native sessions never reach it directly. They use the AF_UNIX listener
+ * through the helper's in-namespace loopback proxy. Tokens are compared
+ * timing-safe and are never logged.
  */
 
 export interface ToolHttpSessionSpec {
@@ -30,6 +34,18 @@ export interface ToolHttpServerOptions {
   host?: string
   /** Port; 0 = ephemeral (default). */
   port?: number
+  /**
+   * Optional AF_UNIX socket path. Restricted native sessions reach the bridge
+   * through the helper's loopback proxy, which connects to this socket instead
+   * of a host TCP port. Linux only.
+   */
+  unixPath?: string
+  /**
+   * Linux only: allocate a per-server socket in a private 0700 temp directory
+   * and serve the same bridge on it. Ignored when `unixPath` is set. The
+   * directory and socket are removed by `stop()`.
+   */
+  unixSocket?: boolean
   serverName?: string
   serverVersion?: string
   /** Hard cap on a single request body, bytes. */
@@ -39,6 +55,18 @@ export interface ToolHttpServerOptions {
 }
 
 export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
+
+/**
+ * The bridge endpoint pair a `restricted` native session needs: the AF_UNIX
+ * socket the in-namespace proxy forwards to, plus the host loopback port the
+ * engine keeps in its MCP URL. Undefined when no socket was allocated.
+ */
+export function bridgeEndpointOf(started: {
+  port: number
+  unixPath?: string
+}): { unixPath: string; port: number } | undefined {
+  return started.unixPath === undefined ? undefined : { unixPath: started.unixPath, port: started.port }
+}
 
 /**
  * Upper bound for draining in-flight tool handlers after shutdown. Handlers
@@ -62,7 +90,13 @@ export class ToolHttpServer {
   private readonly diagnosticSink: McpDiagnosticSink
   private readonly serverName: string | undefined
   private readonly serverVersion: string | undefined
+  private readonly requestedUnixPath: string | null
+  private readonly wantUnixSocket: boolean
+  private unixHttp: Server | null = null
   private boundPort: number | null = null
+  private boundUnixPath: string | null = null
+  /** Private directory owned by this server when it allocated the socket. */
+  private ownedUnixDir: string | null = null
   /** Aborted by stop(): every in-flight handler's signal fires at once. */
   private readonly shutdown = new AbortController()
   /** Handlers currently running — drained (bounded) before stop() resolves. */
@@ -75,7 +109,13 @@ export class ToolHttpServer {
     this.diagnosticSink = opts.diagnosticSink ?? ((line) => process.stderr.write(`${line}\n`))
     this.serverName = opts.serverName
     this.serverVersion = opts.serverVersion
-    this.http = createServer((req, res) => {
+    this.requestedUnixPath = opts.unixPath ?? null
+    this.wantUnixSocket = opts.unixSocket ?? false
+    this.http = this.createHttpServer()
+  }
+
+  private createHttpServer(): Server {
+    return createServer((req, res) => {
       const task = this.handleRequest(req, res)
       this.inFlight.add(task)
       const done = (): void => {
@@ -118,7 +158,22 @@ export class ToolHttpServer {
     return this.boundPort === null ? null : `http://${this.host}:${String(this.boundPort)}/`
   }
 
-  async start(): Promise<{ host: string; port: number; url: string }> {
+  /**
+   * Everything a `restricted` native session needs to reach this bridge:
+   * the host loopback port it keeps in the MCP URL and the AF_UNIX path the
+   * helper's in-namespace proxy connects to. Null before start().
+   */
+  get endpoint(): { host: string; port: number; url: string; unixPath?: string } | null {
+    if (this.boundPort === null) return null
+    return {
+      host: this.host,
+      port: this.boundPort,
+      url: this.url as string,
+      ...(this.boundUnixPath !== null ? { unixPath: this.boundUnixPath } : {}),
+    }
+  }
+
+  async start(): Promise<{ host: string; port: number; url: string; unixPath?: string }> {
     if (this.boundPort !== null) throw new Error('tool http server is already started')
     await new Promise<void>((resolve, reject) => {
       this.http.once('error', reject)
@@ -132,19 +187,63 @@ export class ToolHttpServer {
       throw new Error('tool http server has no bound TCP address')
     }
     this.boundPort = address.port
-    return { host: this.host, port: address.port, url: this.url as string }
+
+    if (this.requestedUnixPath !== null || this.wantUnixSocket) {
+      if (process.platform !== 'linux') {
+        await this.closeTcp()
+        throw new Error(`AF_UNIX tool bridge is only supported on Linux (got ${process.platform})`)
+      }
+      let path = this.requestedUnixPath
+      if (path === null) {
+        const dir = mkdtempSync(join(tmpdir(), 'pluton-bridge-'))
+        chmodSync(dir, 0o700)
+        this.ownedUnixDir = dir
+        path = join(dir, 'bridge.sock')
+      }
+      rmSync(path, { force: true })
+      const unix = this.createHttpServer()
+      try {
+        await new Promise<void>((resolve, reject) => {
+          unix.once('error', reject)
+          unix.listen(path, () => {
+            unix.off('error', reject)
+            resolve()
+          })
+        })
+        chmodSync(path, 0o600)
+      } catch (error) {
+        unix.close()
+        rmSync(path, { force: true })
+        this.removeOwnedUnixDir()
+        await this.closeTcp()
+        throw error
+      }
+      this.unixHttp = unix
+      this.boundUnixPath = path
+    }
+
+    return { ...(this.endpoint as { host: string; port: number; url: string; unixPath?: string }) }
   }
 
   async stop(): Promise<void> {
-    if (this.boundPort === null) return
+    if (this.boundPort === null && this.unixHttp === null) return
     // 1. Signal shutdown first: long polls (task.wait) return immediately
     //    instead of outliving the store (host-mode smoke: a pending task.wait
     //    touched the closed database at process shutdown).
     this.shutdown.abort()
-    await new Promise<void>((resolve, reject) => {
-      this.http.close((err) => (err ? reject(err) : resolve()))
-      this.http.closeAllConnections() // keep-alive sockets must not hold the listener alive
-    })
+    const unix = this.unixHttp
+    this.unixHttp = null
+    const unixPath = this.boundUnixPath
+    this.boundUnixPath = null
+    if (unix !== null) {
+      await new Promise<void>((resolve, reject) => {
+        unix.close((err) => (err ? reject(err) : resolve()))
+        unix.closeAllConnections()
+      })
+      if (unixPath !== null) rmSync(unixPath, { force: true })
+    }
+    this.removeOwnedUnixDir()
+    await this.closeTcp()
     this.boundPort = null
     // 2. Drain in-flight handlers (bounded) so store.close() is safe.
     if (this.inFlight.size > 0) {
@@ -162,6 +261,24 @@ export class ToolHttpServer {
         if (graceTimer !== null) clearTimeout(graceTimer)
       }
     }
+  }
+
+  private removeOwnedUnixDir(): void {
+    const dir = this.ownedUnixDir
+    if (dir === null) return
+    this.ownedUnixDir = null
+    try {
+      rmdirSync(dir)
+    } catch {
+      // Best effort: a leftover empty temp directory is harmless.
+    }
+  }
+
+  private async closeTcp(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.http.close((err) => (err ? reject(err) : resolve()))
+      this.http.closeAllConnections() // keep-alive sockets must not hold the listener alive
+    })
   }
 
   // -- private plumbing (kept dumb on purpose: authn lookup + body cap only) --

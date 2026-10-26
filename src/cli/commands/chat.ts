@@ -1,7 +1,7 @@
 /**
  * `pluton chat` command implementation (ADR-0012).
  * Boots the operator session: resolves Ship, session persistence,
- * tool bridge with operator catalog, container / sandbox setup, and TUI loop.
+ * tool bridge with operator catalog, native execution policy, and TUI loop.
  */
 
 import { readFileSync } from 'node:fs'
@@ -10,25 +10,22 @@ import { findManager } from '../../config/load.ts'
 import { ConfigError, NotFoundError, StateTransitionError, ValidationError, InternalError } from '../../domain/errors.ts'
 import { isTerminalRunState } from '../../domain/state.ts'
 import type { ChatSessionRecord, ShipRecord } from '../../domain/models.ts'
-import type { AcpSpawnFn } from '../../engines/acp/client.ts'
-import { engineAdapterForShip } from '../../engines/approval.ts'
 import { createEngineApprovalChannel } from '../../engines/interactive-approval.ts'
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
-import { createSandboxManager } from '../../sandbox/factory.ts'
-import type { WorkerImageProbe } from '../../sandbox/image.ts'
-import type { SandboxManager } from '../../sandbox/types.ts'
-import { sandboxContainerName } from '../../sandbox/types.ts'
 import { bootstrapStore } from '../../bootstrap.ts'
 import type { Store } from '../../store/store.ts'
 import { nativeAdapterFor } from '../../execution/adapter.ts'
 import {
   appendExecutionEvent,
+  assertNativeSandboxKind,
   createNativeExecutionProvider,
   nativeSpecForShip,
 } from '../../execution/factory.ts'
 import type { NativeExecutionProvider } from '../../execution/native.ts'
+import type { ExecutionBridgeSpec } from '../../execution/native.ts'
 import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../../tools/bridge.ts'
 import { ToolHttpServer } from '../../tools/http-transport.ts'
+import { bridgeEndpointOf } from '../../tools/http-transport.ts'
 import type { OperatorToolEnv } from '../../tools/operator-catalog.ts'
 import { TerminalHost, type ChatIo } from '../../tui/terminal.ts'
 import { ChatSession, type ChatSessionDeps } from '../../chat/session.ts'
@@ -38,7 +35,7 @@ import { decideApproval } from './approvals.ts'
 import { resolveShipByRef } from './mcp.ts'
 import { runLine } from './status.ts'
 import { terminalSafeLine } from '../../util/sanitize.ts'
-import { containerAdapterFor, prepareContainerMode, settleRunCrashed, startRunInBackground, type RunDeps } from './run.ts'
+import { settleRunCrashed, startRunInBackground, type RunDeps } from './run.ts'
 import { collectDoctorChecks } from './doctor.ts'
 import { PlanManager } from '../../plan/manager.ts'
 import { renderPlanGraph } from '../../tui/plan-graph.ts'
@@ -58,9 +55,6 @@ export interface ChatCommandOptions {
 
 export interface ChatDeps {
   adapterFor?: (ship: ShipRecord) => EngineAdapter
-  sandboxManager?: SandboxManager
-  workerImageProbe?: (rootDir: string) => Promise<WorkerImageProbe>
-  dockerSpawn?: AcpSpawnFn
   /** Test seam: provider injected instead of constructing one from config. */
   nativeProvider?: NativeExecutionProvider
   io?: ChatIo
@@ -77,7 +71,7 @@ export interface ChatPlan {
   museSlug?: string
   engineKind: string
   model: string
-  mode: 'docker' | 'local-process' | 'native'
+  mode: 'native'
   containerName: string | null
   sessionId: string
   resumed: boolean
@@ -140,6 +134,9 @@ export async function chatRun(
 ): Promise<{ exitCode: number; plan: ChatPlan }> {
   const { store, projectId } = bootstrapStore(ctx.loaded)
   let nativeProvider: NativeExecutionProvider | null = deps.nativeProvider ?? null
+  // Filled in once the operator tool bridge is listening; `specFor` is lazy
+  // (called at engine start), so the native spec always sees the live socket.
+  let executionBridge: ExecutionBridgeSpec | undefined
 
   try {
     const ship = resolveChatShip(ctx, store, opts.shipRef ?? opts.museRef, projectId)
@@ -147,11 +144,12 @@ export async function chatRun(
     const storedMessages = store.listChatMessages(session.id)
     const messageCount = storedMessages.length
 
-    const sandboxKind = ctx.loaded.config.sandbox.kind
-    const isDocker = sandboxKind === 'docker'
-    const mode: 'docker' | 'local-process' | 'native' =
-      sandboxKind === 'docker' ? 'docker' : sandboxKind === 'native' ? 'native' : 'local-process'
-    const containerName = isDocker ? sandboxContainerName(projectId, ship.id) : null
+    // Native is the only substrate; a legacy config fails here even in plan
+    // mode instead of reporting a runtime that no longer exists.
+    assertNativeSandboxKind(ctx.loaded.config)
+
+    const mode = 'native' as const
+    const containerName = null
 
     const basePlan: ChatPlan = {
       shipId: ship.id,
@@ -192,50 +190,35 @@ export async function chatRun(
     }
 
     let adapter: EngineAdapter
-    if (isDocker) {
-      const sandboxManager = deps.sandboxManager ?? createSandboxManager(ctx.loaded.config)
-      const contexts = await prepareContainerMode(
-        ctx,
-        store,
-        projectId,
-        sandboxManager,
-        deps.workerImageProbe,
-        { shipIds: [ship.id] },
-      )
-      adapter = deps.adapterFor?.(ship) ?? containerAdapterFor(ship, contexts, deps.dockerSpawn)
-    } else if (sandboxKind === 'native') {
-      if (deps.adapterFor !== undefined) {
-        adapter = deps.adapterFor(ship)
-      } else {
-        nativeProvider =
-          deps.nativeProvider ??
-          createNativeExecutionProvider({
+    if (deps.adapterFor !== undefined) {
+      adapter = deps.adapterFor(ship)
+    } else {
+      nativeProvider =
+        deps.nativeProvider ??
+        createNativeExecutionProvider({
+          config: ctx.loaded.config,
+          rootDir: ctx.rootDir,
+          onEvent: (event) => {
+            appendExecutionEvent(store, projectId, null, event)
+          },
+        })
+      const provider = nativeProvider
+      adapter = nativeAdapterFor(ship, {
+        provider,
+        isolatedCheckout: false,
+        specFor: (req) =>
+          nativeSpecForShip({
             config: ctx.loaded.config,
             rootDir: ctx.rootDir,
-            onEvent: (event) => {
-              appendExecutionEvent(store, projectId, null, event)
-            },
-          })
-        const provider = nativeProvider
-        adapter = nativeAdapterFor(ship, {
-          provider,
-          isolatedCheckout: false,
-          specFor: (req) =>
-            nativeSpecForShip({
-              config: ctx.loaded.config,
-              rootDir: ctx.rootDir,
-              projectId,
-              ship,
-              workdir: req.workdir,
-              engineHome: req.configDir,
-              isolatedCheckout: false,
-              sessionKind: 'chat',
-            }),
-        })
-      }
-    } else {
-      createSandboxManager(ctx.loaded.config)
-      adapter = deps.adapterFor?.(ship) ?? engineAdapterForShip(ship)
+            projectId,
+            ship,
+            workdir: req.workdir,
+            engineHome: req.configDir,
+            isolatedCheckout: false,
+            sessionKind: 'chat',
+            ...(executionBridge !== undefined ? { bridge: executionBridge } : {}),
+          }),
+      })
     }
 
     // Interactive engine policies (ask-* Ship modes) forward engine permission
@@ -277,9 +260,6 @@ export async function chatRun(
           }
           const runDeps: RunDeps = {
             adapterFor: deps.adapterFor,
-            sandboxManager: deps.sandboxManager,
-            workerImageProbe: deps.workerImageProbe,
-            dockerSpawn: deps.dockerSpawn,
           }
           const { runId, done } = startRunInBackground(
             ctx,
@@ -329,10 +309,13 @@ export async function chatRun(
     })
 
     const httpServer = new ToolHttpServer({
-      host: isDocker ? '0.0.0.0' : '127.0.0.1',
+      host: '127.0.0.1',
       port: 0,
+      ...(process.platform === 'linux' ? { unixSocket: true } : {}),
     })
-    const { url } = await httpServer.start()
+    const started = await httpServer.start()
+    executionBridge = bridgeEndpointOf(started)
+    const { url } = started
     const { token } = httpServer.register(bridge, {
       shipId: ship.id,
       taskId: null,
@@ -340,12 +323,11 @@ export async function chatRun(
       label: 'operator',
     })
 
-    const clientUrl = isDocker ? url.replace('0.0.0.0', 'host.docker.internal') : url
     const mcpServers: McpServerSpec[] = [
       {
         kind: 'http',
         name: 'pluton',
-        url: clientUrl,
+        url,
         headers: { Authorization: `Bearer ${token}` },
       },
     ]
@@ -912,7 +894,7 @@ export async function chatRun(
       bridge: {
         kind: 'http',
         label: 'operator',
-        url: clientUrl,
+        url,
       },
     }
 

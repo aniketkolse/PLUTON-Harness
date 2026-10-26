@@ -1,4 +1,6 @@
 import { ZodError } from 'zod'
+import { existsSync, realpathSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { InternalError, NotFoundError, PolicyDeniedError, PlutonError } from '../domain/errors.ts'
 import type { JsonValue } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
@@ -103,6 +105,13 @@ export interface PlutonToolBridgeOptions {
   callerMuseId?: string
   /** The caller's own task when its session is task-scoped (null for the manager or operator). */
   callerTaskId?: string | null
+  /**
+   * Filesystem roots this session's read tools may resolve against. Derived
+   * server-side: a task-scoped session gets only its own checkout, while the
+   * manager sees the project root. Callers cannot widen this through tool
+   * arguments.
+   */
+  readRoots?: string[]
   limits: ToolBridgeLimits
   leaseManager?: FileLeaseManager
   /** The project's workspace manager, so result reads can diff real checkouts. */
@@ -122,6 +131,42 @@ function errorDetails(e: unknown): JsonValue | undefined {
   } catch {
     return { unserializable: true }
   }
+}
+
+function canonical(path: string): string {
+  return existsSync(path) ? realpathSync.native(path) : resolve(path)
+}
+
+function inside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
+ * Read scope is derived from durable identity, never from tool arguments:
+ * a task-scoped session may read only its own checkout; the manager (or any
+ * task-less session) reads the project root it was constructed for.
+ */
+function resolveSessionReadRoots(opts: PlutonToolBridgeOptions): string[] {
+  const projectRoot = canonical(opts.rootDir)
+  let candidates: string[]
+  if (opts.readRoots !== undefined) {
+    candidates = opts.readRoots
+  } else if (opts.callerTaskId !== undefined && opts.callerTaskId !== null) {
+    const workspace = opts.store.getWorkspaceByTask(opts.callerTaskId)
+    candidates = workspace === null ? [] : [workspace.path]
+  } else {
+    candidates = [opts.rootDir]
+  }
+  const roots: string[] = []
+  for (const candidate of candidates) {
+    const real = canonical(candidate)
+    // A session root may never escape the project root it is scoped to: this
+    // keeps a wiring bug or a malicious workspace row from widening reads.
+    if (!inside(projectRoot, real)) continue
+    if (!roots.includes(real)) roots.push(real)
+  }
+  return roots
 }
 
 export class PlutonToolBridge implements McpToolHost {
@@ -185,6 +230,7 @@ export class PlutonToolBridge implements McpToolHost {
         store: opts.store,
         projectId: opts.projectId,
         rootDir: opts.rootDir,
+        readRoots: resolveSessionReadRoots(opts),
         runId: opts.runId,
         callerShipId,
         callerTaskId: opts.callerTaskId ?? null,

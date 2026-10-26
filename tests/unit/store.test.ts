@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { openDatabase, setUserVersion, type DatabaseSync } from '../../src/store/db.ts'
+import { getUserVersion, openDatabase, setUserVersion, type DatabaseSync } from '../../src/store/db.ts'
 import { MIGRATIONS, migrate, SCHEMA_VERSION } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
 import { ConflictError, InternalError, NotFoundError, StateTransitionError, ValidationError } from '../../src/domain/errors.ts'
@@ -91,6 +91,8 @@ describe('migrations', () => {
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
       'v8:muse-to-ship-terminology',
+      'v9:session-workspaces',
+      'v10:native-execution-sessions',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -139,17 +141,22 @@ describe('migrations', () => {
       'v6:task-assignment-snapshot',
       'v7:run-supervisor-ownership',
       'v8:muse-to-ship-terminology',
+      'v9:session-workspaces',
+      'v10:native-execution-sessions',
     ])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
     const terminalIds = db.prepare('SELECT id FROM terminals ORDER BY id').all().map((r) => r['id'])
     expect(terminalIds).toEqual(['tm_new'])
-    // The index now rejects a duplicate that the v1 schema would have accepted.
+    // v10 retires the table-wide unique index: the migrated Docker rows are
+    // inactive history, so a new active session for the same Ship may coexist.
     const insertUpgradedSandbox = db.prepare(
       `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
                               created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'docker', NULL, NULL, NULL, 'running', 'legacy', ?, ?)`,
+       VALUES (?, ?, ?, 'native', NULL, NULL, NULL, 'running', 'legacy', ?, ?)`,
     )
+    insertUpgradedSandbox.run('sb_new_session', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z')
+    // ...but only one ACTIVE row per (project, ship) may exist.
     expect(() =>
       insertUpgradedSandbox.run('sb_dup', 'project_legacy', null, '2024-03-01T00:00:00.000Z', '2024-03-01T00:00:00.000Z'),
     ).toThrow(/UNIQUE constraint failed/)
@@ -194,8 +201,8 @@ describe('migrations', () => {
     const result = migrate(db)
     expect(result.from).toBe(5)
     expect(result.to).toBe(SCHEMA_VERSION)
-    expect(SCHEMA_VERSION).toBe(8)
-    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology'])
+    expect(SCHEMA_VERSION).toBe(10)
+    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology', 'v9:session-workspaces', 'v10:native-execution-sessions'])
 
     const store = new Store(db)
     const task = store.getTask('task_v5')
@@ -206,6 +213,123 @@ describe('migrations', () => {
       assignment: { museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' },
     })
     expect(claimed?.assignment).toEqual({ museId: 'worker-a', role: 'coder', engine: 'mock', model: 'mock/model-a' })
+  })
+
+  it('v10 preserves legacy Docker rows and terminal references while activating native sessions', () => {
+    const path = tmpDbPath('mig-v10')
+    const db = openDatabase(path)
+    openDbs.push(db)
+    for (const migration of MIGRATIONS) {
+      if (migration.version > 9) continue
+      for (const sql of migration.statements) db.exec(sql)
+    }
+    setUserVersion(db, 9)
+    const ts = '2024-01-01T00:00:00.000Z'
+    db.prepare(
+      `INSERT INTO projects (id, name, root_path, config_path, default_branch, created_at, updated_at)
+       VALUES ('project_v9', 'v9', '/v9', '/v9/pluton.yaml', 'main', ?, ?)`,
+    ).run(ts, ts)
+    db.prepare(
+      `INSERT INTO sandboxes (id, project_id, ship_id, kind, container_name, container_id, image, state,
+                              created_by, created_at, updated_at)
+       VALUES ('sb_docker', 'project_v9', 'worker-a', 'docker', 'pluton-x-worker-a', 'cid_1',
+               'pluton/worker:1', 'running', 'run', ?, ?)`,
+    ).run(ts, ts)
+    db.prepare(
+      `INSERT INTO terminals (id, project_id, ship_id, sandbox_id, tmux_session_name, state, created_at, updated_at)
+       VALUES ('tm_v9', 'project_v9', 'worker-a', 'sb_docker', 'pluton-x-worker-a', 'present', ?, ?)`,
+    ).run(ts, ts)
+
+    const result = migrate(db)
+    expect(result.from).toBe(9)
+    expect(result.applied).toEqual(['v10:native-execution-sessions'])
+
+    const store = new Store(db)
+    const legacy = store.getSandbox('sb_docker')
+    expect(legacy.legacy).toBe(true)
+    expect(legacy.active).toBe(false)
+    expect(legacy.sessionState).toBe('legacy')
+    expect(store.getSandboxForShip('project_v9', 'worker-a')).toBeNull()
+    // Terminal references survive untouched.
+    expect(store.getTerminal('tm_v9').sandboxId).toBe('sb_docker')
+
+    const first = store.startSandboxSession({
+      projectId: 'project_v9',
+      shipId: 'worker-a',
+      kind: 'native',
+      containerName: null,
+      containerId: null,
+      image: null,
+      state: 'running',
+      createdBy: 'run',
+      executionMode: 'workspace-write',
+      networkPolicy: 'restricted',
+      helperVersion: '0.1.0',
+      policy: { filesystem: 'landlock', network: 'netns' },
+      sessionState: 'running',
+    })
+    expect(first.active).toBe(true)
+    expect(first.kind).toBe('native')
+    expect(first.executionMode).toBe('workspace-write')
+    expect(first.networkPolicy).toBe('restricted')
+    expect(first.policy).toEqual({ filesystem: 'landlock', network: 'netns' })
+    expect(store.getSandboxForShip('project_v9', 'worker-a')?.id).toBe(first.id)
+
+    const second = store.startSandboxSession({
+      projectId: 'project_v9',
+      shipId: 'worker-a',
+      kind: 'native',
+      containerName: null,
+      containerId: null,
+      image: null,
+      state: 'running',
+      createdBy: 'run',
+      executionMode: 'read-only',
+      networkPolicy: 'none',
+      helperVersion: '0.1.0',
+      policy: null,
+    })
+    expect(store.getSandboxForShip('project_v9', 'worker-a')?.id).toBe(second.id)
+    const retired = store.getSandbox(first.id)
+    expect(retired.active).toBe(false)
+    expect(retired.sessionState).toBe('exited')
+    expect(retired.endedAt).not.toBeNull()
+    expect(store.listActiveSandboxes('project_v9').map((s) => s.id)).toEqual([second.id])
+    expect(store.listSandboxes('project_v9')).toHaveLength(3)
+  })
+
+  it('refuses a database newer than this build instead of downgrading it', () => {
+    const path = tmpDbPath('mig-forward')
+    const db = openDatabase(path)
+    openDbs.push(db)
+    migrate(db)
+    setUserVersion(db, SCHEMA_VERSION + 1)
+    expect(() => migrate(db)).toThrow(/newer than this build supports/)
+  })
+
+  it('rolls back every pending migration when one statement fails', () => {
+    const path = tmpDbPath('mig-atomic')
+    const db = openDatabase(path)
+    openDbs.push(db)
+    for (const sql of MIGRATIONS[0]!.statements) db.exec(sql)
+    setUserVersion(db, 1)
+    const broken = {
+      version: SCHEMA_VERSION + 1,
+      name: 'broken-test-migration',
+      statements: [
+        'ALTER TABLE projects ADD COLUMN should_not_survive TEXT',
+        'THIS IS NOT VALID SQL',
+      ],
+    }
+    MIGRATIONS.push(broken)
+    try {
+      expect(() => migrate(db)).toThrow()
+    } finally {
+      MIGRATIONS.pop()
+    }
+    expect(getUserVersion(db)).toBe(1)
+    const columns = db.prepare('PRAGMA table_info(projects)').all().map((r) => r['name'])
+    expect(columns).not.toContain('should_not_survive')
   })
 })
 

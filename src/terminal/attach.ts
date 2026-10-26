@@ -1,57 +1,37 @@
 import { spawn } from 'node:child_process'
-import { TerminalUnavailableError, ValidationError } from '../domain/errors.ts'
+import { TerminalUnavailableError } from '../domain/errors.ts'
 import { assertSafeTmuxName } from './names.ts'
 import { TMUX_NOT_INSTALLED_FIX } from './native.ts'
 import type { TerminalManager } from './types.ts'
 
 /**
  * Interactive attach seam (ADR-0005). `pluton attach` is exactly one child
- * process: `docker exec -it <container> tmux attach-session -t <target>` in
- * Docker mode or host `tmux attach-session -t <target>` in native mode, with
- * the user's terminal inherited. There is no host shell and no shell string —
- * the argv is built here, validated here, and spawned as an array.
+ * process: host `tmux attach-session -t <target>`, with the user's terminal
+ * inherited. There is no host shell and no shell string — the argv is built
+ * here, validated here, and spawned as an array.
  *
- * The tmux session is ensured through the TerminalManager first (inside the
- * container in Docker mode, on the host in native mode): attaching to a Ship
- * that never ran still works, and detaching never affects tasks.
+ * The tmux session is ensured through the TerminalManager first (on the host):
+ * attaching to a Ship that never ran still works, and detaching never affects
+ * tasks.
  */
 
 export interface AttachTarget {
-  containerName?: string
   sessionName: string
   windowName?: string
 }
-
-/** Same grammar as tmux names: no target-syntax metacharacters can survive. */
-const SAFE_CONTAINER_RE = /^[a-z0-9][a-z0-9_-]*$/
 
 /**
  * Exact-match tmux targets (`=name`, `=name:=window`), validated names.
  * `=` forces exact session matching so a prefix-named session can never alias.
  */
-export function buildAttachArgv(
-  target: AttachTarget,
-  sandboxKind?: 'docker' | 'native' | 'local-process',
-): string[] {
+export function buildAttachArgv(target: AttachTarget): string[] {
   assertSafeTmuxName('session', target.sessionName)
   let tmuxTarget = `=${target.sessionName}`
   if (target.windowName !== undefined) {
     assertSafeTmuxName('window', target.windowName)
     tmuxTarget += `:=${target.windowName}`
   }
-  const isNative =
-    sandboxKind === 'native' ||
-    (sandboxKind === undefined && (target.containerName === 'host' || target.containerName === undefined))
-  if (isNative) {
-    return ['tmux', 'attach-session', '-t', tmuxTarget]
-  }
-  const containerName = target.containerName ?? ''
-  if (!SAFE_CONTAINER_RE.test(containerName)) {
-    throw new ValidationError(
-      `unsafe container name '${containerName}': expected ${String(SAFE_CONTAINER_RE)}`,
-    )
-  }
-  return ['docker', 'exec', '-it', containerName, 'tmux', 'attach-session', '-t', tmuxTarget]
+  return ['tmux', 'attach-session', '-t', tmuxTarget]
 }
 
 /** Resolves the child exit code; throws when it cannot spawn. */
@@ -83,7 +63,6 @@ export interface AttachOutcome {
 }
 
 export interface AttachDeps {
-  sandboxKind: 'docker' | 'local-process' | 'native'
   manager: TerminalManager
   target: AttachTarget
   /** Absent = plan mode: ensure the session, build the argv, do not spawn. */
@@ -91,15 +70,10 @@ export interface AttachDeps {
 }
 
 export async function attachToShipTerminal(deps: AttachDeps): Promise<AttachOutcome> {
-  const { sandboxKind, manager, target } = deps
-  if (sandboxKind !== 'docker' && sandboxKind !== 'native') {
-    throw new ValidationError(
-      'pluton attach requires container-mode Ships (sandbox.kind: docker) or native host mode (sandbox.kind: native): tmux sessions live inside the Ship container or on the host',
-    )
-  }
+  const { manager, target } = deps
   // Validate the target (and have the exact argv ready) even in plan mode.
-  const argv = buildAttachArgv(target, sandboxKind)
-  const containerName = target.containerName ?? (sandboxKind === 'native' ? 'host' : '')
+  const argv = buildAttachArgv(target)
+  const containerName = 'host'
   const session = await manager.ensureSession(containerName, target.sessionName)
   if (target.windowName !== undefined) {
     await manager.ensureWindow(containerName, target.sessionName, target.windowName)
@@ -116,33 +90,15 @@ export async function attachToShipTerminal(deps: AttachDeps): Promise<AttachOutc
     exitCode = await deps.spawnAttach(argv)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    if (sandboxKind === 'native') {
-      const isMissing = /ENOENT|not found/i.test(msg)
-      throw new TerminalUnavailableError(
-        `could not attach to host tmux session: ${msg}`,
-        {
-          details: {
-            reason: isMissing ? 'tmux_not_installed' : 'exec_failed',
-            containerName,
-            sessionName: target.sessionName,
-          },
-          fix: isMissing
-            ? TMUX_NOT_INSTALLED_FIX
-            : 'check host tmux configuration and permissions',
-        },
-      )
-    }
-    throw new TerminalUnavailableError(
-      `could not start docker exec for attach: ${msg}`,
-      {
-        details: {
-          reason: 'exec_failed',
-          containerName,
-          sessionName: target.sessionName,
-        },
-        fix: 'is Docker Desktop running and `docker` on PATH? (`docker version`)',
+    const isMissing = /ENOENT|not found/i.test(msg)
+    throw new TerminalUnavailableError(`could not attach to host tmux session: ${msg}`, {
+      details: {
+        reason: isMissing ? 'tmux_not_installed' : 'exec_failed',
+        containerName,
+        sessionName: target.sessionName,
       },
-    )
+      fix: isMissing ? TMUX_NOT_INSTALLED_FIX : 'check host tmux configuration and permissions',
+    })
   }
   return { ...base, exitCode }
 }

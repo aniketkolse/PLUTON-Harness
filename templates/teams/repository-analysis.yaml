@@ -21,6 +21,10 @@ sandbox:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
     mode: workspace-write
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
 
 ships:
   manager:

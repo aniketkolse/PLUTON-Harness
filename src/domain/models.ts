@@ -114,6 +114,10 @@ export interface RunRecord {
   supervisorToken: string | null
   /** Epoch ms of the owner's last heartbeat; NULL = unowned. */
   supervisorHeartbeatAt: number | null
+  /** Workspace this run operates on (NULL = the server project root). */
+  workspaceRoot: string | null
+  /** Chat session that started this run, so background work stays bound to it. */
+  originSessionId: string | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null
@@ -186,13 +190,42 @@ export interface WorkspaceRecord {
   updatedAt: string
 }
 
+/**
+ * Native execution policy vocabulary (ADR-0013). These live in the domain layer
+ * because they are persisted on every sandbox session row and rendered in
+ * status/doctor output; the execution provider imports them rather than
+ * defining a second, drifting copy.
+ */
+export const EXECUTION_MODES = ['read-only', 'workspace-write', 'unconfined'] as const
+export type ExecutionMode = (typeof EXECUTION_MODES)[number]
+
+export const EXECUTION_NETWORK_POLICIES = ['open', 'restricted', 'none'] as const
+export type ExecutionNetworkPolicy = (typeof EXECUTION_NETWORK_POLICIES)[number]
+
+export const SANDBOX_KINDS = ['native', 'docker', 'local-process'] as const
+export type SandboxKind = (typeof SANDBOX_KINDS)[number]
+
+/**
+ * Lifecycle of one execution session. `legacy` marks pre-v10 Docker/
+ * local-process history that is kept for audit and terminal references but can
+ * never become active again.
+ */
+export const SANDBOX_SESSION_STATES = [
+  'starting',
+  'running',
+  'exited',
+  'failed',
+  'legacy',
+] as const
+export type SandboxSessionState = (typeof SANDBOX_SESSION_STATES)[number]
+
 export interface SandboxRecord {
   id: string
   projectId: string
   shipId: string | null
   /** @deprecated Use `shipId`; kept for backward compatibility. */
   museId?: string | null
-  kind: 'docker' | 'local-process'
+  kind: SandboxKind
   containerName: string | null
   containerId: string | null
   image: string | null
@@ -200,6 +233,20 @@ export interface SandboxRecord {
   createdBy: string
   createdAt: string
   updatedAt: string
+  /** At most one active session per (project, ship); enforced by a partial unique index. */
+  active: boolean
+  /** Row preserved from the Docker/local-process era; read-only history. */
+  legacy: boolean
+  executionMode: ExecutionMode | null
+  networkPolicy: ExecutionNetworkPolicy | null
+  helperVersion: string | null
+  /** Frozen capability/policy snapshot used to start this session. */
+  policy: JsonValue | null
+  sessionState: SandboxSessionState | null
+  lastSeenAt: string | null
+  exitCode: number | null
+  startedAt: string | null
+  endedAt: string | null
 }
 
 export interface TerminalRecord {
@@ -321,6 +368,8 @@ export interface ChatSessionRecord {
   resumeToken: string | null
   /** Pluton-side engine session id (diagnostics/audit). */
   engineSessionId: string | null
+  /** Absolute workspace root this session operates on (NULL = server project root). */
+  workspaceRoot: string | null
   createdAt: string
   updatedAt: string
 }

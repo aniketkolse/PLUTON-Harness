@@ -149,6 +149,10 @@ sandbox:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
     mode: workspace-write
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
     session_timeout_minutes: 5
 runtime:
   max_concurrent_workers: 2
@@ -263,7 +267,6 @@ describe('Runtime Guard: Zero Docker Invocations across Native Runtime Lifecycle
 
     expect(report.sandbox.kind).toBe('native')
     expect(report.sandbox.available).toBe(true)
-    expect(report.image).toBeNull()
     expect(report.dispatchReady).toBe(true)
     expect(report.warnings).toEqual(
       expect.arrayContaining([
@@ -288,7 +291,10 @@ sandbox:
   native:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
-muses: {}
+    mode_by_platform:
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
 `)
 
     const report = await runDoctor({ cwd: dir })
@@ -296,9 +302,7 @@ muses: {}
     expect(report.exitCode).toBe(0)
 
     const dockerCli = report.checks.find((c) => c.id === 'docker-cli')
-    expect(dockerCli).toBeDefined()
-    expect(dockerCli?.status).toBe('info')
-    expect(dockerCli?.message).toContain('not probed — native mode does not use Docker')
+    expect(dockerCli).toBeUndefined()
 
     const dockerDaemon = report.checks.find((c) => c.id === 'docker-daemon')
     expect(dockerDaemon).toBeUndefined()
@@ -377,9 +381,8 @@ muses: {}
     })
 
     const directOutcome = await attachToMuseTerminal({
-      sandboxKind: 'native',
       manager: terminalManager,
-      target: { containerName: 'host', sessionName: 'pluton_guard_session' },
+      target: { sessionName: 'pluton_guard_session' },
     })
 
     expect(directOutcome).toMatchObject({
