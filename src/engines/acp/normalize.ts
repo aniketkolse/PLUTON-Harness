@@ -86,11 +86,26 @@ function toolSummary(u: Record<string, unknown>, toolName: string): string | und
     if (typeof rawInput['command'] === 'string' && rawInput['command'] !== '') {
       return rawInput['command']
     }
+    if (typeof rawInput['url'] === 'string' && rawInput['url'] !== '') {
+      return rawInput['url']
+    }
     if (typeof rawInput['query'] === 'string' && rawInput['query'] !== '') {
       return rawInput['query']
     }
+    if (typeof rawInput['pattern'] === 'string' && rawInput['pattern'] !== '') {
+      return rawInput['pattern']
+    }
     if (typeof rawInput['goal'] === 'string' && rawInput['goal'] !== '') {
       return rawInput['goal']
+    }
+    if (typeof rawInput['target'] === 'string' && rawInput['target'] !== '') {
+      return rawInput['target']
+    }
+    if (typeof rawInput['prompt'] === 'string' && rawInput['prompt'] !== '') {
+      return rawInput['prompt']
+    }
+    if (typeof rawInput['description'] === 'string' && rawInput['description'] !== '') {
+      return rawInput['description']
     }
     if (typeof rawInput['runId'] === 'string' && rawInput['runId'] !== '') {
       return rawInput['runId']
@@ -105,11 +120,26 @@ function toolSummary(u: Record<string, unknown>, toolName: string): string | und
     }
   }
 
-  return title
+  if (title && clean(title) !== clean(toolName)) {
+    return title
+  }
+
+  return undefined
 }
 
 function toolOutputText(u: Record<string, unknown>): string | undefined {
   if (typeof u['output'] === 'string' && u['output'] !== '') return u['output']
+  const outRec = asRecord(u['output'])
+  if (outRec) {
+    if (typeof outRec['text'] === 'string' && outRec['text'] !== '') return outRec['text']
+    if (typeof outRec['stdout'] === 'string' || typeof outRec['stderr'] === 'string') {
+      const parts = [outRec['stdout'], outRec['stderr']].filter((x): x is string => typeof x === 'string' && x !== '')
+      if (parts.length > 0) return parts.join('\n')
+    }
+    try {
+      return JSON.stringify(outRec, null, 2)
+    } catch {}
+  }
   if (Array.isArray(u['content'])) {
     const parts: string[] = []
     for (const item of u['content']) {
@@ -117,10 +147,14 @@ function toolOutputText(u: Record<string, unknown>): string | undefined {
       if (!rec) continue
       if (typeof rec['text'] === 'string') {
         parts.push(rec['text'])
+      } else if (typeof rec['content'] === 'string') {
+        parts.push(rec['content'])
       } else if (rec['type'] === 'content') {
         const inner = asRecord(rec['content'])
         if (typeof inner?.['text'] === 'string') {
           parts.push(inner['text'])
+        } else if (typeof inner?.['content'] === 'string') {
+          parts.push(inner['content'])
         }
       }
     }
@@ -177,6 +211,7 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
       const callId = toolCallId(u)
       const summary = toolSummary(u, name)
       const output = toolOutputText(u)
+      const input = u['rawInput'] ?? u['input']
       return {
         events: [
           {
@@ -185,6 +220,7 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
             phase: 'end',
             ...(callId ? { callId } : {}),
             ...(summary ? { summary } : {}),
+            ...(input !== undefined ? { input } : {}),
             ...(output ? { output } : {}),
             isError: status === 'failed',
           },

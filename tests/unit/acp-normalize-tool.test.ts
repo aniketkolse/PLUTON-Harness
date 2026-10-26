@@ -51,4 +51,54 @@ describe('ACP normalize tool call refinement', () => {
       expect(ev.isError).toBe(false)
     }
   })
+
+  it('extracts url and pattern in rawInput and discards redundant titles', () => {
+    const frameWeb = {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call_web_1',
+      name: 'webfetch',
+      status: 'pending',
+      title: 'webfetch',
+      rawInput: { url: 'https://en.wikipedia.org/wiki/Naruto' },
+    }
+    const resWeb = normalizeSessionUpdate(frameWeb)
+    expect(resWeb.events[0]).toMatchObject({
+      kind: 'tool',
+      name: 'webfetch',
+      summary: 'https://en.wikipedia.org/wiki/Naruto',
+      input: { url: 'https://en.wikipedia.org/wiki/Naruto' },
+    })
+
+    const frameGrep = {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call_grep_1',
+      name: 'grep',
+      status: 'pending',
+      title: 'Grep',
+      rawInput: { pattern: 'function main' },
+    }
+    const resGrep = normalizeSessionUpdate(frameGrep)
+    expect(resGrep.events[0]).toMatchObject({
+      kind: 'tool',
+      name: 'grep',
+      summary: 'function main',
+    })
+  })
+
+  it('handles object output with stdout/stderr or text cleanly', () => {
+    const frame = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call_cmd',
+      name: 'bash',
+      status: 'completed',
+      output: { stdout: 'hello world', stderr: '' },
+    }
+    const res = normalizeSessionUpdate(frame)
+    expect(res.events[0]).toMatchObject({
+      kind: 'tool',
+      name: 'bash',
+      phase: 'end',
+      output: 'hello world',
+    })
+  })
 })

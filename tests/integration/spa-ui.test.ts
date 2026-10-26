@@ -815,6 +815,10 @@ describe('PLUTON SPA — replaced assets', () => {
       expect(js).toContain("existing.setAttribute('data-status', status)")
       expect(js).toContain("card.className = 'tool-card activity-timeline-node' + (status === 'failed' ? ' is-failed' : '')")
       expect(css).toContain('.tool-card.is-failed')
+      expect(js).toContain('formatToolOutput')
+      expect(js).toContain('formatToolInput')
+      expect(css).toContain('.tool-spinner')
+      expect(css).toContain('.tool-card-input')
 
       // Composer only clears and resets height on HTTP 202 Accepted
       expect(js).toContain('res.status === 202')

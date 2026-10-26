@@ -30,7 +30,11 @@ sandbox:
   native:
     acknowledge_partial_enforcement: true
     acknowledge_host_network: true
+    acknowledge_unconfined: true
     mode: workspace-write
+    mode_by_platform:
+      win32: unconfined
+      darwin: unconfined
 
 git:
   require_approval_for_main_branch_integration: true
