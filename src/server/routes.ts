@@ -30,6 +30,7 @@ import { safeResolvePath } from './security.ts'
 import { pickNativeFolder } from './folder-picker.ts'
 import { describeWorkspace, resolveWorkspaceRoot } from './workspace.ts'
 import type { ServerEventBroadcaster } from './events.ts'
+import { SessionRunner } from './session-runner.ts'
 import { decideApproval, sweepExpiredApprovals } from '../cli/commands/approvals.ts'
 import {
   requestRunCancel,
@@ -62,6 +63,7 @@ export interface RouteContext {
   loaded: LoadedConfig
   broadcaster: ServerEventBroadcaster
   pickFolderFn?: typeof pickNativeFolder
+  runner?: SessionRunner
 }
 
 /**
@@ -105,10 +107,7 @@ interface PermissionPolicies {
 
 export class ApiRouter {
   private readonly ctx: RouteContext
-  private readonly activeEngineSessions = new Map<
-    string,
-    { session: EngineSession; busy: boolean; approvals: EnginePermissionChannel }
-  >()
+  public readonly runner: SessionRunner
   /**
    * Shared MCP tool transport. One HTTP endpoint serves every SPA chat
    * session's bridge; each engine session gets its own bearer token, exactly
@@ -147,6 +146,19 @@ export class ApiRouter {
   constructor(ctx: RouteContext) {
     this.ctx = ctx
     registerBuiltinEngines()
+    this.runner =
+      ctx.runner ??
+      new SessionRunner({
+        store: ctx.store,
+        broadcaster: ctx.broadcaster,
+        projectId: ctx.projectId,
+        adapterResolver: (ship, workspaceRoot) => this.adapterForShip(ship, workspaceRoot),
+        workspaceResolver: (sessionId) => this.workspaceRootFor(sessionId),
+        mcpServersResolver: (sessionId, ship, adapter, workspaceRoot) =>
+          this.mcpServersForSession(sessionId, ship, adapter, workspaceRoot),
+        onSessionDropped: (sessionId) => this.dropMcpRegistration(sessionId),
+        approvalTimeoutMinutes: ctx.loaded.config.runtime.approval_timeout_minutes,
+      })
   }
 
   private getStoreShips(): ShipRecord[] {
@@ -352,12 +364,7 @@ export class ApiRouter {
         }
         if (method === 'PATCH') {
           const payload = await this.readJsonBody<{ workspaceRoot?: string | null; title?: string | null }>(req)
-          const active = this.activeEngineSessions.get(sessionId)
           if (payload.workspaceRoot !== undefined) {
-            if (active) {
-              this.sendJson(res, 409, { ok: false, error: 'switching workspace while the session is busy is not supported' })
-              return true
-            }
             let nextRoot: string | null = null
             try {
               nextRoot = payload.workspaceRoot === null
@@ -369,8 +376,7 @@ export class ApiRouter {
             }
             const updated = this.ctx.store.updateChatSession(sessionId, { workspaceRoot: nextRoot })
             this.dropMcpRegistration(sessionId)
-            const entry = this.activeEngineSessions.get(sessionId)
-            if (entry) { void entry.session.close(); this.activeEngineSessions.delete(sessionId) }
+            await this.runner.dropSession(sessionId)
             this.ctx.broadcaster.broadcast({ type: 'workspace_changed', sessionId, workspaceRoot: updated.workspaceRoot })
             this.sendJson(res, 200, { ok: true, session: updated })
             return true
@@ -390,18 +396,21 @@ export class ApiRouter {
         } catch {
           workspaceRoot = session.workspaceRoot ?? null
         }
+        const shipView = {
+          id: ship.id,
+          slug: ship.slug,
+          displayName: ship.displayName,
+          role: ship.role,
+          engine: ship.engineKind,
+          model: ship.model,
+        }
         const detail: SessionDetailView = {
           session,
           messages,
-          activeShip: {
-            id: ship.id,
-            slug: ship.slug,
-            displayName: ship.displayName,
-            role: ship.role,
-            engine: ship.engineKind,
-            model: ship.model,
-          },
-          busy: this.activeEngineSessions.get(sessionId)?.busy === true,
+          activeShip: shipView,
+          activeMuse: shipView,
+          busy: this.runner.isBusy(sessionId),
+          queueLength: this.runner.getQueueLength(sessionId),
           ...(workspaceRoot !== null ? { workspaceRoot } : {}),
         }
         this.sendJson(res, 200, { ok: true, session: detail })
@@ -424,17 +433,19 @@ export class ApiRouter {
           return true
         }
 
-        const active = this.activeEngineSessions.get(sessionId)
-        if (active?.busy) {
-          this.sendJson(res, 409, { ok: false, error: 'session is already processing a prompt' })
-          return true
-        }
+        const isBusy = this.runner.isBusy(sessionId)
+        const item = this.runner.enqueue(sessionId, userText, payload.mode ?? 'chat')
+        const queueLength = this.runner.getQueueLength(sessionId)
 
-        // Start processing asynchronously and return 202 Accepted
-        this.sendJson(res, 202, { ok: true, status: 'streaming', sessionId, mode: payload.mode ?? 'chat' })
-
-        // Fire-and-forget prompt turn execution with real SSE streaming
-        void this.executePromptTurn(sessionId, session.shipId, userText, payload.mode)
+        // Return 202 Accepted with 'streaming' if immediately started, 'enqueued' if queued behind running turn
+        this.sendJson(res, 202, {
+          ok: true,
+          status: isBusy ? 'enqueued' : 'streaming',
+          sessionId,
+          inboxId: item.id,
+          queueLength,
+          mode: payload.mode ?? 'chat',
+        })
         return true
       }
 
@@ -442,23 +453,8 @@ export class ApiRouter {
       const cancelMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/cancel$/)
       if (cancelMatch && method === 'POST') {
         const sessionId = cancelMatch[1]!
-        const active = this.activeEngineSessions.get(sessionId)
-        if (active?.busy) {
-          // Cancelling the turn settles any pending engine permission request
-          // fail-closed (the engine gets a deny, not a hang).
-          active.approvals.abort('turn cancelled by operator')
-          await active.session.interrupt()
-          active.busy = false
-          this.ctx.broadcaster.broadcast({
-            type: 'turn_end',
-            sessionId,
-            interrupted: true,
-            failed: false,
-          })
-          this.sendJson(res, 200, { ok: true, cancelled: true })
-        } else {
-          this.sendJson(res, 200, { ok: true, cancelled: false, message: 'session was not busy' })
-        }
+        const cancelled = await this.runner.cancel(sessionId)
+        this.sendJson(res, 200, { ok: true, cancelled })
         return true
       }
 
@@ -884,19 +880,23 @@ export class ApiRouter {
           this.sendJson(res, 404, { ok: false, error: `ship '${shipId}' not found` })
           return true
         }
-        const isCustom = this.customModels.some((m) => m.id === requested)
-        const adapter = this.adapterForShip(ship, this.ctx.loaded.rootDir)
-        if (!isCustom && adapter.capabilities().modelList) {
-          const available = await adapter.listModels()
-          const known = available.some((m) => m.id === requested || m.label === requested)
-          if (!known && available.length > 0) {
-            this.sendJson(res, 400, {
-              ok: false,
-              error: `model '${requested}' is not offered by engine '${ship.engineKind}'`,
-              available: available.map((m) => m.id),
-            })
-            return true
+        try {
+          const isCustom = this.customModels.some((m) => m.id === requested)
+          const adapter = this.adapterForShip(ship, this.ctx.loaded.rootDir)
+          if (!isCustom && adapter.capabilities().modelList) {
+            const available = await adapter.listModels()
+            const known = available.some((m) => m.id === requested || m.label === requested)
+            if (!known && available.length > 0) {
+              this.sendJson(res, 400, {
+                ok: false,
+                error: `model '${requested}' is not offered by engine '${ship.engineKind}'`,
+                available: available.map((m) => m.id),
+              })
+              return true
+            }
           }
+        } catch {
+          // If model check fails (e.g. offline/probe error), proceed with requested model
         }
         // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
@@ -1300,7 +1300,7 @@ export class ApiRouter {
     const servers: McpServerStatus[] = []
     const transportUp = this.toolHttp !== null && this.toolHttp.sessionCount() > 0
     for (const reg of this.mcpRegistrations.values()) {
-      const engineSessionLive = this.activeEngineSessions.has(reg.sessionId)
+      const engineSessionLive = this.runner.hasActiveEngineSession(reg.sessionId)
       const connected = transportUp && engineSessionLive
       servers.push({
         name: reg.name,
@@ -1418,15 +1418,10 @@ export class ApiRouter {
    * the engine pins its model per session.
    */
   private async restartEngineSessionForShip(shipId: string, model: string): Promise<boolean> {
-    for (const [sessionId, entry] of this.activeEngineSessions) {
+    for (const sessionId of this.runner.getActiveSessionIds()) {
       const session = this.ctx.store.getChatSessionOrNull(sessionId)
       if (session === null || session.shipId !== shipId) continue
-      try {
-        await entry.session.close()
-      } catch {
-        // Ignore close errors: the session is replaced either way.
-      }
-      this.activeEngineSessions.delete(sessionId)
+      await this.runner.dropSession(sessionId)
       this.dropMcpRegistration(sessionId)
       const ship = this.ctx.store.getShip(shipId)
       if (ship === null) continue
@@ -1459,7 +1454,7 @@ export class ApiRouter {
           approvals,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
-        this.activeEngineSessions.set(sessionId, { session: next, busy: false, approvals })
+        this.runner.setSession(sessionId, { session: next, approvals })
         return true
       } catch (err) {
         // The engine refused to start on the new model: the session stays
@@ -1482,157 +1477,6 @@ export class ApiRouter {
     if (reg === undefined) return
     this.mcpRegistrations.delete(sessionId)
     this.toolHttp?.unregister(reg.token)
-  }
-
-  private async executePromptTurn(
-    sessionId: string,
-    shipId: string,
-    userText: string,
-    mode?: string,
-  ): Promise<void> {
-    const store = this.ctx.store
-    const broadcaster = this.ctx.broadcaster
-
-    // 1. Persist user turn
-    store.appendChatMessage({
-      sessionId,
-      role: 'user',
-      text: userText,
-    })
-    broadcaster.broadcast({ type: 'turn_start', sessionId, userText, mode: mode ?? 'chat' })
-
-    const ship = store.getShip(shipId)
-    if (!ship) {
-      broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: Ship '${shipId}' not found]` })
-      broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
-      return
-    }
-
-    const sessionWorkspace = this.workspaceRootFor(sessionId)
-    const adapter = this.adapterForShip(ship, sessionWorkspace)
-
-    let entry = this.activeEngineSessions.get(sessionId)
-    if (!entry) {
-      // Interactive engine policies (ask-* Ship modes) forward permission
-      // requests to the operator: the request becomes a durable approval the
-      // operator decides in the TUI or the SPA, and the SPA hears about it
-      // live over SSE. Decisions from the SPA's own route are broadcast there;
-      // this channel only adds the expiry/abort notices.
-      const approvals = createEngineApprovalChannel({
-        store,
-        projectId: this.ctx.projectId,
-        runId: null,
-        taskId: null,
-        shipId: ship.id,
-        ttlMinutes: this.ctx.loaded.config.runtime.approval_timeout_minutes,
-        onRequested: (approval) => {
-          broadcaster.broadcast({ type: 'approval_requested', approval })
-        },
-        onSettled: (approval, settlement) => {
-          if (settlement !== 'decision') {
-            broadcaster.broadcast({ type: 'approval_decided', approval })
-          }
-        },
-      })
-      let session: EngineSession
-      try {
-        const mcpServers = await this.mcpServersForSession(sessionId, ship, adapter, sessionWorkspace)
-        session = await adapter.startSession({
-          ship: {
-            id: ship.id,
-            slug: ship.slug,
-            role: ship.role,
-            model: ship.model,
-          },
-          workdir: sessionWorkspace,
-          env: {},
-          configDir: ship.engineHome,
-          instructions: `You are ${ship.displayName}, working inside ${sessionWorkspace}. Assist the user directly with code and tasks.`,
-          approvals,
-          ...(mcpServers.length > 0 ? { mcpServers } : {}),
-        })
-      } catch (err) {
-        // The engine refused to start (binary missing, auth missing, ...). The
-        // turn must end here: a client that never receives `turn_end` would
-        // wait for a reply that can never arrive.
-        const message = err instanceof Error ? err.message : String(err)
-        // The bridge was registered before the session start, so a failed
-        // start would leave a dead MCP registration behind. Drop it, or the
-        // registry would report a server nobody can reach.
-        this.dropMcpRegistration(sessionId)
-        broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${message}]` })
-        broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
-        approvals.abort('engine session failed to start')
-        return
-      }
-      entry = { session, busy: false, approvals }
-      this.activeEngineSessions.set(sessionId, entry)
-    }
-
-    entry.busy = true
-    let assistantText = ''
-    let interrupted = false
-    let failed = false
-
-    try {
-      const promptPayload = mode === 'plan'
-        ? `[PLAN MODE] Please formulate a detailed architectural and implementation plan for the following goal without making workspace edits:\n\n${userText}`
-        : userText
-
-      for await (const ev of entry.session.sendPrompt({ text: promptPayload })) {
-        if (!entry.busy) {
-          interrupted = true
-          break
-        }
-        switch (ev.kind) {
-          case 'text':
-            assistantText += ev.text
-            broadcaster.broadcast({ type: 'token', sessionId, text: ev.text })
-            break
-          case 'tool':
-            broadcaster.broadcast({
-              type: 'tool',
-              sessionId,
-              tool: {
-                id: ev.callId ?? ev.name,
-                name: ev.name,
-                summary: ev.summary ?? ev.name,
-                status: ev.phase === 'start' ? 'running' : ev.isError ? 'failed' : 'succeeded',
-                input: ev.input,
-                output: ev.output,
-              },
-            })
-            break
-          case 'usage':
-            broadcaster.broadcast({
-              type: 'usage',
-              sessionId,
-              inputTokens: ev.inputTokens ?? 0,
-              outputTokens: ev.outputTokens ?? 0,
-              costUsd: ev.costUsd ?? null,
-            })
-            break
-          case 'error':
-            failed = true
-            broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${ev.message}]` })
-            break
-        }
-      }
-    } catch (err) {
-      failed = true
-      const errMsg = err instanceof Error ? err.message : String(err)
-      broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Engine failure: ${errMsg}]` })
-    } finally {
-      entry.busy = false
-      if (assistantText.trim().length > 0) {
-        store.appendChatMessage({
-          sessionId,
-          role: 'assistant',
-          text: assistantText,
-        })
-      }
-      broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted, failed })
-    }
   }
 
   private listWorkspaceFiles(rootDir: string, maxFiles = 300): string[] {
@@ -1731,17 +1575,7 @@ export class ApiRouter {
   }
 
   async close(): Promise<void> {
-    for (const [, entry] of this.activeEngineSessions) {
-      // Server shutdown settles pending engine permissions fail-closed before
-      // the sessions go away (never leave the engine waiting on us).
-      entry.approvals.abort('server shutting down')
-      try {
-        await entry.session.close()
-      } catch {
-        // Ignore close errors
-      }
-    }
-    this.activeEngineSessions.clear()
+    await this.runner.close()
     const providers = [...this.nativeProviders.values()]
     this.nativeProviders.clear()
     for (const provider of providers) {

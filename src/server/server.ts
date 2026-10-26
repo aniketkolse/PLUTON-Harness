@@ -117,10 +117,19 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     }
 
     // 6. REST API routes
-    const handled = await router.handle(req, res)
-    if (!handled) {
-      res.writeHead(404, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: `Route '${pathname}' not found` }))
+    try {
+      const handled = await router.handle(req, res)
+      if (!handled) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: `Route '${pathname}' not found` }))
+      }
+    } catch (err: unknown) {
+      if (!res.headersSent) {
+        const message = err instanceof Error ? err.message : String(err)
+        const fix = err && typeof err === 'object' && 'fix' in err ? (err as { fix?: string }).fix : undefined
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: message, ...(fix ? { fix } : {}) }))
+      }
     }
   })
 

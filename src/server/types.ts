@@ -72,11 +72,22 @@ export interface SessionDetailView {
     engine: string
     model: string
   }
+  /** Backward-compatible alias for activeShip. */
+  activeMuse?: {
+    id: string
+    slug: string
+    displayName: string
+    role: string
+    engine: string
+    model: string
+  }
   /**
    * True while this session's engine turn is in flight. A client that reloads
    * mid-turn reads the real state here instead of showing a false "ready".
    */
   busy: boolean
+  queueLength?: number
+  workspaceRoot?: string | null
 }
 
 export interface RunTaskView extends TaskRecord {

@@ -16,10 +16,11 @@ export interface SessionRunnerOptions {
     adapter: EngineAdapter,
     workspaceRoot: string,
   ) => Promise<McpServerSpec[]>
+  onSessionDropped?: (sessionId: string) => void
   approvalTimeoutMinutes: number
 }
 
-interface ActiveEngineEntry {
+export interface ActiveEngineEntry {
   session: EngineSession
   approvals: EnginePermissionChannel
   interrupted?: boolean
@@ -27,7 +28,7 @@ interface ActiveEngineEntry {
 
 export class SessionRunner {
   private readonly store: Store
-  private readonly broadcaster: Broadcaster
+  private readonly broadcaster: ServerEventBroadcaster
   private readonly options: SessionRunnerOptions
   private readonly activeEngineSessions = new Map<string, ActiveEngineEntry>()
   private readonly activeDrains = new Set<string>()
@@ -58,15 +59,31 @@ export class SessionRunner {
     return this.activeEngineSessions.get(sessionId)
   }
 
-  dropSession(sessionId: string): void {
+  hasActiveEngineSession(sessionId: string): boolean {
+    return this.activeEngineSessions.has(sessionId)
+  }
+
+  getActiveSessionIds(): string[] {
+    return Array.from(this.activeEngineSessions.keys())
+  }
+
+  setSession(sessionId: string, entry: ActiveEngineEntry): void {
+    this.activeEngineSessions.set(sessionId, entry)
+  }
+
+  async dropSession(sessionId: string): Promise<void> {
     const entry = this.activeEngineSessions.get(sessionId)
     if (entry) {
       entry.interrupted = true
       entry.approvals.abort('session dropped')
       try {
-        void entry.session.interrupt()
+        await entry.session.interrupt()
+      } catch {}
+      try {
+        await entry.session.close()
       } catch {}
       this.activeEngineSessions.delete(sessionId)
+      this.options.onSessionDropped?.(sessionId)
     }
   }
 
@@ -173,6 +190,7 @@ export class SessionRunner {
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         })
       } catch (err) {
+        this.options.onSessionDropped?.(sessionId)
         const message = err instanceof Error ? err.message : String(err)
         this.broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${message}]` })
         this.broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
