@@ -20,6 +20,7 @@ import { bootstrapStore } from '../bootstrap.ts'
 import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { optionalProject, requireProject } from './context.ts'
 import { appRun, type AppCommandOptions } from './commands/app.ts'
+import { exportRun, exportSession, importRun, importSession } from './commands/session.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachShip } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
@@ -1326,6 +1327,83 @@ approvalsCmd
         ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
       })
       emitOk(io, json, decideHuman(report), report)
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// session — export and import chat sessions and runs (JSONL)
+// ---------------------------------------------------------------------------
+
+const sessionCmd = program.command('session').description('export and import chat sessions and runs (JSONL)')
+
+sessionCmd
+  .command('export <sessionId>')
+  .description('export a chat session to JSONL')
+  .option('-o, --out <path>', 'write output to a file instead of stdout')
+  .action(async (sessionId: string, opts: { out?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = exportSession(ctx, sessionId, opts)
+      if (opts.out) {
+        emitOk(io, json, `exported session ${result.sessionId} → ${result.path}`, result)
+      } else {
+        if (json) {
+          emitOk(io, json, '', result)
+        } else {
+          io.out(result.jsonl)
+        }
+      }
+    })
+  })
+
+sessionCmd
+  .command('import <file>')
+  .description('import a chat session from a JSONL file')
+  .action(async (filePath: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = importSession(ctx, filePath)
+      emitOk(io, json, `imported session ${result.sessionId} (${result.messageCount} message(s))`, result)
+    })
+  })
+
+sessionCmd
+  .command('export-run <runId>')
+  .description('export an orchestration run to JSONL')
+  .option('-o, --out <path>', 'write output to a file instead of stdout')
+  .action(async (runId: string, opts: { out?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = exportRun(ctx, runId, opts)
+      if (opts.out) {
+        emitOk(io, json, `exported run ${result.runId} → ${result.path}`, result)
+      } else {
+        if (json) {
+          emitOk(io, json, '', result)
+        } else {
+          io.out(result.jsonl)
+        }
+      }
+    })
+  })
+
+sessionCmd
+  .command('import-run <file>')
+  .description('import an orchestration run from a JSONL file')
+  .action(async (filePath: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = importRun(ctx, filePath)
+      emitOk(
+        io,
+        json,
+        `imported run ${result.runId} (${result.taskCount} task(s), ${result.eventCount} event(s))`,
+        result,
+      )
     })
   })
 
