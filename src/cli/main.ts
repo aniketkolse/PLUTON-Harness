@@ -21,6 +21,7 @@ import { inheritStdioSpawn } from '../terminal/attach.ts'
 import { optionalProject, requireProject } from './context.ts'
 import { appRun, type AppCommandOptions } from './commands/app.ts'
 import { exportRun, exportSession, importRun, importSession } from './commands/session.ts'
+import { formatSearchHuman, searchStore, type SearchCommandOptions } from './commands/search.ts'
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachShip } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
@@ -1404,6 +1405,25 @@ sessionCmd
         `imported run ${result.runId} (${result.taskCount} task(s), ${result.eventCount} event(s))`,
         result,
       )
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// search — full-text search across chat messages and events (FTS5)
+// ---------------------------------------------------------------------------
+
+program
+  .command('search <query>')
+  .description('search chat messages and events with full-text search (SQLite FTS5)')
+  .option('-s, --session <id>', 'filter to a specific chat session')
+  .option('-r, --run <id>', 'filter to a specific orchestration run')
+  .option('-l, --limit <n>', 'maximum number of matches to return (default: 20)', (v) => parseInt(v, 10))
+  .action(async (query: string, opts: SearchCommandOptions, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const result = searchStore(ctx, query, opts)
+      emitOk(io, json, formatSearchHuman(result), result)
     })
   })
 

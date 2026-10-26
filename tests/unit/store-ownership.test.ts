@@ -630,6 +630,7 @@ describe('migration v7', () => {
       'v9:session-workspaces',
       'v10:native-execution-sessions',
       'v11:session-inbox',
+      'v12:full-text-search',
     ])
 
     const store = new Store(db)

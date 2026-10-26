@@ -53,7 +53,9 @@ import {
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
 import { redactDeep } from '../util/redact.ts'
 import { stripControlChars, stripControlDeep } from '../util/sanitize.ts'
-import { withTx } from './db.ts'
+import { getUserVersion, openDatabase, withTx } from './db.ts'
+import { migrate, type MigrationResult } from './migrations.ts'
+import { sanitizeFtsQuery } from './fts.ts'
 
 /**
  * Durable store (ADR-0002/ADR-0006). All multi-write operations run inside one
@@ -351,6 +353,24 @@ export type TaskStatePatch = {
   engineSessionId?: string | null
 }
 
+export interface SearchMessageResult {
+  messageId: string
+  sessionId: string
+  role: string
+  text: string
+  snippet?: string
+  createdAt: string
+}
+
+export interface SearchEventResult {
+  eventId: string
+  runId: string
+  type: string
+  seq: number
+  snippet?: string
+  createdAt: string
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -358,6 +378,20 @@ export type TaskStatePatch = {
 export class Store {
   readonly db: DatabaseSync
   private closed = false
+
+  static openMemory(opts?: { targetVersion?: number }): Store {
+    const db = openDatabase(':memory:')
+    migrate(db, opts?.targetVersion)
+    return new Store(db)
+  }
+
+  get schemaVersion(): number {
+    return getUserVersion(this.db)
+  }
+
+  migrate(targetVersion?: number): MigrationResult {
+    return migrate(this.db, targetVersion)
+  }
 
   constructor(db: DatabaseSync) {
     this.db = db
@@ -445,7 +479,7 @@ export class Store {
           s.role,
           s.engineKind,
           s.model,
-          s.instructionsFile,
+          s.instructionsFile ?? null,
           s.workspacePolicy,
           stringifyJson(s.permissions),
           s.approvalMode,
@@ -1668,6 +1702,81 @@ export class Store {
       .prepare('SELECT * FROM chat_sessions WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?')
       .all(projectId, limit) as Row[]
     return rows.map(rowToChatSession)
+  }
+
+  deleteChatMessage(id: string): boolean {
+    const res = this.db.prepare('DELETE FROM chat_messages WHERE id = ?').run(id)
+    return res.changes > 0
+  }
+
+  searchChatMessages(
+    query: string,
+    opts?: { limit?: number; sessionId?: string },
+  ): SearchMessageResult[] {
+    const sanitized = sanitizeFtsQuery(query)
+    if (sanitized === '') return []
+    const limit = Math.max(1, Math.min(opts?.limit ?? 50, 1000))
+    const params: (string | number)[] = [sanitized]
+
+    let sql = `
+      SELECT
+        m.id AS messageId,
+        m.session_id AS sessionId,
+        m.role AS role,
+        m.text AS text,
+        snippet(chat_messages_fts, -1, '[', ']', '...', 20) AS snippet,
+        m.created_at AS createdAt,
+        bm25(chat_messages_fts) AS rank
+      FROM chat_messages_fts
+      JOIN chat_messages m ON m.id = chat_messages_fts.message_id
+      WHERE chat_messages_fts MATCH ?
+    `
+
+    if (opts?.sessionId !== undefined) {
+      sql += ' AND m.session_id = ?'
+      params.push(opts.sessionId)
+    }
+
+    sql += ' ORDER BY rank LIMIT ?'
+    params.push(limit)
+
+    const stmt = this.db.prepare(sql)
+    return stmt.all(...params) as unknown as SearchMessageResult[]
+  }
+
+  searchEvents(
+    query: string,
+    opts?: { limit?: number; runId?: string },
+  ): SearchEventResult[] {
+    const sanitized = sanitizeFtsQuery(query)
+    if (sanitized === '') return []
+    const limit = Math.max(1, Math.min(opts?.limit ?? 50, 1000))
+    const params: (string | number)[] = [sanitized]
+
+    let sql = `
+      SELECT
+        e.id AS eventId,
+        IFNULL(e.run_id, '') AS runId,
+        e.type AS type,
+        e.seq AS seq,
+        snippet(events_fts, -1, '[', ']', '...', 20) AS snippet,
+        e.created_at AS createdAt,
+        bm25(events_fts) AS rank
+      FROM events_fts
+      JOIN events e ON e.id = events_fts.event_id
+      WHERE events_fts MATCH ?
+    `
+
+    if (opts?.runId !== undefined) {
+      sql += ' AND e.run_id = ?'
+      params.push(opts.runId)
+    }
+
+    sql += ' ORDER BY rank LIMIT ?'
+    params.push(limit)
+
+    const stmt = this.db.prepare(sql)
+    return stmt.all(...params) as unknown as SearchEventResult[]
   }
 
   // -- session inbox ---------------------------------------------------------

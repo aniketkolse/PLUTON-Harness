@@ -72,8 +72,8 @@ describe('chat migrations', () => {
     const db = openDatabase(path)
     openDbs.push(db)
     const result = migrate(db)
-    expect(SCHEMA_VERSION).toBe(11)
-    expect(result.to).toBe(11)
+    expect(SCHEMA_VERSION).toBe(12)
+    expect(result.to).toBe(12)
     expect(result.applied).toEqual([
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
@@ -86,10 +86,11 @@ describe('chat migrations', () => {
       'v9:session-workspaces',
       'v10:native-execution-sessions',
       'v11:session-inbox',
+      'v12:full-text-search',
     ])
     const tables = (
       db
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'chat_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'chat_%' AND name NOT LIKE '%_fts%' ORDER BY name")
         .all() as Array<{ name: string }>
     ).map((r) => r.name)
     expect(tables).toEqual(['chat_messages', 'chat_sessions'])

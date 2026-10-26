@@ -421,6 +421,52 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_inbox_session_state ON session_inbox(session_id, state, seq)`,
     ],
   },
+  {
+    version: 12,
+    name: 'full-text-search',
+    statements: [
+      `CREATE VIRTUAL TABLE chat_messages_fts USING fts5(
+        message_id UNINDEXED,
+        session_id UNINDEXED,
+        text,
+        role UNINDEXED
+      )`,
+      `CREATE TRIGGER ai_chat_messages_fts AFTER INSERT ON chat_messages BEGIN
+        INSERT INTO chat_messages_fts(message_id, session_id, text, role)
+        VALUES (new.id, new.session_id, new.text, new.role);
+      END`,
+      `CREATE TRIGGER ad_chat_messages_fts AFTER DELETE ON chat_messages BEGIN
+        DELETE FROM chat_messages_fts WHERE message_id = old.id;
+      END`,
+      `CREATE TRIGGER au_chat_messages_fts AFTER UPDATE ON chat_messages BEGIN
+        DELETE FROM chat_messages_fts WHERE message_id = old.id;
+        INSERT INTO chat_messages_fts(message_id, session_id, text, role)
+        VALUES (new.id, new.session_id, new.text, new.role);
+      END`,
+      `CREATE VIRTUAL TABLE events_fts USING fts5(
+        event_id UNINDEXED,
+        run_id UNINDEXED,
+        event_type UNINDEXED,
+        text
+      )`,
+      `CREATE TRIGGER ai_events_fts AFTER INSERT ON events BEGIN
+        INSERT INTO events_fts(event_id, run_id, event_type, text)
+        VALUES (new.id, IFNULL(new.run_id, ''), new.type, new.payload_json);
+      END`,
+      `CREATE TRIGGER ad_events_fts AFTER DELETE ON events BEGIN
+        DELETE FROM events_fts WHERE event_id = old.id;
+      END`,
+      `CREATE TRIGGER au_events_fts AFTER UPDATE ON events BEGIN
+        DELETE FROM events_fts WHERE event_id = old.id;
+        INSERT INTO events_fts(event_id, run_id, event_type, text)
+        VALUES (new.id, IFNULL(new.run_id, ''), new.type, new.payload_json);
+      END`,
+      `INSERT INTO chat_messages_fts(message_id, session_id, text, role)
+       SELECT id, session_id, text, role FROM chat_messages`,
+      `INSERT INTO events_fts(event_id, run_id, event_type, text)
+       SELECT id, IFNULL(run_id, ''), type, payload_json FROM events`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version
@@ -431,15 +477,19 @@ export interface MigrationResult {
   applied: string[]
 }
 
-export function migrate(db: DatabaseSync): MigrationResult {
+export function migrate(db: DatabaseSync, targetVersion?: number): MigrationResult {
   const from = getUserVersion(db)
-  if (from > SCHEMA_VERSION) {
+  const currentMax = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version
+  const maxVersion = targetVersion ?? currentMax
+  if (from > maxVersion) {
     throw new InternalError(
-      `database schema version ${from} is newer than this build supports (${SCHEMA_VERSION}) — upgrade Pluton-Harness`,
-      { details: { dbVersion: from, supported: SCHEMA_VERSION } },
+      `database schema version ${from} is newer than this build supports (${maxVersion}) — upgrade Pluton-Harness`,
+      { details: { dbVersion: from, supported: maxVersion } },
     )
   }
-  const pending = MIGRATIONS.filter((migration) => migration.version > from)
+  const pending = MIGRATIONS.filter(
+    (migration) => migration.version > from && (targetVersion === undefined || migration.version <= targetVersion),
+  )
   if (pending.length === 0) return { from, to: from, applied: [] }
 
   // One transaction for the whole pending set: a crash or a failing statement
