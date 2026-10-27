@@ -78,6 +78,8 @@ export interface WorkerLifecycleEvent {
   runId: string
   taskId: string
   role: string
+  /** Configured Ship display name (e.g. "Researcher - Z"), when known. */
+  shipName?: string
   model?: string
   workspace?: string
   payload?: Record<string, unknown>
@@ -365,6 +367,7 @@ export function buildManagerPrompt(
     '',
     'Rules:',
     '- Plan first: create tasks with task.create or perform direct research, coding, review, and verification within your declared permissions.',
+    '- You may personally act as any specialist role when needed: Researcher, Coder (implementation), QA/Tester, or Reviewer. Direct action is appropriate for small or urgent work; delegate when parallel ownership helps.',
     '- Delegate only through the Pluton tools; Pluton state, not your prose, is authoritative.',
     '- Use task.wait to wait for your team: it returns once every requested task has settled (completed, failed, cancelled, or awaiting verification).',
     "- A task in 'verifying' has finished its work and awaits the operator's verification gate — report it as awaiting verification; never keep waiting for it to become completed.",
@@ -554,11 +557,24 @@ export class RunSupervisor {
   }
 
   /** Role/model snapshot captured at claim time (never later ship config edits). */
-  private assignmentFields(task: TaskRecord): { role: string; model?: string } {
+  private assignmentFields(task: TaskRecord): { role: string; model?: string; shipName?: string } {
     const assignment = jsonObject(task.assignment)
     const role = assignment !== null && typeof assignment['role'] === 'string' ? assignment['role'] : 'worker'
     const model = assignment !== null && typeof assignment['model'] === 'string' ? assignment['model'] : undefined
-    return { role, ...(model !== undefined ? { model } : {}) }
+    const shipId =
+      assignment !== null && typeof assignment['shipId'] === 'string'
+        ? assignment['shipId']
+        : assignment !== null && typeof assignment['museId'] === 'string'
+          ? assignment['museId']
+          : undefined
+    // Display name is presentation only; the claim-time role/model stay the
+    // authoritative snapshot even if the Ship is renamed later.
+    const ship = shipId !== undefined ? this.store.getShip(shipId) : null
+    return {
+      role,
+      ...(model !== undefined ? { model } : {}),
+      ...(ship !== null ? { shipName: ship.displayName } : {}),
+    }
   }
 
   /** Tell the live inspector what durable state the task actually settled in. */
@@ -990,6 +1006,7 @@ export class RunSupervisor {
           runId: this.runId,
           taskId: task.id,
           role: ship.role,
+          shipName: ship.displayName,
           model: ship.model,
           workspace: workdir,
           payload: { step: `session started (${adapter.kind})` },
@@ -1025,6 +1042,7 @@ export class RunSupervisor {
                 runId: this.runId,
                 taskId: task.id,
                 role: ship.role,
+                shipName: ship.displayName,
                 model: ship.model,
                 workspace: workdir,
                 payload: { step: stripControlChars(label).slice(0, 300) },
@@ -1388,6 +1406,7 @@ export class RunSupervisor {
       runId: this.runId,
       taskId: 'manager',
       role: 'supervisor',
+      shipName: ship.displayName,
       model: ship.model,
       workspace: this.rootDir,
       payload: { step: `session started (${adapter.kind})` },
@@ -1413,6 +1432,7 @@ export class RunSupervisor {
               runId: this.runId,
               taskId: 'manager',
               role: 'supervisor',
+              shipName: ship.displayName,
               model: ship.model,
               workspace: this.rootDir,
               payload: {
@@ -1431,6 +1451,7 @@ export class RunSupervisor {
           runId: this.runId,
           taskId: 'manager',
           role: 'supervisor',
+          shipName: ship.displayName,
           model: ship.model,
           workspace: this.rootDir,
           payload: {
@@ -1444,6 +1465,7 @@ export class RunSupervisor {
           runId: this.runId,
           taskId: 'manager',
           role: 'supervisor',
+          shipName: ship.displayName,
           model: ship.model,
           workspace: this.rootDir,
           ...(out.summary !== null ? { payload: { summary: out.summary } } : {}),
@@ -1454,6 +1476,7 @@ export class RunSupervisor {
           runId: this.runId,
           taskId: 'manager',
           role: 'supervisor',
+          shipName: ship.displayName,
           model: ship.model,
           workspace: this.rootDir,
           payload: { error: out.errorCode ?? 'manager session failed' },
@@ -1466,6 +1489,7 @@ export class RunSupervisor {
         runId: this.runId,
         taskId: 'manager',
         role: 'supervisor',
+        shipName: ship.displayName,
         model: ship.model,
         workspace: this.rootDir,
         payload: { error: err instanceof Error ? err.message : String(err) },

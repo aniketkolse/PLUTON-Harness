@@ -283,6 +283,50 @@ describe('Pluton application server REST & SSE API', () => {
     }
   })
 
+  it('omits Ships disabled after leaving pluton.yaml from the workspace roster', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pluton-server-stale-'))
+    tmpDirs.push(root)
+    const withLegacy = TEST_CONFIG.replace(
+      'muses:\n  supervisor:',
+      `muses:
+  legacy-coder:
+    display_name: Legacy Coder
+    role: coder
+    engine: mock
+    model: mock/model-b
+    workspace_policy: isolated-task-checkout
+    approval_mode: autonomous-bounded
+    permissions: [project.read, project.write]
+
+  supervisor:`,
+    )
+    writeFileSync(join(root, 'pluton.yaml'), withLegacy, 'utf8')
+    // First boot materializes the legacy row; the second disables it because
+    // it is gone from the config. Disabled rows must not re-enter the roster.
+    bootstrapStore(loadConfig(root)).store.close()
+    writeFileSync(join(root, 'pluton.yaml'), TEST_CONFIG, 'utf8')
+    const loaded = loadConfig(root)
+    const bootstrapped = bootstrapStore(loaded)
+    const server = await startAppServer({
+      store: bootstrapped.store,
+      projectId: bootstrapped.projectId,
+      loaded,
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/workspace`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(res.status).toBe(200)
+      const data = (await res.json()) as {
+        workspace: { ships: Array<{ id: string; state: string }> }
+      }
+      expect(data.workspace.ships.map((s) => s.id)).toEqual(['supervisor'])
+      expect(data.workspace.ships.some((s) => s.state === 'disabled')).toBe(false)
+    } finally {
+      await server.close()
+    }
+  })
+
   it('handles chat sessions lifecycle and prompt dispatch', async () => {
     const { appServer } = setupTestProject()
     const server = await appServer

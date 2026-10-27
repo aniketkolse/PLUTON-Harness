@@ -89,13 +89,14 @@ function testConfig(sandbox?: { kind: 'docker' | 'local-process' }): string {
 
 async function setupTestProject(options?: {
   sandbox?: { kind: 'docker' | 'local-process' }
+  config?: string
 }): Promise<{
   rootDir: string
   appServer: Promise<AppServerInstance>
 }> {
   const root = mkdtempSync(join(tmpdir(), 'pluton-spa-ui-'))
   tmpDirs.push(root)
-  writeFileSync(join(root, 'pluton.yaml'), testConfig(options?.sandbox), 'utf8')
+  writeFileSync(join(root, 'pluton.yaml'), options?.config ?? testConfig(options?.sandbox), 'utf8')
   writeFileSync(join(root, 'sample.txt'), 'Hello Pluton SPA', 'utf8')
 
   const loaded = loadConfig(root)
@@ -453,6 +454,43 @@ describe('PLUTON SPA - request contract', () => {
       await server.close()
     }
   })
+
+  it('defaults new chat sessions to the Manager Ship and honors an explicit shipId', async () => {
+    // A non-supervisor Ship is declared first on purpose: the default must be
+    // the Manager, not whichever config row happens to come first.
+    const config = TEST_CONFIG.replace(
+      'muses:\n  supervisor:',
+      `muses:
+  researcher:
+    display_name: Researcher - X
+    role: researcher
+    engine: mock
+    model: mock/model-b
+    workspace_policy: read-only
+    approval_mode: autonomous-bounded
+    permissions: [project.read, research.report]
+
+  supervisor:`,
+    )
+    const { appServer } = await setupTestProject({ config })
+    const server = await appServer
+    const createSession = async (body: Record<string, unknown>): Promise<string> => {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify(body),
+      })
+      expect(res.status).toBe(201)
+      const data = (await res.json()) as { session: { shipId: string } }
+      return data.session.shipId
+    }
+    try {
+      expect(await createSession({ title: 'Manager default' })).toBe('supervisor')
+      expect(await createSession({ title: 'Explicit researcher', shipId: 'researcher' })).toBe('researcher')
+    } finally {
+      await server.close()
+    }
+  })
 })
 
 describe('PLUTON SPA — replaced assets', () => {
@@ -563,7 +601,7 @@ describe('PLUTON SPA — replaced assets', () => {
     }
   })
 
-  it('enforces coworker presentation ranking in Settings (Manager, QA, Researcher, Coder, Reviewer)', async () => {
+  it('orders Settings rows by role rank and display name and labels the Manager as the main chat model', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
     try {
@@ -575,11 +613,15 @@ describe('PLUTON SPA — replaced assets', () => {
       // nothing may reintroduce an unused ordering table.
       expect(js).not.toContain('COWORKER_PRESENTATION_ORDER')
       expect(js).toContain('coworkerRank')
-      // One identity rule drives Settings display AND model fan-out: the
-      // coder/worker group is the rank-4 bucket; rank orders, never hides.
-      expect(js).toContain('function isWorkerAgent(m)')
-      expect(js).toContain('coworkerRank(m) === 4')
-      expect(js).toContain('(workers share one model)')
+      // Display name breaks rank ties so "Coder - X" precedes "Coder - Z".
+      expect(js).toContain('a.name < b.name')
+      // The Manager is the default chat Ship and its row says so.
+      expect(js).toContain('function isManagerAgent(m)')
+      expect(js).toContain('function preferredChatAgent(muses)')
+      expect(js).toContain('(main chat model)')
+      // The forced shared-worker model contract is gone.
+      expect(js).not.toContain('(workers share one model)')
+      expect(js).not.toContain('isWorkerAgent')
     } finally {
       await server.close()
     }
@@ -673,6 +715,23 @@ describe('PLUTON SPA — replaced assets', () => {
       expect(css).toContain('@media (max-width: 1000px)')
       expect(css).toContain('@media (max-width: 720px)')
       expect(css).toContain('@media (max-width: 480px)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('matches the Ship Activity Inspector surfaces to the left sidebar tokens', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+
+      expect(css).toMatch(/\.right-inspector\s*\{[^}]*background:\s*var\(--bg-sidebar\)/)
+      expect(css).toMatch(/\.right-inspector-head\s*\{[^}]*background:\s*var\(--bg-sidebar\)/)
+      expect(css).toMatch(/\.worker-partition\s*\{[^}]*background:\s*var\(--bg-sidebar\)/)
+      expect(css).toMatch(/\.worker-stream\s*\{[^}]*background:\s*var\(--bg-sidebar\)/)
+      // The inspector no longer uses the lighter chat surface token.
+      expect(css).not.toMatch(/\.right-inspector-head\s*\{[^}]*background:\s*var\(--bg-surface\)/)
     } finally {
       await server.close()
     }
@@ -934,36 +993,27 @@ describe('PLUTON SPA — replaced assets', () => {
     }
   })
 
-  it('tracks per-agent model fan-out outcomes and surfaces partial failures (Medium B)', async () => {
+  it('keeps every Ship model independent and reports a failed switch honestly', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer
     try {
       const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
 
-      // Per-target outcome tracking exists and the swallow-and-warn catch is gone
-      expect(js).toContain('var succeeded = []')
-      expect(js).toContain('var failed = []')
-      expect(js).not.toContain("console.warn('Failed syncing model to '")
-
-      // State updates only for confirmed targets: a failed worker keeps the
-      // previous model and stays visibly identifiable on re-render.
-      expect(js).toContain('okSet[m.id]')
-
-      // Out-of-order or stale fan-out completions cannot clobber a newer selection.
+      // A newer selection invalidates an in-flight one.
+      expect(js).toContain('var switchSeq = ++modelSwitchSeq')
       expect(js).toContain('switchSeq !== modelSwitchSeq')
 
-      // Every target is addressed by stable id, URL-encoded.
-      expect(js).toContain("'/api/muses/' + encodeURIComponent(tid) + '/model'")
+      // Exactly one Ship is addressed per switch, by stable id, URL-encoded.
+      expect(js).toContain("'/api/muses/' + encodeURIComponent(museId) + '/model'")
+      expect(js).not.toContain('workerFanoutTargets')
+      expect(js).not.toContain('agents updated')
+      expect(js).not.toContain('Model switch partially failed')
 
-      // Full success, total failure, and partial failure each have an honest
-      // toast; partial failure never claims success or a rollback.
-      expect(js).toContain('agents updated')
-      expect(js).toContain('Model switch failed for ')
-      expect(js).toContain('Model switch partially failed: ')
-      expect(js).toContain('Failed (kept previous model): ')
+      // Only the changed Ship's row is updated in local state.
+      expect(js).toContain('return m && m.id === museId ? Object.assign({}, m, { model: modelId }) : m')
 
-      // Non-worker agents never fan out: their target list is exactly [museId].
-      expect(js).toContain('? workerFanoutTargets(muses, museId) : [museId]')
+      // A failed switch surfaces the real error and leaves the old model.
+      expect(js).toContain("toast('Model switch failed for ' + museId + ': ' + detail, true)")
     } finally {
       await server.close()
     }
@@ -981,19 +1031,46 @@ describe('PLUTON SPA — replaced assets', () => {
 
       // Rank orders the list; id-less entries are filtered out because they
       // cannot be addressed by the API. Every surviving agent stays visible,
-      // with a stable secondary sort by identity.
+      // with a display-name secondary sort and id tie-break.
       expect(js).toContain("String(m.id || m.slug || '') !== ''")
-      expect(js).toContain('.sort(function (a, b) { return (a.rank - b.rank) ||')
+      expect(js).toContain('.sort(function (a, b) {')
       expect(js).toContain('No addressable agents configured')
-
-      // Fan-out skips empty ids instead of targeting them.
-      expect(js).toContain("String((m && (m.id || m.slug)) || '')")
-      expect(js).toContain("id !== '' && id !== changedId && isWorkerAgent(m)")
 
       // Unknown/missing roles and missing display names render safely instead
       // of collapsing unrelated agents together.
       expect(js).toContain("m.role || 'unknown role'")
       expect(js).toContain('escapeHtml(m.displayName || m.id)')
+
+      // The manager-first default is explicit, never "the first row wins".
+      expect(js).toContain('preferredChatAgent(state.workspace.muses)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('uses Pluton-owned dialogs and hides internal plumbing tool cards', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // One themed, reusable dialog replaces every browser-native dialog.
+      expect(html).toContain('id="plutonDialog"')
+      expect(html).toContain('id="plutonDialogInput"')
+      expect(js).toContain('function openPlutonDialog')
+      expect(js).toContain('function plutonConfirm')
+      expect(js).toContain('function plutonPrompt')
+      expect(js).not.toContain('window.confirm(')
+      expect(js).not.toContain('window.prompt(')
+      expect(js).toContain("title: 'Delete session'")
+      expect(js).toContain("title: 'Change workspace'")
+
+      // Internal harness plumbing (skill loading, todo/plan bookkeeping) is
+      // filtered; real task work still renders.
+      expect(js).toContain('function isInternalToolName')
+      expect(js).toContain('loadskill|useskill|todo')
+      expect(js).toContain('if (isInternalToolName(tool && tool.name)) return;')
     } finally {
       await server.close()
     }

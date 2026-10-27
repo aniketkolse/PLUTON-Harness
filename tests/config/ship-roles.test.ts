@@ -20,13 +20,13 @@ describe('Ship Workers Role Registry', () => {
     expect(config.muses['manager']).toBeDefined()
     expect(config.muses['qa']).toBeDefined()
     expect(config.muses['researcher']).toBeDefined()
-    expect(config.muses['coder']).toBeDefined()
+    expect(config.muses['coder-z']).toBeDefined()
     expect(config.muses['reviewer']).toBeDefined()
 
     expect(config.muses['manager']!.role).toBe('supervisor')
     expect(config.muses['qa']!.role).toBe('tester')
     expect(config.muses['researcher']!.role).toBe('researcher')
-    expect(config.muses['coder']!.role).toBe('coder')
+    expect(config.muses['coder-z']!.role).toBe('coder')
     expect(config.muses['reviewer']!.role).toBe('reviewer')
   })
 
@@ -47,7 +47,7 @@ describe('Ship Workers Role Registry', () => {
     expect(config.muses['manager']!.workspace_policy).toBe('coordinator-read-only')
     expect(config.muses['qa']!.workspace_policy).toBe('isolated-task-checkout')
     expect(config.muses['researcher']!.workspace_policy).toBe('read-only')
-    expect(config.muses['coder']!.workspace_policy).toBe('isolated-task-checkout')
+    expect(config.muses['coder-z']!.workspace_policy).toBe('isolated-task-checkout')
     expect(config.muses['reviewer']!.workspace_policy).toBe('read-only')
   })
 
@@ -77,7 +77,7 @@ describe('Ship Workers Role Registry', () => {
       })
 
       const { config, rootDir } = loadConfig(fixtureRoot)
-      const roles = ['manager', 'qa', 'researcher', 'coder', 'reviewer']
+      const roles = ['manager', 'qa', 'researcher', 'worker-a', 'worker-b', 'coder-z', 'reviewer']
       for (const id of roles) {
         const muse = config.muses[id]
         expect(muse).toBeDefined()
@@ -89,12 +89,16 @@ describe('Ship Workers Role Registry', () => {
     }
   })
 
-  it('preserves backward compatibility for worker-a and worker-b', () => {
+  it('preserves legacy Ship ids with the new researcher/coder display names', () => {
     const { config } = loadConfig('pluton.yaml')
     expect(config.muses['worker-a']).toBeDefined()
     expect(config.muses['worker-b']).toBeDefined()
-    expect(config.muses['worker-a']!.role).toBe('coder')
+    expect(config.muses['worker-a']!.role).toBe('researcher')
     expect(config.muses['worker-b']!.role).toBe('coder')
+    expect(config.muses['worker-a']!.display_name).toBe('Researcher - Z')
+    expect(config.muses['worker-b']!.display_name).toBe('Coder - X')
+    expect(config.muses['researcher']!.display_name).toBe('Researcher - X')
+    expect(config.muses['coder-z']!.display_name).toBe('Coder - Z')
   })
 
   it('rejects invalid roles through museConfigSchema', () => {

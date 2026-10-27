@@ -529,6 +529,28 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
     </div>
   </div>
 
+  <!-- Pluton-owned confirm / prompt dialog (no browser-native dialogs) -->
+  <div id="plutonDialog" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="plutonDialogTitle" aria-describedby="plutonDialogMessage">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="plutonDialogTitle">Confirm</h3>
+        <button id="plutonDialogClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <p id="plutonDialogMessage" class="modal-message"></p>
+      <label id="plutonDialogField" class="field is-hidden">
+        <span id="plutonDialogLabel" class="field-label">Value</span>
+        <input id="plutonDialogInput" type="text" autocomplete="off" class="mono">
+      </label>
+      <div class="modal-foot">
+        <span class="modal-hint" id="plutonDialogHint"></span>
+        <button id="plutonDialogCancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="plutonDialogConfirm" class="btn-primary" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toastHost" class="toast-host"></div>
 
   <script src="/app.js"></script>
@@ -1823,6 +1845,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
 .modal-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-cyan); }
 .modal-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .modal-hint { margin-right: auto; font-size: 12px; color: var(--text-dim); }
+.modal-message { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-soft); }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 12px; font-weight: 500; color: var(--text-soft); }
 .field input {
@@ -1904,8 +1927,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-sidebar);
   flex-shrink: 0;
 }
 .right-inspector-title {
@@ -1930,14 +1953,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
   min-height: 0;
   overflow-y: auto;
   gap: 1px;
-  background: var(--border-soft);
+  background: var(--bg-sidebar);
 }
 .worker-partition {
   flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-surface);
+  background: var(--bg-sidebar);
   overflow: hidden;
 }
 .worker-partition-head {
@@ -1945,7 +1968,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: var(--bg-inset);
+  background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-soft);
   font-size: 11px;
   flex-shrink: 0;
@@ -1974,6 +1997,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text);
+}
+.worker-partition-task {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .worker-partition-model {
   font-size: 10px;
@@ -2030,7 +2061,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
   font-size: 11px;
   line-height: 1.45;
   color: var(--text-muted);
-  background: var(--bg-main);
+  background: var(--bg-sidebar);
   word-break: break-all;
   white-space: pre-wrap;
 }
@@ -2273,6 +2304,90 @@ details:not([open]) > .tool-card-head .tool-chevron {
       node.classList.add('is-fading');
       setTimeout(function () { node.remove(); }, 300);
     }, action ? 8000 : 3800);
+  }
+
+  // ------------------------------------------------------ Pluton dialogs
+  /**
+   * A Pluton-owned confirm/prompt surface. Browser-native window.confirm
+   * and window.prompt are never used: they render outside the app, ignore
+   * the theme, and cannot show a safe destructive-action treatment.
+   *
+   * openPlutonDialog resolves with true/false for a confirm, or the string
+   * value / null for a prompt. Only one dialog exists at a time.
+   */
+  var plutonDialogState = null;
+
+  function closePlutonDialog(value) {
+    var modal = el('plutonDialog');
+    var pending = plutonDialogState;
+    plutonDialogState = null;
+    if (modal) modal.classList.add('is-hidden');
+    var input = el('plutonDialogInput');
+    if (input) input.value = '';
+    if (pending) pending.resolve(value);
+  }
+
+  function openPlutonDialog(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+      var modal = el('plutonDialog');
+      if (!modal) {
+        resolve(opts.input ? null : false);
+        return;
+      }
+      // Replacing an open dialog settles the previous promise as cancelled so
+      // no caller is left awaiting a surface that no longer exists.
+      if (plutonDialogState) {
+        var stale = plutonDialogState;
+        plutonDialogState = null;
+        stale.resolve(stale.input ? null : false);
+      }
+      plutonDialogState = { resolve: resolve, input: !!opts.input };
+      var title = el('plutonDialogTitle');
+      var message = el('plutonDialogMessage');
+      var field = el('plutonDialogField');
+      var label = el('plutonDialogLabel');
+      var input = el('plutonDialogInput');
+      var hint = el('plutonDialogHint');
+      var confirmBtn = el('plutonDialogConfirm');
+      var cancelBtn = el('plutonDialogCancel');
+      if (title) title.textContent = opts.title || 'Confirm';
+      if (message) message.textContent = opts.message || '';
+      if (field) field.classList.toggle('is-hidden', !opts.input);
+      if (label) label.textContent = opts.label || 'Value';
+      if (input) {
+        input.value = opts.value || '';
+        input.placeholder = opts.placeholder || '';
+      }
+      if (hint) hint.textContent = opts.hint || '';
+      if (confirmBtn) {
+        confirmBtn.textContent = opts.confirmLabel || 'Confirm';
+        confirmBtn.classList.toggle('btn-danger', opts.danger === true);
+        confirmBtn.classList.toggle('btn-primary', opts.danger !== true);
+      }
+      if (cancelBtn) cancelBtn.textContent = opts.cancelLabel || 'Cancel';
+      modal.classList.remove('is-hidden');
+      setTimeout(function () {
+        if (opts.input && input) {
+          input.focus();
+          input.select();
+        } else if (confirmBtn) {
+          confirmBtn.focus();
+        }
+      }, 0);
+    });
+  }
+
+  function plutonConfirm(opts) {
+    return openPlutonDialog(Object.assign({}, opts, { input: false })).then(function (value) {
+      return value === true;
+    });
+  }
+
+  function plutonPrompt(opts) {
+    return openPlutonDialog(Object.assign({}, opts, { input: true })).then(function (value) {
+      return typeof value === 'string' && value.trim() ? value.trim() : null;
+    });
   }
 
   // ---------------------------------------------------------- code markup
@@ -2689,7 +2804,19 @@ details:not([open]) > .tool-card-head .tool-chevron {
     return '';
   }
 
+  /**
+   * Internal plumbing the operator does not need to see: skill loading and
+   * todo/plan bookkeeping are harness mechanics, not work on the user's task.
+   * Real work (file reads/writes, searches, commands, tests) always renders.
+   */
+  function isInternalToolName(name) {
+    var n = String(name || '').toLowerCase().trim();
+    n = n.replace(/^mcp[._-]{1,2}[a-z0-9-]+[._-]{1,2}/, '');
+    return /^(?:skill|skills|loadskill|useskill|todo|todos|todowrite|todoread|todo_write|todo_read|updateplan|update_plan|setplan|set_plan|listmcpresources|list_mcp_resources|readmcpresource|read_mcp_resource)(?:$|[._-])/.test(n);
+  }
+
   function appendToolEvent(tool) {
+    if (isInternalToolName(tool && tool.name)) return;
     var list = el('messagesList');
     if (!list) return;
     var toolId = tool.id || tool.callId || tool.name || '';
@@ -3000,7 +3127,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
   async function deleteSession(sessionId) {
     var target = null;
     state.sessions.forEach(function (s) { if (s.id === sessionId) target = s; });
-    if (!window.confirm('Delete "' + ((target && target.title) || 'this session') + '"? Its transcript is removed permanently.')) return;
+    var ok = await plutonConfirm({
+      title: 'Delete session',
+      message: 'Delete "' + ((target && target.title) || 'this session') + '"? Its transcript is removed permanently.',
+      confirmLabel: 'Delete session',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await apiFetch('/api/sessions/' + encodeURIComponent(sessionId), { method: 'DELETE' });
       state.sessions = state.sessions.filter(function (s) { return s.id !== sessionId; });
@@ -3046,12 +3179,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   async function createNewSession(title, workspaceRoot) {
     try {
+      // New chats start on the Manager Ship (the main chat model) whenever a
+      // Manager is configured; the session itself can still be inspected and
+      // its Ship changed elsewhere.
+      var chatShip = preferredChatAgent((state.workspace && state.workspace.muses) || []) || state.muse;
       var res = await apiFetch('/api/sessions', {
         method: 'POST',
         body: JSON.stringify({
           title: title || ('Session ' + (state.sessions.length + 1)),
-          shipId: state.muse ? state.muse.id : undefined,
-          museId: state.muse ? state.muse.id : undefined,
+          shipId: chatShip ? chatShip.id : undefined,
+          museId: chatShip ? chatShip.id : undefined,
           workspaceRoot: workspaceRoot || undefined
         })
       });
@@ -3096,8 +3233,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
       var path = res && !res.cancelled && res.path ? res.path : null;
       if (!path) {
-        var input = window.prompt('Enter or paste workspace folder path:');
-        if (input && input.trim()) path = input.trim();
+        var input = await plutonPrompt({
+          title: 'Workspace folder',
+          message: 'The native folder picker was unavailable. Enter or paste the workspace folder path.',
+          label: 'Folder path',
+          placeholder: 'C:\\\\path\\\\to\\\\project',
+          confirmLabel: 'Use folder'
+        });
+        if (input) path = input;
       }
       if (path) {
         var wsInput = el('newSessionWorkspaceInput');
@@ -3137,7 +3280,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
         state.activeRunId = state.workspace.activeRun.id;
       }
       if (!state.muse && state.workspace && state.workspace.muses && state.workspace.muses.length > 0) {
-        state.muse = state.workspace.muses[0];
+        state.muse = preferredChatAgent(state.workspace.muses);
         applyMuseModel();
       }
       renderMuseModels();
@@ -3160,9 +3303,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var targetPath = res && !res.cancelled && res.path ? res.path : null;
       if (!targetPath) {
         var current = (state.workspace && state.workspace.rootDir) || '';
-        var input = window.prompt('Enter or paste workspace folder path:', current);
-        if (input && input.trim()) {
-          targetPath = input.trim();
+        var input = await plutonPrompt({
+          title: 'Change workspace',
+          message: 'The native folder picker was unavailable. Enter or paste the workspace folder path.',
+          label: 'Folder path',
+          value: current,
+          placeholder: 'C:\\\\path\\\\to\\\\project',
+          confirmLabel: 'Switch workspace'
+        });
+        if (input) {
+          targetPath = input;
         } else {
           toast('Folder selection cancelled');
           return;
@@ -3340,7 +3490,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
         var shipRes = await apiFetch('/api/ships');
         var ships = (shipRes && (shipRes.ships || shipRes.muses)) || [];
         if (ships.length > 0) {
-          state.muse = ships[0];
+          state.muse = preferredChatAgent(ships);
           applyMuseModel();
         }
       } catch (e) {}
@@ -3401,29 +3551,24 @@ details:not([open]) > .tool-card-head .tool-chevron {
   }
 
   /**
-   * ONE identity rule for the coder/worker group, used by BOTH the settings
-   * display and the model fan-out, so every visible worker row maps exactly
-   * to the fan-out target set and vice versa: the coder model is shared
-   * across the group. Defined as the rank-4 bucket of coworkerRank on
-   * purpose — the contracts can never drift apart.
+   * The Manager is the default chat Ship. Its model is the main chat model,
+   * and its settings row is labelled accordingly.
    */
-  function isWorkerAgent(m) {
-    return !!m && coworkerRank(m) === 4;
+  function isManagerAgent(m) {
+    if (!m) return false;
+    var role = String(m.role || '').toLowerCase();
+    var id = String(m.id || m.slug || '').toLowerCase();
+    return role === 'supervisor' || id === 'manager';
   }
 
-  /**
-   * Fan-out targets for one changed worker agent: the whole worker group by
-   * stable identity (id first, then slug), skipping entries without a usable
-   * id — they cannot be addressed by the API and must not be "targeted" by
-   * empty strings. The changed agent is always first in the list.
-   */
-  function workerFanoutTargets(muses, changedId) {
-    var targets = [changedId];
-    (muses || []).forEach(function (m) {
-      var id = String((m && (m.id || m.slug)) || '');
-      if (id !== '' && id !== changedId && isWorkerAgent(m)) targets.push(id);
+  /** Pick the Manager Ship, falling back to the first addressable agent. */
+  function preferredChatAgent(muses) {
+    var list = muses || [];
+    var manager = null;
+    list.forEach(function (m) {
+      if (!manager && isManagerAgent(m) && String(m.id || m.slug || '') !== '') manager = m;
     });
-    return targets;
+    return manager || list.filter(function (m) { return m && String(m.id || m.slug || '') !== ''; })[0] || null;
   }
 
   function renderMuseModels() {
@@ -3435,13 +3580,24 @@ details:not([open]) > .tool-card-head .tool-chevron {
       return;
     }
     // Rank ORDERS the list; it never hides an agent. Distinct agents sharing
-    // a role bucket (two researchers, several workers, unknown roles) all
-    // stay visible and individually addressable — the previous first-per-rank
-    // dedupe silently dropped every agent after the first in a bucket.
+    // a role bucket (two researchers, two coders, unknown roles) all stay
+    // visible and individually addressable. Display name breaks rank ties so
+    // "Coder - X" precedes "Coder - Z" regardless of internal id order.
     var sortedMuses = muses
       .filter(function (m) { return m && String(m.id || m.slug || '') !== ''; })
-      .map(function (m) { return { m: m, rank: coworkerRank(m), id: String(m.id || m.slug).toLowerCase() }; })
-      .sort(function (a, b) { return (a.rank - b.rank) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+      .map(function (m) {
+        return {
+          m: m,
+          rank: coworkerRank(m),
+          id: String(m.id || m.slug).toLowerCase(),
+          name: String(m.displayName || m.name || m.id || m.slug).toLowerCase()
+        };
+      })
+      .sort(function (a, b) {
+        return (a.rank - b.rank) ||
+          (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+      });
     if (sortedMuses.length === 0) {
       node.innerHTML = '<div class="empty-hint">No addressable agents configured (entries without an id cannot be configured).</div>';
       return;
@@ -3458,9 +3614,9 @@ details:not([open]) > .tool-card-head .tool-chevron {
       if (options.length === 0 || !options.some(function (o) { return o.id === m.model; })) {
         opts = '<option value="' + escapeHtml(m.model) + '" selected>' + escapeHtml(m.model) + '</option>' + opts;
       }
-      var groupTag = isWorkerAgent(m) ? ' <span class="muted">(workers share one model)</span>' : '';
+      var roleTag = isManagerAgent(m) ? ' <span class="muted">(main chat model)</span>' : '';
       return '<div class="muse-row"><div class="muse-row-head"><span class="muse-name">' + escapeHtml(m.displayName || m.id) +
-        '</span><span class="muse-role">' + escapeHtml(m.role || 'unknown role') + ' \\u00b7 ' + escapeHtml(m.engine || '') + groupTag + '</span></div>' +
+        '</span><span class="muse-role">' + escapeHtml(m.role || 'unknown role') + ' \\u00b7 ' + escapeHtml(m.engine || '') + roleTag + '</span></div>' +
         '<select class="mini-select" data-muse="' + escapeHtml(String(m.id || m.slug)) + '">' + opts + '</select></div>';
     }).join('');
     Array.prototype.forEach.call(node.querySelectorAll('select'), function (sel) {
@@ -3471,8 +3627,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
   }
 
   /**
-   * Generation counter for model fan-outs: a newer selection invalidates the
-   * in-flight one, so stale completions never overwrite newer UI state.
+   * Generation counter for model switches: a newer selection invalidates the
+   * in-flight one, so a stale completion never overwrites newer UI state.
    */
   var modelSwitchSeq = 0;
 
@@ -3485,56 +3641,34 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var prior = (state.workspace.muses || []).filter(function (m) { return m && m.id === museId; })[0];
       if (prior) previous = prior.model;
     }
-    // Fan-out contract (display and targeting share isWorkerAgent): changing
-    // any coder/worker group member applies to the whole group; every other
-    // agent updates alone.
-    var muses = (state.workspace && state.workspace.muses) || [];
-    var targets = isWorkerAgent(prior || { id: museId }) ? workerFanoutTargets(muses, museId) : [museId];
-    var succeeded = [];
-    var failed = [];
-    for (var i = 0; i < targets.length; i++) {
-      var tid = targets[i];
-      try {
-        await apiFetch('/api/muses/' + encodeURIComponent(tid) + '/model', {
-          method: 'POST',
-          body: JSON.stringify({ model: modelId })
-        });
-        succeeded.push(tid);
-      } catch (subErr) {
-        var detail = subErr && subErr.message ? String(subErr.message) : String(subErr);
-        failed.push({ id: tid, message: detail.slice(0, 160) });
-      }
+    try {
+      await apiFetch('/api/muses/' + encodeURIComponent(museId) + '/model', {
+        method: 'POST',
+        body: JSON.stringify({ model: modelId })
+      });
+    } catch (err) {
+      if (switchSeq !== modelSwitchSeq) return;
+      var detail = err && err.message ? String(err.message) : String(err);
+      toast('Model switch failed for ' + museId + ': ' + detail, true);
+      return;
     }
     if (switchSeq !== modelSwitchSeq) return; // a newer selection owns the UI state now
-    // State reflects ONLY server-confirmed updates: workers whose request
-    // failed keep their old model and stay visibly identifiable as unchanged.
-    var okSet = {};
-    succeeded.forEach(function (id) { okSet[id] = true; });
-    if (state.muse && okSet[state.muse.id]) {
+    // Every Ship owns its model: only the changed Ship is updated.
+    if (state.muse && state.muse.id === museId) {
       state.muse.model = modelId;
       applyMuseModel();
     }
     if (state.workspace && state.workspace.muses) {
       state.workspace.muses = state.workspace.muses.map(function (m) {
-        return m && okSet[m.id] ? Object.assign({}, m, { model: modelId }) : m;
+        return m && m.id === museId ? Object.assign({}, m, { model: modelId }) : m;
       });
       renderMuseModels();
     }
-    if (failed.length === 0) {
-      toast('Model switched to ' + modelId + (succeeded.length > 1 ? ' (' + succeeded.length + ' agents updated)' : ''), false,
-        previous && previous !== modelId ? {
-          label: 'Undo',
-          run: function () { switchMuseModel(museId, previous); },
-        } : undefined);
-    } else if (succeeded.length === 0) {
-      toast('Model switch failed for ' + failed.map(function (f) { return f.id; }).join(', ') + ': ' + failed[0].message, true);
-    } else {
-      // Partial failure is stated as partial: no success claim, no rollback
-      // implication — succeeded workers keep the new model.
-      toast('Model switch partially failed: ' + succeeded.length + '/' + targets.length +
-        ' updated to ' + modelId + '. Failed (kept previous model): ' +
-        failed.map(function (f) { return f.id; }).join(', '), true);
-    }
+    toast('Model switched to ' + modelId, false,
+      previous && previous !== modelId ? {
+        label: 'Undo',
+        run: function () { switchMuseModel(museId, previous); },
+      } : undefined);
   }
 
   function renderPermissions() {
@@ -4368,7 +4502,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
   }
 
   async function deleteWorkspaceFile(path) {
-    if (!window.confirm('Delete "' + path + '" from the workspace? This cannot be undone.')) return;
+    var ok = await plutonConfirm({
+      title: 'Delete file',
+      message: 'Delete "' + path + '" from the workspace? This cannot be undone.',
+      confirmLabel: 'Delete file',
+      danger: true
+    });
+    if (!ok) return;
     try {
       var url = '/api/files/content?path=' + encodeURIComponent(path);
       if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
@@ -4598,7 +4738,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   function closeFileViewer(force) {
     if (!force && state.viewerDirty) {
-      if (!window.confirm('Discard unsaved changes to ' + state.viewerPath + '?')) return;
+      var path = state.viewerPath || 'this file';
+      plutonConfirm({
+        title: 'Discard changes',
+        message: 'Discard unsaved changes to ' + path + '?',
+        confirmLabel: 'Discard changes',
+        danger: true
+      }).then(function (ok) {
+        if (ok) closeFileViewer(true);
+      });
+      return;
     }
     var viewer = el('fileViewer');
     if (viewer) { viewer.classList.add('is-hidden'); viewer.classList.remove('is-editing'); }
@@ -5163,8 +5312,9 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
     var title = document.createElement('div');
     title.className = 'worker-partition-title';
-    title.innerHTML = '<span class="worker-badge-role">' + escapeHtml(worker.role || 'worker') + '</span> ' +
-      '<span class="worker-partition-name">' + escapeHtml(worker.taskId) + '</span>' +
+    title.innerHTML = '<span class="worker-partition-name">' + escapeHtml(worker.shipName || worker.role || 'worker') + '</span>' +
+      (worker.role ? ' <span class="worker-badge-role">' + escapeHtml(worker.role) + '</span>' : '') +
+      ' <span class="worker-partition-task">' + escapeHtml(worker.taskId) + '</span>' +
       (worker.model ? ' <span class="tag-mono worker-partition-model">' + escapeHtml(worker.model) + '</span>' : '');
 
     var statusWrap = document.createElement('div');
@@ -5193,6 +5343,10 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   function updateWorkerPartitionElement(partition, worker) {
     if (!partition || !worker) return;
+    var nameBadge = partition.querySelector('.worker-partition-name');
+    if (nameBadge && (worker.shipName || worker.role)) {
+      nameBadge.textContent = worker.shipName || worker.role;
+    }
     var roleBadge = partition.querySelector('.worker-badge-role');
     if (roleBadge && worker.role) {
       roleBadge.textContent = worker.role;
@@ -5257,6 +5411,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       worker = {
         taskId: ev.taskId,
         role: ev.role || 'worker',
+        shipName: ev.shipName || '',
         model: ev.model || '',
         workspace: ev.workspace || '',
         status: 'active',
@@ -5265,6 +5420,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       state.workers[ev.taskId] = worker;
     }
     if (ev.role) worker.role = ev.role;
+    if (ev.shipName) worker.shipName = ev.shipName;
     if (ev.model) worker.model = ev.model;
     if (ev.workspace) worker.workspace = ev.workspace;
 
@@ -5369,6 +5525,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
           worker = {
             taskId: t.id,
             role: t.role || 'worker',
+            shipName: t.shipDisplayName || '',
             model: t.model || '',
             workspace: t.workspace || '',
             status: t.state || 'active',
@@ -5378,6 +5535,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
         } else {
           if (t.state) worker.status = t.state;
           if (!worker.role && t.role) worker.role = t.role;
+          if (!worker.shipName && t.shipDisplayName) worker.shipName = t.shipDisplayName;
           if (!worker.model && t.model) worker.model = t.model;
           if (!worker.workspace && t.workspace) worker.workspace = t.workspace;
         }
@@ -5439,6 +5597,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
    * the nearest one first. Returns true when something was closed.
    */
   function closeTopOverlay() {
+    var dialog = el('plutonDialog');
+    if (dialog && !dialog.classList.contains('is-hidden')) {
+      var pending = plutonDialogState;
+      closePlutonDialog(pending && pending.input ? null : false);
+      return true;
+    }
     var newSesModal = el('newSessionModal');
     if (newSesModal && !newSesModal.classList.contains('is-hidden')) {
       closeNewSessionModal();
@@ -5598,6 +5762,47 @@ details:not([open]) > .tool-card-head .tool-chevron {
   }
 
   function bindControls() {
+    var dialogConfirm = el('plutonDialogConfirm');
+    if (dialogConfirm) {
+      dialogConfirm.addEventListener('click', function () {
+        var pending = plutonDialogState;
+        if (!pending) return;
+        var input = el('plutonDialogInput');
+        closePlutonDialog(pending.input ? (input ? input.value : '') : true);
+      });
+    }
+    var dialogCancel = el('plutonDialogCancel');
+    if (dialogCancel) {
+      dialogCancel.addEventListener('click', function () {
+        var pending = plutonDialogState;
+        closePlutonDialog(pending && pending.input ? null : false);
+      });
+    }
+    var dialogClose = el('plutonDialogClose');
+    if (dialogClose) {
+      dialogClose.addEventListener('click', function () {
+        var pending = plutonDialogState;
+        closePlutonDialog(pending && pending.input ? null : false);
+      });
+    }
+    var dialogModal = el('plutonDialog');
+    if (dialogModal) {
+      dialogModal.addEventListener('click', function (e) {
+        if (e.target !== dialogModal) return;
+        var pending = plutonDialogState;
+        closePlutonDialog(pending && pending.input ? null : false);
+      });
+    }
+    var dialogInput = el('plutonDialogInput');
+    if (dialogInput) {
+      dialogInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (dialogConfirm) dialogConfirm.click();
+        }
+      });
+    }
+
     var newBtn = el('btnNewSession');
     if (newBtn) newBtn.addEventListener('click', openNewSessionModal);
     var newConfirm = el('newSessionConfirm');

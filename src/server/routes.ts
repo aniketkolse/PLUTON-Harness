@@ -196,6 +196,11 @@ export class ApiRouter {
         const store = this.ctx.store
         const project = store.getProject(this.ctx.projectId)
         const ships = this.getStoreShips()
+        // syncShips disables (never deletes) rows that left pluton.yaml. A
+        // disabled row still resolves for old sessions, but it is not part of
+        // the current team and must not reappear as a configurable Settings or
+        // chat agent.
+        const roster = ships.filter((m) => m.enabled)
         const runs = store.listRuns(50)
         // listRuns is newest-first: the workspace's active run is the newest
         // non-terminal one. Terminal run states are excluded rather than
@@ -213,7 +218,7 @@ export class ApiRouter {
           rootDir: resolved,
           projectId: this.ctx.projectId,
           defaultBranch: project?.defaultBranch ?? this.ctx.loaded.config.project.default_branch,
-          ships: ships.map((m) => ({
+          ships: roster.map((m) => ({
             id: m.id,
             slug: m.slug,
             displayName: m.displayName,
@@ -222,7 +227,7 @@ export class ApiRouter {
             model: m.model,
             state: m.enabled ? 'ready' : 'disabled',
           })),
-          muses: ships.map((m) => ({
+          muses: roster.map((m) => ({
             id: m.id,
             slug: m.slug,
             displayName: m.displayName,
@@ -346,7 +351,12 @@ export class ApiRouter {
         if (method === 'POST') {
           const payload = await this.readJsonBody<{ shipId?: string; museId?: string; title?: string; workspaceRoot?: string }>(req)
           const ships = this.getStoreShips()
-          const shipId = payload.shipId ?? payload.museId ?? ships[0]?.id
+          // New chats default to the Manager Ship (the same Ship whose model
+          // the main chat selector controls), never an arbitrary first row.
+          const defaultShip = ships.find((s) => s.enabled && s.role === 'supervisor')
+            ?? ships.find((s) => s.role === 'supervisor')
+            ?? ships[0]
+          const shipId = payload.shipId ?? payload.museId ?? defaultShip?.id
           if (!shipId) {
             this.sendJson(res, 400, { ok: false, error: 'no ship available for session' })
             return true
@@ -598,6 +608,7 @@ export class ApiRouter {
                 ? assignment['museId']
                 : undefined
           const policy = assignedShipId !== undefined ? this.ctx.loaded.config.ships[assignedShipId]?.workspace_policy : undefined
+          const assignedShip = assignedShipId !== undefined ? this.ctx.store.getShip(assignedShipId) : null
           const workspace =
             workspacePathByTask.get(task.id) ??
             (policy === 'read-only' || policy === 'coordinator-read-only' ? this.ctx.loaded.rootDir : undefined)
@@ -606,6 +617,9 @@ export class ApiRouter {
             ...(role !== undefined ? { role } : {}),
             ...(model !== undefined ? { model } : {}),
             ...(workspace !== undefined ? { workspace } : {}),
+            ...(assignedShip !== null
+              ? { shipId: assignedShip.id, shipDisplayName: assignedShip.displayName }
+              : {}),
           }
         })
         const detail: RunDetailView = {
@@ -943,17 +957,9 @@ export class ApiRouter {
         }
         // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
+        // Every Ship owns its model: changing one never rewrites another.
         this.ctx.store.updateShipModel(ship.id, requested)
         const restarted = await this.restartEngineSessionForShip(ship.id, requested)
-        if (ship.id === 'coder' || ship.role === 'coder') {
-          const allShips = this.getStoreShips()
-          for (const m of allShips) {
-            if (m.id !== ship.id && (m.role === 'coder' || m.id.startsWith('worker-'))) {
-              this.ctx.store.updateShipModel(m.id, requested)
-              await this.restartEngineSessionForShip(m.id, requested)
-            }
-          }
-        }
         this.sendJson(res, 200, {
           ok: true,
           shipId: ship.id,

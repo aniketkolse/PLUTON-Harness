@@ -131,6 +131,7 @@ export class ServerEventBroadcaster extends EventEmitter {
       runId: event.runId,
       taskId: event.taskId,
       role: typeof event.role === 'string' ? stripControlChars(event.role) : event.role,
+      ...(event.shipName !== undefined ? { shipName: stripControlChars(event.shipName) } : {}),
       ...(event.model !== undefined ? { model: stripControlChars(event.model) } : {}),
       ...(event.workspace !== undefined ? { workspace: stripControlChars(event.workspace) } : {}),
       ...(sanitizedPayload !== undefined ? { payload: sanitizedPayload } : {}),

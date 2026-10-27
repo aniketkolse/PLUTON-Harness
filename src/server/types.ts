@@ -94,6 +94,9 @@ export interface RunTaskView extends TaskRecord {
   /** Claim-time assignment, surfaced for inspector partitions. */
   role?: string
   model?: string
+  /** Assigned Ship, for the human-readable inspector label. */
+  shipId?: string
+  shipDisplayName?: string
   /** Active checkout path for isolated workers (absent for read-only roles). */
   workspace?: string
 }
@@ -137,6 +140,8 @@ export interface WorkerSSEEvent {
   runId: string
   taskId: string
   role: string
+  /** Configured Ship display name (e.g. "Researcher - Z"), when known. */
+  shipName?: string
   model?: string
   workspace?: string
   payload?: Record<string, unknown>
