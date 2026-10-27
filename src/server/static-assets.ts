@@ -141,10 +141,6 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <button id="tabDiffs" class="sub-tab" type="button">Worktree Diffs</button>
           </div>
           <div id="filesList" class="file-list"></div>
-          <div id="filePreview" class="file-preview is-hidden">
-            <div id="activeFileName" class="file-preview-name mono">—</div>
-            <pre class="file-preview-body"><code id="fileCodeBody">// Select a file from the workspace</code></pre>
-          </div>
         </div>
       </section>
 
@@ -330,6 +326,33 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
         <div class="chat-fade" aria-hidden="true"></div>
         <div id="messagesList" class="messages"></div>
       </div>
+
+      <!-- MAIN-AREA FILE VIEWER / EDITOR (covers the conversation while open) -->
+      <section id="fileViewer" class="file-viewer is-hidden" aria-label="Workspace file viewer">
+        <div class="file-viewer-head">
+          <div class="file-viewer-title">
+            <span id="fileViewerIcon" class="file-viewer-icon" aria-hidden="true"></span>
+            <span id="fileViewerPath" class="file-viewer-path mono">—</span>
+            <span id="fileViewerLang" class="file-viewer-lang">text</span>
+            <span id="fileViewerDirty" class="file-viewer-dirty is-hidden">unsaved</span>
+          </div>
+          <div class="file-viewer-actions">
+            <button id="fileViewerEdit" class="btn-secondary btn-xs" type="button" title="Edit this file">Edit</button>
+            <button id="fileViewerSave" class="btn-primary btn-xs is-hidden" type="button" title="Save changes (Ctrl+S)">Save</button>
+            <button id="fileViewerClose" class="icon-btn" type="button" title="Close editor" aria-label="Close editor">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="fileViewerMeta" class="file-viewer-meta">Read-only view</div>
+        <div class="code-editor">
+          <div id="codeGutter" class="code-gutter" aria-hidden="true"></div>
+          <div class="code-surface">
+            <pre id="codeHighlight" class="code-highlight" tabindex="-1"><code id="fileCodeBody"></code></pre>
+            <textarea id="fileEditorInput" class="code-input" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off" aria-label="File contents"></textarea>
+          </div>
+        </div>
+      </section>
 
       <div id="buildConfirm" class="build-confirm is-hidden" role="alertdialog" aria-modal="false" aria-labelledby="buildConfirmTitle" aria-describedby="buildConfirmBody">
         <div class="build-confirm-head">
@@ -720,7 +743,8 @@ body {
 
 .session-list { display: flex; flex-direction: column; gap: 4px; }
 .session-item {
-  padding: 8px 10px;
+  position: relative;
+  padding: 8px 34px 8px 10px;
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
@@ -730,6 +754,30 @@ body {
   gap: 2px;
   transition: background 120ms ease;
 }
+.session-delete {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+.session-delete svg { width: 13px; height: 13px; }
+.session-item:hover .session-delete,
+.session-item.is-active .session-delete,
+.session-delete:focus-visible { opacity: 1; }
+.session-delete:hover { color: var(--accent-danger); background: rgba(248, 113, 113, 0.12); }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.is-active { background: var(--bg-active); border-color: var(--border-strong); }
 .session-title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -756,6 +804,7 @@ body {
 .sub-tab.is-active { color: var(--text); border-bottom-color: var(--text); }
 .file-list { display: flex; flex-direction: column; max-height: 46vh; overflow-y: auto; }
 .file-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -766,6 +815,31 @@ body {
   cursor: pointer;
   user-select: none;
 }
+.file-item { padding-right: 28px; }
+.file-row-delete {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+.file-row-delete svg { width: 12px; height: 12px; }
+.file-row:hover .file-row-delete,
+.file-row.is-active .file-row-delete,
+.file-row-delete:focus-visible { opacity: 1; }
+.file-row-delete:hover { color: var(--accent-danger); background: rgba(248, 113, 113, 0.12); }
 .file-row:hover { background: #222228; color: var(--text); }
 .file-row.is-active { background: rgba(255,255,255,0.08); color: #fff; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -790,9 +864,85 @@ body {
 .icon-file { color: #71717a; }
 .file-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
 .file-children.is-collapsed { display: none; }
-.file-preview { border: 1px solid var(--border-soft); border-radius: var(--radius-md); overflow: hidden; }
-.file-preview-name { padding: 6px 8px; background: #17171a; border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--accent-cyan); }
-.file-preview-body { max-height: 40vh; overflow: auto; padding: 8px; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; white-space: pre; color: var(--text-soft); }
+
+/* ===================== Main-area file viewer / editor ===================== */
+.file-viewer {
+  position: absolute;
+  top: 52px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-main);
+}
+.file-viewer.is-hidden { display: none !important; }
+.file-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}
+.file-viewer-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.file-viewer-icon { display: inline-flex; align-items: center; color: var(--text-muted); }
+.file-viewer-icon svg { width: 16px; height: 16px; }
+.file-viewer-path { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-viewer-lang { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); border: 1px solid var(--border-soft); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
+.file-viewer-dirty { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-warn); flex-shrink: 0; }
+.file-viewer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.file-viewer-meta { padding: 5px 16px; border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--text-dim); background: var(--bg-main); flex-shrink: 0; }
+.code-editor { flex: 1; min-height: 0; display: flex; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.62; background: #141418; }
+.code-gutter {
+  flex: 0 0 auto;
+  min-width: 52px;
+  padding: 14px 10px 48px 12px;
+  text-align: right;
+  color: #4b4b55;
+  background: #141418;
+  border-right: 1px solid var(--border-soft);
+  overflow: hidden;
+  white-space: pre;
+  user-select: none;
+}
+.code-surface { position: relative; flex: 1 1 auto; min-width: 0; }
+.code-highlight,
+.code-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 14px 20px 48px 14px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  tab-size: 4;
+  white-space: pre;
+  border: none;
+  border-radius: 0;
+}
+.code-highlight { overflow: auto; background: transparent; color: var(--text-soft); pointer-events: auto; }
+.code-highlight code { font-family: inherit; font-size: inherit; line-height: inherit; }
+.code-input {
+  overflow: auto;
+  resize: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #f4f4f5;
+  -webkit-text-fill-color: transparent;
+}
+.code-input::selection { background: rgba(161,161,170,0.30); color: transparent; }
+.file-viewer.is-editing .code-highlight { overflow: hidden; pointer-events: none; }
+.file-viewer:not(.is-editing) .code-input { display: none; }
+.file-viewer.is-editing .code-highlight { color: var(--text-soft); }
+.code-line-add { color: #6a9955; }
+.code-line-del { color: #fca5a5; }
+.code-line-hunk { color: #569cd6; }
 
 /* ===================== Settings cards ===================== */
 .card {
@@ -1099,10 +1249,10 @@ select.mini-select {
   margin: 0 0 10px;
 }
 .msg-body pre.code-block code { background: none; border: none; padding: 0; font-size: 12px; line-height: 1.55; white-space: pre; }
-.tok-cm { color: #71717a; font-style: italic; }
-.tok-st { color: #a5d6a7; }
-.tok-kw { color: #93c5fd; }
-.tok-num { color: #fcd34d; }
+.tok-cm { color: #6a9955; font-style: italic; }
+.tok-st { color: #ce9178; }
+.tok-kw { color: #569cd6; }
+.tok-num { color: #b5cea8; }
 .caret-blink { display: inline-block; width: 7px; height: 14px; background: var(--accent-cyan); vertical-align: text-bottom; animation: blink 1s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
 
@@ -1113,31 +1263,21 @@ select.mini-select {
   box-sizing: border-box;
   background: transparent;
   border: none;
-  border-left: 2px solid var(--border-soft);
   border-radius: 0;
-  padding: 4px 0 4px 12px;
-  margin: 6px 0;
+  padding: 2px 0;
+  margin: 8px 0;
   max-width: 100%;
-  transition: border-color 150ms ease;
 }
-.tool-card[data-status="running"] {
-  border-left-color: var(--accent-warn);
-}
-.tool-card[data-status="succeeded"] {
-  border-left-color: rgba(6,182,212,0.6);
-}
-.tool-card.is-failed {
-  border-left-color: rgba(239,68,68,0.7);
-}
-.tool-card.is-failed .tool-card-head {
-  background: transparent;
+.tool-card.is-failed .tool-name,
+.tool-card.is-failed .tool-status {
+  color: var(--accent-danger);
 }
 .session-ws-chip {
   display: inline-block;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
-  background: var(--bg-card);
+  background: var(--bg-inset);
   border: 1px solid var(--border-soft);
   border-radius: 4px;
   padding: 1px 4px;
@@ -1174,7 +1314,7 @@ select.mini-select {
   gap: 6px;
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--accent-cyan);
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1182,7 +1322,7 @@ select.mini-select {
 .tool-chevron {
   display: inline-block;
   font-size: 9px;
-  color: var(--text-muted);
+  color: var(--text-dim);
   transition: transform 120ms ease;
   user-select: none;
 }
@@ -1194,11 +1334,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
 }
 .tool-summary-chip {
   font-size: 11px;
-  color: var(--text-soft);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
-  padding: 1px 6px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
   max-width: 480px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1209,33 +1349,35 @@ details:not([open]) > .tool-card-head .tool-chevron {
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding: 2px 7px;
-  border-radius: 4px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
   flex-shrink: 0;
 }
-.tool-status.running { background: rgba(251,191,36,0.18); color: var(--accent-warn); }
-.tool-status.succeeded { background: rgba(16,185,129,0.18); color: var(--accent-ok); }
-.tool-status.failed { background: rgba(239,68,68,0.18); color: var(--accent-danger); }
+.tool-status.running,
+.tool-status.succeeded { background: transparent; color: var(--text-dim); }
+.tool-status.failed { background: transparent; color: var(--accent-danger); }
 
 .tool-card-input {
   width: 100%;
   box-sizing: border-box;
-  margin: 3px 0 4px 0;
-  padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
+  margin: 2px 0 3px 0;
+  padding: 2px 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-soft);
+  color: var(--text-muted);
   word-break: break-all;
 }
 .tool-input-prefix {
-  color: var(--accent-cyan);
+  color: var(--text-dim);
   font-weight: bold;
 }
 .tool-input-label {
-  color: var(--text-muted);
+  color: var(--text-dim);
   font-weight: 600;
   margin-right: 4px;
 }
@@ -1243,26 +1385,36 @@ details:not([open]) > .tool-card-head .tool-chevron {
 .tool-card-body {
   width: 100%;
   box-sizing: border-box;
-  padding: 8px 10px;
-  margin: 3px 0 2px 0;
-  background: rgba(0, 0, 0, 0.22);
-  border: 1px solid var(--border-soft);
-  border-radius: 5px;
+  padding: 4px 0 6px;
+  margin: 2px 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1.55;
   color: var(--text-soft);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 280px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
 }
 .tool-card-body.is-running {
-  color: var(--accent-warn);
+  color: var(--text-muted);
 }
 .tool-card-body.is-error {
   color: var(--accent-danger);
-  border-color: rgba(239, 68, 68, 0.3);
+  border-color: transparent;
+}
+.tool-code {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .tool-spinner {
   display: inline-block;
@@ -1448,7 +1600,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
   box-shadow: none;
 }
 .composer-textarea::placeholder { color: var(--text-dim); }
-.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #181625; flex-wrap: wrap; }
+.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-soft); flex-wrap: wrap; }
 .composer-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .composer-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
@@ -1492,21 +1644,28 @@ details:not([open]) > .tool-card-head .tool-chevron {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 5px 9px;
   border-radius: 6px;
-  background: #161422;
-  border: 1px solid #2a263d;
-  color: #b5b1c9;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  color: var(--text-muted);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 .tool-btn svg { width: 14px; height: 14px; }
-.tool-btn:hover:not(.is-disabled) { background: var(--bg-hover); color: #fff; }
+.tool-btn:hover:not(.is-disabled) { background: var(--bg-hover); border-color: var(--border); color: var(--text); }
 .tool-btn.is-disabled { opacity: 0.45; cursor: not-allowed; }
-.tool-btn.is-listening {
+/* The mic is an icon, not a boxed control. */
+#btnMic,
+#btnMic:hover:not(.is-disabled) {
+  padding: 4px 6px;
+  background: transparent;
+  border-color: transparent;
+}
+#btnMic.is-listening {
   color: var(--accent-danger) !important;
-  border-color: rgba(248, 113, 113, 0.6) !important;
-  background: rgba(248, 113, 113, 0.12) !important;
+  border-color: transparent !important;
+  background: transparent !important;
   animation: mic-pulse 1.5s infinite;
 }
 @keyframes mic-pulse {
@@ -1516,8 +1675,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
 }
 
 .activity-badge { position: relative; cursor: pointer; }
-.activity-inner { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-inset); color: var(--text-muted); font-size: 12px; }
-.activity-text { font-weight: 700; color: #fff; }
+.activity-inner { display: inline-flex; align-items: center; gap: 6px; padding: 4px 2px; border-radius: 0; border: none; background: transparent; color: var(--text-muted); font-size: 12px; }
+.activity-text { font-weight: 700; color: var(--text-muted); }
 .boat { display: inline-flex; animation: boat 2s ease-in-out infinite; }
 .boat svg { width: 16px; height: 16px; }
 .card-title-mark { display: inline-flex; }
@@ -1538,10 +1697,9 @@ details:not([open]) > .tool-card-head .tool-chevron {
   100% { background-position: 0% 50%; box-shadow: 0 0 10px rgba(255,255,255,0.08); }
 }
 .activity-badge.sea-waves .activity-inner {
-  background: linear-gradient(135deg, #1e1e24, #27272a, #1e1e24);
-  background-size: 200% 200%;
-  border-color: var(--border-strong);
-  animation: sea-waves 4s ease infinite;
+  background: transparent;
+  border-color: transparent;
+  animation: none;
 }
 .boat-anim { animation: boat-anim 1.8s ease-in-out infinite !important; }
 .activity-tip {
@@ -1628,7 +1786,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
 .mcp-label { font-weight: 600; letter-spacing: 0.04em; }
 .mcp-count { padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-size: 11px; font-weight: 600; }
 .queue-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; background: rgba(251, 191, 36, 0.15); color: #fcd34d; border: 1px solid rgba(251, 191, 36, 0.35); margin-left: 4px; }
-.msg-user.is-queued { opacity: 0.7; border-left: 3px solid var(--accent-warn); }
+.msg-user.is-queued { opacity: 0.7; }
 .msg-user.is-queued .msg-meta::after { content: ' \u2022  Queued'; color: var(--accent-warn); font-weight: 600; }
 
 /* ===================== Popovers ===================== */
@@ -1860,8 +2018,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
   color: var(--accent-danger);
 }
 .worker-badge-status.is-completed {
-  background: rgba(56, 189, 248, 0.15);
-  color: var(--accent-cyan);
+  background: var(--bg-hover);
+  color: var(--text-muted);
 }
 .worker-stream {
   flex: 1;
@@ -1883,7 +2041,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
   color: var(--text-soft);
 }
 .worker-stream-entry.is-tool {
-  color: var(--accent-cyan);
+  color: var(--text-muted);
 }
 .worker-stream-entry.is-err {
   color: var(--accent-danger);
@@ -1991,6 +2149,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
     streaming: false,
     streamingText: '',
     liveBody: null,
+    // Follow-the-tail intent. The scroll listener flips it off only when the
+    // operator moves the view up; appends never re-evaluate it, so a burst of
+    // content taller than the threshold cannot silently stop following.
+    followTail: true,
+    lastScrollTop: 0,
+    viewerPath: null,
+    viewerOriginal: '',
+    viewerEditing: false,
+    viewerDiff: false,
+    viewerDirty: false,
     attachments: [],
     tasks: {},
     workers: {},
@@ -2309,15 +2477,40 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var box = el('chatScrollContainer');
     if (!box) return;
     var jumpBtn = el('btnJumpToLatest');
-    if (force || isNearBottom()) {
+    if (force) state.followTail = true;
+    if (state.followTail) {
       if (smooth && typeof box.scrollTo === 'function') {
         box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
       } else {
         box.scrollTop = box.scrollHeight;
       }
+      state.lastScrollTop = box.scrollTop;
       if (jumpBtn) jumpBtn.classList.add('is-hidden');
     } else {
       if (jumpBtn) jumpBtn.classList.remove('is-hidden');
+    }
+  }
+
+  /**
+   * The scroll listener owns follow intent. A programmatic follow (append or
+   * the smooth jump) only ever moves the view DOWN, so an upward move alone
+   * pauses following; reaching the bottom always resumes it.
+   */
+  function onChatScroll() {
+    var box = el('chatScrollContainer');
+    if (!box) return;
+    var top = box.scrollTop;
+    var atBottom = isNearBottom();
+    if (atBottom) {
+      state.followTail = true;
+    } else if (top < state.lastScrollTop - 2) {
+      state.followTail = false;
+    }
+    state.lastScrollTop = top;
+    var jumpBtn = el('btnJumpToLatest');
+    if (jumpBtn) {
+      if (state.followTail) jumpBtn.classList.add('is-hidden');
+      else jumpBtn.classList.remove('is-hidden');
     }
   }
 
@@ -2346,7 +2539,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var node = buildMessage(role, html, extraClass);
     list.appendChild(node);
     trimMessagesList();
-    maybeScroll(false);
+    if (!state.bulkRendering) maybeScroll(false);
     return node;
   }
 
@@ -2399,6 +2592,55 @@ details:not([open]) > .tool-card-head .tool-chevron {
       .replace(/(sk-[a-zA-Z0-9_-]{16,})/g, 'sk-[REDACTED]')
       .replace(/(bearer[ \\t]+)[a-zA-Z0-9_.-]{20,}/gi, '$1[REDACTED]')
       .replace(/((?:api[_-]?key|password|token|secret)[ \\t]*[:=][ \\t]*["']?)[^ \\t\\r\\n"']+/gi, '$1[REDACTED]');
+  }
+
+  var TOOL_CODE_EXTENSIONS = {
+    ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    json: 'json', py: 'python', sh: 'bash', bash: 'bash', zsh: 'bash',
+    yml: 'yaml', yaml: 'yaml', css: 'css', scss: 'css', html: 'html',
+    htm: 'html', md: 'markdown', sql: 'sql', go: 'go', rs: 'rust',
+    java: 'java', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', toml: 'toml', ini: 'ini'
+  };
+
+  function langFromPath(path) {
+    var p = String(path || '').toLowerCase();
+    var dot = p.lastIndexOf('.');
+    if (dot < 0) return '';
+    return TOOL_CODE_EXTENSIONS[p.slice(dot + 1)] || '';
+  }
+
+  /**
+   * Infer a language for tool output only from trustworthy signals: a file
+   * path on the call, a file-oriented tool whose summary names a path, a body
+   * that parses as JSON, or a shell shebang. Shell prose and logs stay plain —
+   * being colourful is worth less than being correct.
+   */
+  function guessToolCodeLang(tool, output) {
+    if (tool && tool.input && typeof tool.input === 'object') {
+      var p = tool.input.path || tool.input.file_path;
+      if (typeof p === 'string' && p.trim()) {
+        var inputLang = langFromPath(p);
+        if (inputLang) return inputLang;
+      }
+    }
+    var toolName = String((tool && tool.name) || '').toLowerCase();
+    var fileTool = /(read|write|edit|create|view|open|patch|apply)/.test(toolName);
+    if (fileTool && tool && typeof tool.summary === 'string') {
+      var named = tool.summary.match(/[\\w./\\-]+\\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|json|py|sh|bash|zsh|yml|yaml|css|scss|html|htm|md|sql|go|rs|java|c|h|cpp|hpp|toml|ini)\\b/i);
+      if (named) {
+        var summaryLang = langFromPath(named[0]);
+        if (summaryLang) return summaryLang;
+      }
+    }
+    if (typeof output === 'string') {
+      var trimmed = output.trim();
+      if (trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') {
+        try { JSON.parse(trimmed); return 'json'; } catch (e) {}
+      }
+      if (/^#!.*\\b(?:bash|sh|zsh)\\b/.test(trimmed)) return 'bash';
+    }
+    return '';
   }
 
   function formatToolOutput(raw) {
@@ -2478,6 +2720,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
     var cleanedOutput = formatToolOutput(redactSecrets(tool.output || ''));
     var escapedOutput = escapeHtml(cleanedOutput);
+    // Only code-like output is tokenised: a shell log is not source code.
+    var codeLang = cleanedOutput ? guessToolCodeLang(tool, cleanedOutput) : '';
+    var outputHtml = codeLang
+      ? '<pre class="tool-code"><code>' + highlightCode(cleanedOutput, codeLang) + '</code></pre>'
+      : escapedOutput;
 
     var inputHtml = formatToolInput(tool.input);
     var inputSection = inputHtml ? '<div class="tool-card-input">' + inputHtml + '</div>' : '';
@@ -2485,21 +2732,23 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var bodyHtml = '';
     if (status === 'running') {
       bodyHtml = '<div class="tool-card-body is-running">' +
-        (escapedOutput ? escapedOutput + '\\n' : '') +
+        (outputHtml ? outputHtml + '\\n' : '') +
         '<span class="tool-spinner"></span> <span class="tool-running-text">Running...</span>' +
         '</div>';
-    } else if (escapedOutput) {
-      bodyHtml = '<div class="tool-card-body">' + escapedOutput + '</div>';
+    } else if (outputHtml) {
+      bodyHtml = '<div class="tool-card-body">' + outputHtml + '</div>';
     } else if (status === 'failed') {
       bodyHtml = '<div class="tool-card-body is-error muted">[Tool execution failed with no output]</div>';
     } else {
       bodyHtml = '<div class="tool-card-body muted">[No output returned]</div>';
     }
 
+    var statusLabel = status === 'running' ? 'Running' : (status === 'succeeded' ? 'Completed' : (status === 'failed' ? 'Failed' : status));
+
     var head = '<summary class="tool-card-head">' +
       '<div class="tool-name"><span class="tool-chevron">▾</span>' + name +
       (summary && summary !== name ? ' <span class="tool-summary-chip">' + summary + '</span>' : '') +
-      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+      '</div><span class="tool-status ' + escapeHtml(status) + '">' + escapeHtml(statusLabel) + '</span>' +
       '</summary>';
 
     var fullContent = head + inputSection + bodyHtml;
@@ -2528,7 +2777,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       list.appendChild(card);
       trimMessagesList();
     }
-    maybeScroll(false);
+    if (!state.bulkRendering) maybeScroll(false);
   }
 
   /**
@@ -2732,12 +2981,48 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
       item.appendChild(title);
       item.appendChild(meta);
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'session-delete';
+      del.title = 'Delete session';
+      del.setAttribute('aria-label', 'Delete session ' + (s.title || 'Untitled Session'));
+      del.innerHTML = TRASH_ICON;
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        deleteSession(s.id);
+      });
+      item.appendChild(del);
       item.addEventListener('click', function () { selectSession(s.id); });
       list.appendChild(item);
     });
   }
 
+  async function deleteSession(sessionId) {
+    var target = null;
+    state.sessions.forEach(function (s) { if (s.id === sessionId) target = s; });
+    if (!window.confirm('Delete "' + ((target && target.title) || 'this session') + '"? Its transcript is removed permanently.')) return;
+    try {
+      await apiFetch('/api/sessions/' + encodeURIComponent(sessionId), { method: 'DELETE' });
+      state.sessions = state.sessions.filter(function (s) { return s.id !== sessionId; });
+      if (state.activeSessionId === sessionId) {
+        state.activeSessionId = null;
+        closeFileViewer(true);
+        if (state.sessions.length > 0) {
+          await selectSession(state.sessions[0].id);
+        } else {
+          await createNewSession('Session 1');
+        }
+      } else {
+        renderSessions();
+      }
+      toast('Session deleted');
+    } catch (err) {
+      toast('Failed to delete session: ' + err.message, true);
+    }
+  }
+
   async function selectSession(sessionId) {
+    closeFileViewer(true);
     state.activeSessionId = sessionId;
     renderSessions();
     try {
@@ -3932,6 +4217,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   // ---------------------------------------------------------------- files
   var CHEV_ICON = '<svg class="file-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>';
+  var TRASH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5"/></svg>';
 
   function getFileIconSvg(name, isDir, isOpen) {
     if (isDir) {
@@ -4050,6 +4336,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     return '<div class="file-row file-item" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(f.path) + '" role="treeitem">' +
       getFileIconSvg(f.name, false, false) +
       '<span class="file-name">' + escapeHtml(f.name) + '</span>' +
+      '<button class="file-row-delete" type="button" data-delete-path="' + escapeHtml(f.path) + '" title="Delete file" aria-label="Delete file ' + escapeHtml(f.path) + '">' + TRASH_ICON + '</button>' +
       '</div>';
   }
 
@@ -4072,6 +4359,26 @@ details:not([open]) > .tool-card-head .tool-chevron {
         openFile(row.getAttribute('data-path'));
       });
     });
+    Array.prototype.forEach.call(list.querySelectorAll('[data-delete-path]'), function (button) {
+      button.addEventListener('click', function (e) {
+        e.stopPropagation();
+        deleteWorkspaceFile(button.getAttribute('data-delete-path'));
+      });
+    });
+  }
+
+  async function deleteWorkspaceFile(path) {
+    if (!window.confirm('Delete "' + path + '" from the workspace? This cannot be undone.')) return;
+    try {
+      var url = '/api/files/content?path=' + encodeURIComponent(path);
+      if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      await apiFetch(url, { method: 'DELETE' });
+      if (state.viewerPath === path) closeFileViewer(true);
+      await loadFilesList();
+      toast('File deleted');
+    } catch (err) {
+      toast('Failed to delete ' + path + ': ' + err.message, true);
+    }
   }
 
   /**
@@ -4110,6 +4417,204 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
   }
 
+  // ------------------------------------------------------- main-area viewer
+  var MAX_HIGHLIGHT_CHARS = 200000;
+
+  function fileViewerIsOpen() {
+    var viewer = el('fileViewer');
+    return !!(viewer && !viewer.classList.contains('is-hidden'));
+  }
+
+  function updateCodeGutter(text) {
+    var gutter = el('codeGutter');
+    if (!gutter) return;
+    var lineCount = String(text || '').split('\\n').length;
+    if (lineCount > 5000) {
+      gutter.textContent = '1\\n\\u22ee\\n' + lineCount;
+      return;
+    }
+    var out = '';
+    for (var i = 1; i <= lineCount; i++) out += i + (i < lineCount ? '\\n' : '');
+    gutter.textContent = out;
+  }
+
+  function renderViewerCode(text, lang) {
+    var body = el('fileCodeBody');
+    if (!body) return;
+    var src = String(text || '');
+    if (src.length > MAX_HIGHLIGHT_CHARS) {
+      // Huge files stay responsive: plain text, no token pass on every key.
+      body.textContent = src;
+    } else {
+      body.innerHTML = highlightCode(src, lang);
+    }
+    updateCodeGutter(src);
+  }
+
+  function renderViewerDiff(diffText) {
+    var body = el('fileCodeBody');
+    if (!body) return;
+    if (!diffText || diffText.trim() === '') {
+      body.innerHTML = '<span class="muted">// No changes</span>';
+      updateCodeGutter('// No changes');
+      return;
+    }
+    var lines = diffText.split('\\n');
+    body.innerHTML = lines.map(function (line) {
+      var escapedLine = escapeHtml(line);
+      if (line.charAt(0) === '+' && line.slice(0, 3) !== '+++') return '<span class="code-line-add">' + escapedLine + '</span>';
+      if (line.charAt(0) === '-' && line.slice(0, 3) !== '---') return '<span class="code-line-del">' + escapedLine + '</span>';
+      if (line.slice(0, 2) === '@@') return '<span class="code-line-hunk">' + escapedLine + '</span>';
+      return escapedLine;
+    }).join('\\n');
+    updateCodeGutter(diffText);
+  }
+
+  function setViewerDirty(dirty) {
+    state.viewerDirty = dirty;
+    var badge = el('fileViewerDirty');
+    if (badge) badge.classList.toggle('is-hidden', !dirty);
+    var save = el('fileViewerSave');
+    if (save) save.classList.toggle('is-hidden', !state.viewerEditing);
+    var edit = el('fileViewerEdit');
+    if (edit) edit.classList.toggle('is-hidden', state.viewerEditing || state.viewerDiff);
+  }
+
+  function syncCodeScroll(source) {
+    if (!source) return;
+    var highlight = el('codeHighlight');
+    var gutter = el('codeGutter');
+    if (highlight && highlight !== source) {
+      highlight.scrollTop = source.scrollTop;
+      highlight.scrollLeft = source.scrollLeft;
+    }
+    if (gutter) gutter.scrollTop = source.scrollTop;
+  }
+
+  function openFileViewer(path, content, options) {
+    options = options || {};
+    var viewer = el('fileViewer');
+    if (!viewer) return;
+    state.viewerPath = path;
+    state.viewerOriginal = String(content || '');
+    state.viewerEditing = false;
+    state.viewerDiff = options.diff === true;
+    state.viewerDirty = false;
+
+    var lang = options.lang || langFromPath(path);
+    viewer.classList.remove('is-hidden', 'is-editing');
+    var nameNode = el('fileViewerPath');
+    if (nameNode) nameNode.textContent = path;
+    var iconNode = el('fileViewerIcon');
+    if (iconNode) {
+      var parts = String(path).split('/');
+      iconNode.innerHTML = getFileIconSvg(parts[parts.length - 1] || path, false, false);
+    }
+    var langNode = el('fileViewerLang');
+    if (langNode) langNode.textContent = lang || 'text';
+    var meta = el('fileViewerMeta');
+    if (meta) {
+      meta.textContent = state.viewerDiff
+        ? 'Read-only worktree diff'
+        : (lang ? lang + ' \\u2014 ' : '') + 'click Edit (or Ctrl+E) to modify';
+    }
+    var input = el('fileEditorInput');
+    if (input) {
+      input.value = state.viewerOriginal;
+      input.scrollTop = 0;
+      input.scrollLeft = 0;
+    }
+    var highlight = el('codeHighlight');
+    if (highlight) { highlight.scrollTop = 0; highlight.scrollLeft = 0; }
+    if (state.viewerDiff) renderViewerDiff(state.viewerOriginal);
+    else renderViewerCode(state.viewerOriginal, lang);
+    setViewerDirty(false);
+  }
+
+  function enterFileEditMode() {
+    if (!fileViewerIsOpen() || !state.viewerPath || state.viewerDiff) return;
+    state.viewerEditing = true;
+    var viewer = el('fileViewer');
+    if (viewer) viewer.classList.add('is-editing');
+    var input = el('fileEditorInput');
+    if (input) {
+      input.value = state.viewerOriginal;
+      input.focus();
+      if (typeof input.setSelectionRange === 'function') input.setSelectionRange(0, 0);
+      // Focusing after assigning a multi-line value parks the caret at the end;
+      // reset both panes after focus so editing opens at the top of the file.
+      input.scrollTop = 0;
+      input.scrollLeft = 0;
+    }
+    var highlight = el('codeHighlight');
+    if (highlight) { highlight.scrollTop = 0; highlight.scrollLeft = 0; }
+    setViewerDirty(false);
+    var meta = el('fileViewerMeta');
+    if (meta) meta.textContent = 'Editing \\u2014 Ctrl+S saves, Esc closes';
+    syncCodeScroll(input);
+  }
+
+  function onFileEditorInput() {
+    var input = el('fileEditorInput');
+    if (!input) return;
+    setViewerDirty(input.value !== state.viewerOriginal);
+    renderViewerCode(input.value, langFromPath(state.viewerPath));
+    syncCodeScroll(input);
+  }
+
+  async function saveFileContent() {
+    if (!state.viewerPath || !state.viewerEditing) return null;
+    var input = el('fileEditorInput');
+    if (!input) return null;
+    var content = input.value;
+    if (content === state.viewerOriginal) {
+      setViewerDirty(false);
+      return null;
+    }
+    var saveBtn = el('fileViewerSave');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving\\u2026'; }
+    try {
+      var url = '/api/files/content?path=' + encodeURIComponent(state.viewerPath);
+      if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      await apiFetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: content
+      });
+      state.viewerOriginal = content;
+      setViewerDirty(false);
+      var meta = el('fileViewerMeta');
+      if (meta) meta.textContent = 'Saved \\u2014 Ctrl+S saves, Esc closes';
+      toast('Saved ' + state.viewerPath);
+      return true;
+    } catch (err) {
+      toast('Failed to save ' + state.viewerPath + ': ' + err.message, true);
+      return false;
+    } finally {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+      setViewerDirty(state.viewerDirty);
+    }
+  }
+
+  function closeFileViewer(force) {
+    if (!force && state.viewerDirty) {
+      if (!window.confirm('Discard unsaved changes to ' + state.viewerPath + '?')) return;
+    }
+    var viewer = el('fileViewer');
+    if (viewer) { viewer.classList.add('is-hidden'); viewer.classList.remove('is-editing'); }
+    state.viewerPath = null;
+    state.viewerOriginal = '';
+    state.viewerEditing = false;
+    state.viewerDiff = false;
+    state.viewerDirty = false;
+    var badge = el('fileViewerDirty');
+    if (badge) badge.classList.add('is-hidden');
+    var input = el('fileEditorInput');
+    if (input) input.value = '';
+    var list = el('filesList');
+    if (list) Array.prototype.forEach.call(list.querySelectorAll('.file-item'), function (i) { i.classList.remove('is-active'); });
+  }
+
   async function openFile(path) {
     try {
       var url = '/api/files/content?path=' + encodeURIComponent(path);
@@ -4117,36 +4622,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
         url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
       }
       var res = await apiFetch(url);
-      var preview = el('filePreview');
-      var nameNode = el('activeFileName');
-      var bodyNode = el('fileCodeBody');
-      if (nameNode) nameNode.textContent = path;
-      if (bodyNode) bodyNode.textContent = res.content || '';
-      if (preview) preview.classList.remove('is-hidden');
+      openFileViewer(path, res.content || '');
     } catch (err) {
       toast('Failed to read ' + path + ': ' + err.message, true);
     }
   }
 
   function renderDiffContent(diffText, title) {
-    var header = el('activeFileName');
-    var bodyNode = el('fileCodeBody');
-    var preview = el('filePreview');
-    if (header) header.textContent = title;
-    if (preview) preview.classList.remove('is-hidden');
-    if (!bodyNode) return;
-    if (!diffText || diffText.trim() === '') {
-      bodyNode.innerHTML = '<span class="muted">// No changes</span>';
-      return;
-    }
-    var lines = diffText.split('\\n');
-    bodyNode.innerHTML = lines.map(function (l) {
-      var escaped = escapeHtml(l);
-      if (l.startsWith('+') && !l.startsWith('+++')) return '<span class="tok-st">' + escaped + '</span>';
-      if (l.startsWith('-') && !l.startsWith('---')) return '<span class="tok-cm">' + escaped + '</span>';
-      if (l.startsWith('@@')) return '<span class="tok-kw">' + escaped + '</span>';
-      return '<span>' + escaped + '</span>';
-    }).join('\\n');
+    openFileViewer(title || 'Worktree Diff', diffText || '', { diff: true, lang: 'diff' });
+    var meta = el('fileViewerMeta');
+    if (meta) meta.textContent = 'Read-only worktree diff \\u2014 Esc closes';
   }
 
   async function loadDiffsTab(runId) {
@@ -4626,7 +5111,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
     var tip = el('shipActivityTooltip');
     if (tip) {
-      tip.innerHTML = '<div style="font-weight:600;color:#fff;border-bottom:1px solid #241e38;padding-bottom:3px;">Active Ship Tasks</div>' +
+      tip.innerHTML = '<div style="font-weight:600;color:#fff;border-bottom:1px solid var(--border-soft);padding-bottom:3px;">Active Ship Tasks</div>' +
         (working.length > 0
           ? working.map(function (id) { return '<div>\u2693 ' + escapeHtml(state.tasks[id].title || id) + '</div>'; }).join('')
           : '<div>\u2693 ' + (state.mode === 'build' ? 'Team orchestration in progress\u2026' : 'Prompt turn execution in progress\u2026') + '</div>');
@@ -5200,12 +5685,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
     var chatBox = el('chatScrollContainer');
     if (chatBox) {
-      chatBox.addEventListener('scroll', function () {
-        var jumpBtn = el('btnJumpToLatest');
-        if (jumpBtn) {
-          jumpBtn.classList.toggle('is-hidden', isNearBottom());
-        }
-      });
+      chatBox.addEventListener('scroll', onChatScroll);
     }
     var jumpBtn = el('btnJumpToLatest');
     if (jumpBtn) {
@@ -5214,6 +5694,39 @@ details:not([open]) > .tool-card-head .tool-chevron {
         jumpBtn.classList.add('is-hidden');
       });
     }
+
+    var fileViewerClose = el('fileViewerClose');
+    if (fileViewerClose) fileViewerClose.addEventListener('click', function () { closeFileViewer(false); });
+    var fileViewerEdit = el('fileViewerEdit');
+    if (fileViewerEdit) fileViewerEdit.addEventListener('click', enterFileEditMode);
+    var fileViewerSave = el('fileViewerSave');
+    if (fileViewerSave) fileViewerSave.addEventListener('click', function () { saveFileContent(); });
+    var fileEditorInput = el('fileEditorInput');
+    if (fileEditorInput) {
+      fileEditorInput.addEventListener('input', onFileEditorInput);
+      fileEditorInput.addEventListener('scroll', function () { syncCodeScroll(fileEditorInput); });
+    }
+    var codeHighlight = el('codeHighlight');
+    if (codeHighlight) {
+      codeHighlight.addEventListener('scroll', function () { syncCodeScroll(codeHighlight); });
+    }
+    document.addEventListener('keydown', function (e) {
+      if (!fileViewerIsOpen()) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        saveFileContent();
+        return;
+      }
+      if (!state.viewerEditing && !state.viewerDiff && (e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
+        e.preventDefault();
+        enterFileEditMode();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFileViewer(false);
+      }
+    });
 
     var toggleSplitViewBtn = el('btnToggleSplitView');
     if (toggleSplitViewBtn) {

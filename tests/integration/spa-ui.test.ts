@@ -689,11 +689,17 @@ describe('PLUTON SPA — replaced assets', () => {
       expect(css).toContain('--accent-purple-deep: #52525b;')
       expect(css).toContain('--accent-purple-soft: #a1a1aa;')
 
-      // No lingering legacy purple hex codes in CSS
-      const forbiddenPurples = ['#7c3aed', '#6d28d9', '#8b5cf6', '#a855f7', '#3b2d63', '#2f2749', '#1b172a', '#14121f', '#31274f']
+      // No lingering legacy purple hex codes in CSS (including the tool/mic/
+      // activity tints that used to bypass the token layer).
+      const forbiddenPurples = ['#7c3aed', '#6d28d9', '#8b5cf6', '#a855f7', '#3b2d63', '#2f2749', '#1b172a', '#14121f', '#31274f', '#161422', '#2a263d', '#b5b1c9', '#241e38', '#181625']
       for (const hex of forbiddenPurples) {
         expect(css.toLowerCase()).not.toContain(hex)
       }
+
+      // Mic and working indicator are icons, not boxed controls.
+      expect(css).toContain('#btnMic,\n#btnMic:hover:not(.is-disabled) {')
+      expect(css).toMatch(/\.activity-inner\s*\{[^}]*border:\s*none/)
+      expect(css).toMatch(/\.activity-inner\s*\{[^}]*background:\s*transparent/)
 
       // ChatGPT-style charcoal/neutral background variables are used
       expect(css).toContain('--bg-main: #111114;')
@@ -718,6 +724,106 @@ describe('PLUTON SPA — replaced assets', () => {
       expect(js).toContain('jumpBtn.classList.add(\'is-hidden\')')
       // Smooth scroll on jump to latest
       expect(js).toContain("behavior: 'smooth'")
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('renders borderless blended tool activity with full output and code-aware colouring', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // No rectangles: cards, input lines, and output are transparent and
+      // borderless; the name and status blend into the transcript.
+      expect(css).toMatch(/\.tool-card\s*\{[^}]*border:\s*none/)
+      expect(css).toMatch(/\.tool-card-input\s*\{[^}]*border:\s*none/)
+      expect(css).toMatch(/\.tool-card-body\s*\{[^}]*border:\s*none/)
+      expect(css).toMatch(/\.tool-card-body\s*\{[^}]*max-height:\s*none/)
+      expect(css).toMatch(/\.tool-card-body\s*\{[^}]*overflow:\s*visible/)
+      expect(css).not.toContain('max-height: 280px')
+      expect(css).toContain('.tool-status.running,\n.tool-status.succeeded { background: transparent; color: var(--text-dim); }')
+      expect(css).toMatch(/\.tool-name\s*\{[^}]*color:\s*var\(--text-muted\)/)
+
+      // Status words are human labels, not raw event names.
+      expect(js).toContain("status === 'running' ? 'Running' : (status === 'succeeded' ? 'Completed' : (status === 'failed' ? 'Failed' : status))")
+
+      // Code-aware output: only inferable languages are tokenised.
+      expect(js).toContain('function guessToolCodeLang')
+      expect(js).toContain('function langFromPath')
+      expect(js).toContain('highlightCode(cleanedOutput, codeLang)')
+      expect(css).toContain('.tok-cm { color: #6a9955; font-style: italic; }')
+      expect(css).toContain('.tok-st { color: #ce9178; }')
+      expect(css).toContain('.tok-kw { color: #569cd6; }')
+      expect(css).toContain('.tok-num { color: #b5cea8; }')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('follows appended output until the operator scrolls up, then resumes on jump', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Follow intent survives appends taller than the threshold.
+      expect(js).toContain('followTail: true')
+      expect(js).toContain('function onChatScroll')
+      expect(js).toContain('top < state.lastScrollTop - 2')
+      expect(js).toContain('state.followTail = false')
+      expect(js).toContain('state.followTail = true')
+      expect(js).toContain('if (state.followTail) {')
+      // Bulk replays do not thrash layout per message; one scroll at the end.
+      expect(js).toContain('if (!state.bulkRendering) maybeScroll(false)')
+      expect(js).toContain('maybeScroll(true, true)')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('opens files in a main-area viewer/editor with save, close, and per-item delete controls', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // The sidebar preview is gone; the viewer lives over the conversation.
+      expect(html).not.toContain('id="filePreview"')
+      expect(js).not.toContain("el('filePreview')")
+      expect(html).toContain('id="fileViewer"')
+      expect(html).toContain('id="fileViewerClose"')
+      expect(html).toContain('id="fileViewerEdit"')
+      expect(html).toContain('id="fileViewerSave"')
+      expect(html).toContain('id="fileEditorInput"')
+      expect(html).toContain('id="codeGutter"')
+
+      // Open -> edit -> save -> close plumbing is real, not decorative.
+      expect(js).toContain('function openFileViewer')
+      expect(js).toContain('function enterFileEditMode')
+      expect(js).toContain('function saveFileContent')
+      expect(js).toContain('function closeFileViewer')
+      expect(js).toContain("method: 'PUT'")
+      expect(js).toContain("headers: { 'Content-Type': 'text/plain; charset=utf-8' }")
+      expect(js).toContain('MAX_HIGHLIGHT_CHARS')
+      expect(js).toContain('function syncCodeScroll')
+      expect(js).toContain('Ctrl+S saves')
+      expect(css).toContain('.file-viewer {')
+      expect(css).toContain('.code-gutter')
+      expect(css).toContain('.code-input')
+
+      // Per-item deletion for sessions and files, both confirmed and real.
+      expect(js).toContain('function deleteSession')
+      expect(js).toContain('function deleteWorkspaceFile')
+      expect(js).toContain("method: 'DELETE'")
+      expect(js).toContain('data-delete-path')
+      expect(js).toContain('session-delete')
+      expect(css).toContain('.session-delete')
+      expect(css).toContain('.file-row-delete')
     } finally {
       await server.close()
     }

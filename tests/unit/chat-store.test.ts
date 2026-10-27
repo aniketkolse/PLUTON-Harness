@@ -200,6 +200,22 @@ describe('chat sessions', () => {
     const expected = a.id > b.id ? a.id : b.id
     expect(store.getLatestChatSession(projectId, 'operator')!.id).toBe(expected)
   })
+
+  it('deleteChatSession removes messages, plans, inbox rows and the FTS entry; false for unknown ids', () => {
+    const { store, projectId } = seed('session-delete')
+    const session = store.createChatSession({ projectId, museId: 'operator', title: 'disposable' })
+    store.appendChatMessage({ sessionId: session.id, role: 'user', text: 'deleteme unique-token' })
+    store.createPlan({ projectId, sessionId: session.id, goal: 'doomed plan' })
+    store.enqueueInboxItem({ sessionId: session.id, text: 'queued work' })
+
+    expect(store.deleteChatSession(session.id)).toBe(true)
+    expect(store.getChatSessionOrNull(session.id)).toBeNull()
+    expect(store.listChatMessages(session.id)).toEqual([])
+    expect(store.getLatestPlanForSession(session.id)).toBeNull()
+    expect(store.searchChatMessages('unique-token')).toEqual([])
+    // Deleting an unknown session reports false instead of throwing.
+    expect(store.deleteChatSession(session.id)).toBe(false)
+  })
 })
 
 describe('chat messages', () => {

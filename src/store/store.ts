@@ -1709,6 +1709,26 @@ export class Store {
     return res.changes > 0
   }
 
+  /**
+   * Delete a session and every record that belongs to it.
+   *
+   * `chat_messages` and `plans` reference the session without ON DELETE
+   * CASCADE, so they are removed explicitly inside the same transaction as
+   * the session row. The FTS triggers on `chat_messages` keep the full-text
+   * index in sync. Returns false for an unknown id (no partial cleanup).
+   */
+  deleteChatSession(id: string): boolean {
+    return withTx(this.db, () => {
+      const exists = this.db.prepare('SELECT 1 AS present FROM chat_sessions WHERE id = ?').get(id)
+      if (!exists) return false
+      this.db.prepare('DELETE FROM chat_messages WHERE session_id = ?').run(id)
+      this.db.prepare('DELETE FROM plans WHERE session_id = ?').run(id)
+      this.db.prepare('DELETE FROM session_inbox WHERE session_id = ?').run(id)
+      this.db.prepare('DELETE FROM chat_sessions WHERE id = ?').run(id)
+      return true
+    })
+  }
+
   searchChatMessages(
     query: string,
     opts?: { limit?: number; sessionId?: string },

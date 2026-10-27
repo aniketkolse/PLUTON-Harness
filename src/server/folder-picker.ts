@@ -95,6 +95,12 @@ public class ModernFolderPicker {
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
     private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (IntPtr)(-4);
 
     public static string ShowDialog(string title) {
@@ -110,7 +116,15 @@ public class ModernFolderPicker {
         if (!string.IsNullOrEmpty(title)) {
             dialog.SetTitle(title);
         }
-        int hr = dialog.Show(IntPtr.Zero);
+        // An unowned shell dialog is a separate top-level window: Windows is
+        // free to place it behind the browser that launched it. Own it to the
+        // window the operator is actually looking at (Pluton) and restore that
+        // window first so the dialog always opens in front of it.
+        IntPtr owner = GetForegroundWindow();
+        if (owner != IntPtr.Zero) {
+            SetForegroundWindow(owner);
+        }
+        int hr = dialog.Show(owner);
         if (hr == 0) {
             IShellItem item;
             dialog.GetResult(out item);

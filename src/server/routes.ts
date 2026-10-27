@@ -3,7 +3,7 @@
  * Single authoritative bridge connecting frontend clients to the Pluton runtime.
  */
 
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store } from '../store/store.ts'
@@ -258,59 +258,81 @@ export class ApiRouter {
         }
       }
 
-      // 2c/2d. Workspace Files and File Content (session-scoped when sessionId supplied)
-      if (method === 'GET' && (pathname === '/api/files' || pathname === '/api/files/content')) {
+      // 2c. Workspace file list (session-scoped when sessionId supplied)
+      if (method === 'GET' && pathname === '/api/files') {
         const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
         const rootDir = this.workspaceRootFor(sessionId ?? null)
-        if (pathname === '/api/files') {
-          const files = this.listWorkspaceFiles(rootDir)
-          this.sendJson(res, 200, { ok: true, files, rootDir })
-          return true
-        }
+        const files = this.listWorkspaceFiles(rootDir)
+        this.sendJson(res, 200, { ok: true, files, rootDir })
+        return true
+      }
+
+      // 2d. Read one workspace file.
+      if (method === 'GET' && pathname === '/api/files/content') {
         const target = parsedUrl.searchParams.get('path')
         if (!target) {
           this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
           return true
         }
-        const resolved = safeResolvePath(rootDir, target)
-        if (!resolved) {
-          this.sendJson(res, 403, { ok: false, error: 'access denied: path outside workspace' })
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const resolved = this.resolveWorkspaceFile(rootDir, target)
+        if (!resolved.ok) {
+          this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
           return true
         }
-        // Canonicalize before trusting the path: junctions/symlinks inside the
-        // workspace must not expose files outside it (parity with the engine
-        // tool bridge's realpath containment).
-        let canonical: string
-        let canonicalRoot: string
-        try {
-          canonicalRoot = realpathSync(rootDir)
-          canonical = realpathSync(resolved)
-        } catch {
-          this.sendJson(res, 404, { ok: false, error: 'file not found' })
-          return true
-        }
-        const canonicalRel = relative(canonicalRoot, canonical)
-        if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
-          this.sendJson(res, 403, { ok: false, error: 'access denied: path resolves outside workspace (via a link)' })
-          return true
-        }
-        let stat
-        try {
-          stat = statSync(canonical)
-        } catch {
-          this.sendJson(res, 404, { ok: false, error: 'file not found' })
-          return true
-        }
-        if (stat.isDirectory()) {
-          this.sendJson(res, 404, { ok: false, error: 'file not found' })
-          return true
-        }
-        if (stat.size > 2 * 1024 * 1024) {
+        if (resolved.size > 2 * 1024 * 1024) {
           this.sendJson(res, 413, { ok: false, error: 'file too large to inspect in editor (> 2MB)' })
           return true
         }
-        const content = readFileSync(canonical, 'utf8')
-        this.sendJson(res, 200, { ok: true, path: target, content, size: stat.size })
+        const content = readFileSync(resolved.canonical, 'utf8')
+        this.sendJson(res, 200, { ok: true, path: target, content, size: resolved.size })
+        return true
+      }
+
+      // 2e. Save an existing workspace file. The body is the raw file text,
+      // not JSON: a 1 MB JSON envelope cannot carry a 2 MB source file.
+      if (method === 'PUT' && pathname === '/api/files/content') {
+        const target = parsedUrl.searchParams.get('path')
+        if (!target) {
+          this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
+          return true
+        }
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const resolved = this.resolveWorkspaceFile(rootDir, target)
+        if (!resolved.ok) {
+          this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
+          return true
+        }
+        if (resolved.size > 2 * 1024 * 1024) {
+          this.sendJson(res, 413, { ok: false, error: 'file too large to edit (> 2MB)' })
+          return true
+        }
+        const content = await this.readTextBody(req, 2 * 1024 * 1024 + 1024)
+        const bytes = Buffer.byteLength(content, 'utf8')
+        if (bytes > 2 * 1024 * 1024) {
+          this.sendJson(res, 413, { ok: false, error: 'file content too large to save (> 2MB)' })
+          return true
+        }
+        writeFileSync(resolved.canonical, content, 'utf8')
+        this.sendJson(res, 200, { ok: true, path: target, size: bytes })
+        return true
+      }
+
+      // 2f. Delete one workspace file (the operator confirms in the UI).
+      if (method === 'DELETE' && pathname === '/api/files/content') {
+        const target = parsedUrl.searchParams.get('path')
+        if (!target) {
+          this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
+          return true
+        }
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const resolved = this.resolveWorkspaceFile(rootDir, target)
+        if (!resolved.ok) {
+          this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
+          return true
+        }
+        unlinkSync(resolved.canonical)
+        this.sendJson(res, 200, { ok: true, path: target, deleted: true })
         return true
       }
 
@@ -415,6 +437,26 @@ export class ApiRouter {
           ...(workspaceRoot !== null ? { workspaceRoot } : {}),
         }
         this.sendJson(res, 200, { ok: true, session: detail })
+        return true
+      }
+
+      // 6b. Delete a session and its transcript. A busy turn owns live engine
+      // state, so the operator must stop it first instead of orphaning a turn.
+      if (sessionMatch && method === 'DELETE') {
+        const sessionId = sessionMatch[1]!
+        const session = this.ctx.store.getChatSessionOrNull(sessionId)
+        if (!session || session.projectId !== this.ctx.projectId) {
+          this.sendJson(res, 404, { ok: false, error: `session '${sessionId}' not found` })
+          return true
+        }
+        if (this.runner.isBusy(sessionId)) {
+          this.sendJson(res, 409, { ok: false, error: 'cannot delete a session while a turn is running' })
+          return true
+        }
+        this.dropMcpRegistration(sessionId)
+        await this.runner.dropSession(sessionId)
+        this.ctx.store.deleteChatSession(sessionId)
+        this.sendJson(res, 200, { ok: true, deleted: true, sessionId })
         return true
       }
 
@@ -1480,6 +1522,43 @@ export class ApiRouter {
     this.toolHttp?.unregister(reg.token)
   }
 
+  /**
+   * Resolve one workspace file path with the same containment guarantees as
+   * the engine bridge: lexical containment, then canonical (realpath)
+   * containment so junctions/symlinks cannot escape, then a file check.
+   */
+  private resolveWorkspaceFile(
+    rootDir: string,
+    target: string,
+  ): { ok: true; canonical: string; size: number } | { ok: false; status: number; error: string } {
+    const resolved = safeResolvePath(rootDir, target)
+    if (!resolved) {
+      return { ok: false, status: 403, error: 'access denied: path outside workspace' }
+    }
+    let canonical: string
+    let canonicalRoot: string
+    try {
+      canonicalRoot = realpathSync(rootDir)
+      canonical = realpathSync(resolved)
+    } catch {
+      return { ok: false, status: 404, error: 'file not found' }
+    }
+    const canonicalRel = relative(canonicalRoot, canonical)
+    if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
+      return { ok: false, status: 403, error: 'access denied: path resolves outside workspace (via a link)' }
+    }
+    let stat
+    try {
+      stat = statSync(canonical)
+    } catch {
+      return { ok: false, status: 404, error: 'file not found' }
+    }
+    if (stat.isDirectory()) {
+      return { ok: false, status: 404, error: 'file not found' }
+    }
+    return { ok: true, canonical, size: stat.size }
+  }
+
   private listWorkspaceFiles(rootDir: string, maxFiles = 300): string[] {
     const results: string[] = []
     const ignored = new Set(['.git', 'node_modules', '.pluton', 'dist', '.DS_Store', 'coverage'])
@@ -1510,7 +1589,7 @@ export class ApiRouter {
     return results.sort()
   }
 
-  private readJsonBody<T>(req: IncomingMessage): Promise<T> {
+  private readRequestBody(req: IncomingMessage, maxChars: number, hardStop: number): Promise<string> {
     return new Promise((resolveResult, reject) => {
       let data = ''
       let oversized = false
@@ -1528,14 +1607,14 @@ export class ApiRouter {
           // The body is already too big: keep draining so the client can
           // finish sending and receive the 413, but stop reading into memory.
           // The hard stop protects the process from an endless stream.
-          if (totalBytes > MAX_REQUEST_BODY_HARD_STOP) {
+          if (totalBytes > hardStop) {
             req.destroy()
             fail(new ValidationError('payload too large'))
           }
           return
         }
         data += chunk
-        if (data.length > MAX_REQUEST_BODY_CHARS) {
+        if (data.length > maxChars) {
           oversized = true
           data = ''
         }
@@ -1546,21 +1625,32 @@ export class ApiRouter {
           // The socket is NOT destroyed here: the client must receive the
           // 413 that says why, not a connection reset.
           fail(
-            new ValidationError(`payload too large (> ${String(MAX_REQUEST_BODY_CHARS)} chars)`, {
-              details: { kind: 'payload_too_large', limit: MAX_REQUEST_BODY_CHARS },
+            new ValidationError(`payload too large (> ${String(maxChars)} chars)`, {
+              details: { kind: 'payload_too_large', limit: maxChars },
             }),
           )
           return
         }
         settled = true
-        try {
-          resolveResult(data ? (JSON.parse(data) as T) : ({} as T))
-        } catch {
-          reject(new ValidationError('invalid JSON payload'))
-        }
+        resolveResult(data)
       })
       req.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))))
     })
+  }
+
+  private readJsonBody<T>(req: IncomingMessage): Promise<T> {
+    return this.readRequestBody(req, MAX_REQUEST_BODY_CHARS, MAX_REQUEST_BODY_HARD_STOP).then((data) => {
+      try {
+        return data ? (JSON.parse(data) as T) : ({} as T)
+      } catch {
+        throw new ValidationError('invalid JSON payload')
+      }
+    })
+  }
+
+  /** Raw text body for file saves; the caller supplies the character limit. */
+  private readTextBody(req: IncomingMessage, maxChars: number): Promise<string> {
+    return this.readRequestBody(req, maxChars, Math.max(maxChars * 2, MAX_REQUEST_BODY_HARD_STOP))
   }
 
   private sendJson(res: ServerResponse, status: number, data: unknown): void {

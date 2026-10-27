@@ -100,6 +100,23 @@ describe('Native folder picker unit', () => {
     ).rejects.toThrow(/out of memory/)
   })
 
+  it('owns the Windows dialog to the foreground window so it opens in front of Pluton', async () => {
+    let script = ''
+    await pickNativeFolder({
+      platform: 'win32',
+      exec: async (_file, args) => {
+        const index = args.indexOf('-EncodedCommand')
+        script = Buffer.from(args[index + 1]!, 'base64').toString('utf16le')
+        return { stdout: 'C:\\Target\\Dir', stderr: '' }
+      },
+    })
+    expect(script).toContain('GetForegroundWindow')
+    expect(script).toContain('SetForegroundWindow(owner)')
+    expect(script).toContain('dialog.Show(owner)')
+    // The PowerShell host itself must never be shown as a console window.
+    expect(script).not.toContain('Show(IntPtr.Zero)')
+  })
+
   it('handles darwin picker success and cancellation', async () => {
     const success = await pickNativeFolder({
       platform: 'darwin',

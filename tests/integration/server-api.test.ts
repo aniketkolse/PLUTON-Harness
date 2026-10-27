@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -233,6 +233,56 @@ describe('Pluton application server REST & SSE API', () => {
     }
   })
 
+  it('edits and deletes workspace files while enforcing workspace containment', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const headers = { 'Content-Type': 'text/plain; charset=utf-8', 'x-pluton-token': server.token }
+
+      // Save replaces the existing file with the raw body.
+      const saveRes = await fetch(`http://127.0.0.1:${server.port}/api/files/content?path=sample.txt`, {
+        method: 'PUT',
+        headers,
+        body: 'updated content\n',
+      })
+      expect(saveRes.status).toBe(200)
+      expect(((await saveRes.json()) as { ok: boolean }).ok).toBe(true)
+      expect(readFileSync(join(rootDir, 'sample.txt'), 'utf8')).toBe('updated content\n')
+
+      // The edited content is served back by the read endpoint.
+      const readRes = await fetch(`http://127.0.0.1:${server.port}/api/files/content?path=sample.txt`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(readRes.status).toBe(200)
+      expect(((await readRes.json()) as { content: string }).content).toBe('updated content\n')
+
+      // Saving outside the workspace is refused.
+      const escapeRes = await fetch(
+        `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('../escape.txt')}`,
+        { method: 'PUT', headers, body: 'escaped' },
+      )
+      expect(escapeRes.status).toBe(403)
+
+      // Delete removes an existing workspace file.
+      writeFileSync(join(rootDir, 'disposable.txt'), 'bye', 'utf8')
+      const deleteRes = await fetch(`http://127.0.0.1:${server.port}/api/files/content?path=disposable.txt`, {
+        method: 'DELETE',
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(deleteRes.status).toBe(200)
+      expect(existsSync(join(rootDir, 'disposable.txt'))).toBe(false)
+
+      // Deleting the same file again is a clean 404.
+      const missingRes = await fetch(`http://127.0.0.1:${server.port}/api/files/content?path=disposable.txt`, {
+        method: 'DELETE',
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(missingRes.status).toBe(404)
+    } finally {
+      await server.close()
+    }
+  })
+
   it('handles chat sessions lifecycle and prompt dispatch', async () => {
     const { appServer } = setupTestProject()
     const server = await appServer
@@ -272,6 +322,49 @@ describe('Pluton application server REST & SSE API', () => {
       const promptData = (await promptRes.json()) as { ok: boolean; status: string }
       expect(promptData.ok).toBe(true)
       expect(promptData.status).toBe('streaming')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('deletes a chat session and hides it from subsequent reads', async () => {
+    const { appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const createRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+        body: JSON.stringify({ title: 'Disposable Chat' }),
+      })
+      expect(createRes.status).toBe(201)
+      const created = (await createRes.json()) as { session: { id: string } }
+      const sessionId = created.session.id
+
+      const deleteRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(deleteRes.status).toBe(200)
+      const deleted = (await deleteRes.json()) as { ok: boolean; deleted: boolean; sessionId: string }
+      expect(deleted).toMatchObject({ ok: true, deleted: true, sessionId })
+
+      const detailRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${sessionId}`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(detailRes.status).toBe(404)
+
+      const listRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      const listed = (await listRes.json()) as { sessions: Array<{ id: string }> }
+      expect(listed.sessions.some((s) => s.id === sessionId)).toBe(false)
+
+      // Deleting an unknown session is a clean 404, not a 500.
+      const missingRes = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: { 'x-pluton-token': server.token },
+      })
+      expect(missingRes.status).toBe(404)
     } finally {
       await server.close()
     }
