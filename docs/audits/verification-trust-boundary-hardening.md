@@ -1,8 +1,8 @@
 # Verification trust-boundary hardening — source audit
 
 Date: 2026-10-28
-Status: implemented; full local suite green (see §6)
-Scope: the confirmed C1–C6 and H1–H9 findings from the adversarial review
+Status: implemented; full Windows suite green; live Linux (WSL2) kernel validation complete (see §6)
+Scope: the confirmed C1–C6 and H1–H9 findings from the adversarial review, plus R1–R3 found by live Linux validation
 
 This document records the security remediation that followed the permission and
 lifecycle audit in [`permission-lifecycle-hardening.md`](permission-lifecycle-hardening.md).
@@ -28,6 +28,14 @@ remains unverified on this host.
 | H7 | Interrupted verification required a manual DB edit or an unsafe attempt bump | A fresh same-attempt run supersedes prior current rows (history retained, attempt unchanged) | `tests/integration/verify.test.ts`, `tests/unit/verify-evidence.test.ts` |
 | H8 | Post-integration checks were reported but not gating | `integrate` and `approvals approve --continue` exit nonzero when any check fails; integration commit is bound to the verified fingerprint | `tests/integration/cli-integrate.test.ts` |
 | H9 | Tamper detection missed `.only`, assertion removal and package test-script swaps | Conservative rules for focused/disabled tests, commented-out/removed assertions, deleted test files and changed/removed `"test"` scripts; the verified diff is base→live worktree, including uncommitted/untracked edits | `tests/unit/independent-verifier.test.ts`, uncommitted-tamper test in `tests/integration/cli-integrate.test.ts` |
+
+### 1a. Defects confirmed by live Linux validation
+
+| ID | Confirmed defect | Implemented control | Regression evidence |
+|---|---|---|---|
+| R1 | A snapshot under `/tmp` was hidden by the helper's private tmpfs, so real Linux checks failed closed even though isolation was available | `private_tmp: false` for verification requests in `src/verify/executor.ts`; `/tmp` remains outside the Landlock read/write roots, and only the snapshot's own `tmp/` is writable | `runs a real check inside a snapshot created under the system temp directory` in `tests/unit/verification-executor.test.ts`; Phase B1e |
+| R2 | `network: none` isolated IP sockets but not AF_UNIX, so a check could reach host SSH agents, Docker, dbus or systemd; `io_uring_setup` could bypass socket mediation | `native/landlock-run/src/main.rs` installs an arch-checked seccomp filter for `restricted`/`none`: `socket(AF_UNIX)` and `io_uring_setup` return `EPERM`; setup failure is a helper startup error; the `restricted` bridge proxy is forked before the filter and still uses loopback TCP | AF_UNIX regression in `tests/unit/verification-executor.test.ts`; Phase B4 and Phase E1 |
+| R3 | Trusted Git hashed symlinks with `readFileSync`, following the link. A worker-controlled symlink could make the host read files outside the checkout and commit their bytes as the link target | `src/workspace/trusted-git.ts` uses `readlinkSync`; a `120000` blob is the literal link target, never the target file's content | `hashes symlink targets instead of reading through them` in `tests/unit/trusted-git.test.ts`; Phase C6 |
 
 ## 2. Evidence identity and integration
 
@@ -79,14 +87,19 @@ task on suspicion and never upgrade suspicion to a pass.
 
 - **Linux:** checks require the verified `landlock-run` helper, Landlock ABI ≥ 3,
   and mount/PID/network namespaces. They run in `workspace-write` mode against
-  the disposable snapshot with `network: none`.
+  the disposable snapshot with `network: none`. For `restricted`/`none` the
+  helper also installs a seccomp filter that denies `socket(AF_UNIX)` and
+  `io_uring_setup`; the network namespace alone only isolates IP sockets.
 - **Windows and macOS:** no supported confinement is implemented for verification
   or post-integration checks. The executor reports unavailable and the gate
   records failed checks; nothing is executed on the host. Engines in these
   environments remain on the separately acknowledged `unconfined` mode.
-- **Linux on this host:** behavior is code- and unit-test-confirmed only. This
-  Windows checkout cannot execute Landlock or namespace code, so it is not live
-  evidence for Linux kernel confinement.
+- **Live Linux evidence (WSL2):** Ubuntu 24.04.5 on kernel
+  `6.18.33.2-microsoft-standard-WSL2`, Node `v24.20.0`, Landlock ABI 7, running
+  unprivileged as `nobody`. The runtime, trusted-Git, evidence/integration and
+  restricted-bridge suites below were executed against this kernel. This is
+  real Landlock/namespace/seccomp evidence, but it is not a bare-metal distro
+  matrix; see §5.9.
 
 ## 5. Residual risks
 
@@ -104,18 +117,87 @@ task on suspicion and never upgrade suspicion to a pass.
 5. Failed verification on Windows/macOS is the intended fail-closed result, not
    a supported success path. Operators who need green verification must run on a
    Linux host with the helper and namespaces available.
+6. **Verification inherits the host `PATH`.** The executor deliberately skips
+   PATH entries inside the snapshot, but it does not require the remaining
+   entries to be root-owned. A writable directory earlier on the operator's
+   `PATH` could shadow a runtime (`node`, `python`, …) with a different binary.
+   The worker cannot normally write such a directory, but operators must keep
+   `PATH` clean; the audit's synthetic `node` probe confirmed inheritance.
+7. **The executor does not drop to a dedicated uid.** It relies on the invoking
+   user's DAC plus Landlock. Run Pluton as an unprivileged user: as root,
+   root-readable host files under the allowed `/etc` read root (for example
+   `/etc/shadow`) become readable inside the check even though the snapshot's
+   worktree is isolated.
+8. **`private_tmp: false` trades a hidden `/tmp` for a working snapshot.** The
+   helper no longer mounts a fresh tmpfs over `/tmp`, so the host path namespace
+   is visible. Landlock still grants no read/write access to `/tmp` outside the
+   snapshot and its own `tmp/`, but metadata such as `stat` is not a
+   confidentiality boundary.
+9. **The seccomp filter is a two-family denylist, not a syscall allowlist.**
+   AF_UNIX and `io_uring_setup` are denied; other IPC or kernel interfaces are
+   not enumerated, and `open` sessions are intentionally unfiltered. The
+   `restricted` bridge proxy runs outside the filter by design and is trusted
+   helper code; a helper compromise is outside this boundary.
+10. **Live Linux evidence is WSL2-specific.** It proves the helper against
+    kernel `6.18.33.2-microsoft-standard-WSL2` with Landlock ABI 7. It is not a
+    bare-metal, multi-distro or CI matrix result. The full Linux Vitest suite
+    was not run because the Linux rolldown binding is absent offline; the
+    audit used direct Node harnesses importing `src/**/*.ts`.
 
-## 6. Verification commands and results
+## 6. Live Linux validation
+
+Environment: WSL2 Ubuntu 24.04.5 LTS, kernel
+`6.18.33.2-microsoft-standard-WSL2`, Node `v24.20.0`, Landlock ABI 7. All
+harnesses ran unprivileged as `nobody` (uid 65534) with synthetic repositories
+and state under `/var/tmp`; no operator repository, home directory, credential
+or production service was touched. Helper identity:
+`landlock:0.1.0:1488a4243c36`, binary SHA-256
+`1488a4243c360ed4d9cc5081ca4952027262c689d9377f4dc0098b7f63ee0748`.
+
+| Phase | Result | What it proved |
+| --- | --- | --- |
+| B — runtime confinement | 10/10 PASS | Unavailable platform/helper and refused snapshots fail closed with no execution; outside reads/writes, sibling workspaces, engine homes, state, `.git`, `/proc/self/root` and symlink escapes are denied while snapshot/tmp writes succeed; environment canaries are stripped; `HOME`/`TMPDIR` are inside the snapshot; timeout kills descendants and output is truncated at the cap. AF_UNIX host IPC was reachable before R2 and is `EPERM` after the fix, with zero host connections. |
+| C — trusted Git | 10/10 PASS | Hostile hooks, filters, fsmonitor, external diff, textconv and merge drivers execute on control copies but never through the trusted layer; raw identity covers newline/CR/space/quote/unicode paths, `100755`/`120000`, ignored content, raw bytes and symlink targets; stale fingerprints and pre-existing ref locks fail closed; packed refs and merges behave correctly. R3 (symlink read-through) was found and fixed here. |
+| D — evidence and integration | 10/10 PASS | Missing, mixed-kind, mixed-revision, stale-attempt and cross-run evidence cannot authorize a verdict; an interrupted same-attempt run is superseded without bumping the attempt; post-verification worktree mutation, HEAD movement and missing evidence block integration with no merge, no commit and no artifact; a failing post-integration check makes the CLI exit 1 and a passing check exits 0. Checks ran under `landlock:0.1.0:1488a4243c36`. |
+| E — restricted bridge | 1/1 PASS | With `network: restricted`, the engine's loopback TCP request was forwarded by the helper proxy to the host AF_UNIX bridge and received the reply; a direct AF_UNIX connect from the same engine returned `EPERM`; the reported bridge port matched. This proves the seccomp filter did not break the intended bridge path. |
+
+Not tested / blocked:
+
+- the full Linux Vitest suite — the Linux rolldown binding is absent and
+  network installs were excluded, so the audit used plain Node harnesses that
+  import the TypeScript source;
+- bare-metal Linux, other distributions and other kernels (WSL2 only);
+- Docker as an alternate disposable runtime — the Docker engine pipe was absent.
+
+## 7. Verification commands and results
 
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | pass |
-| `npm test -- --reporter=dot` | 151 files, 1319 passed, 2 skipped |
+| `npm test -- --reporter=dot` | 151 files, 1319 passed, 5 skipped (the new Linux-only regressions skip on Windows; the earlier baseline had 2 skips) |
 | `npm run build` | pass |
 | `npm run verify:docs` | 73 files, 48 links checked, 0 broken |
+| `npm run verify:assets` | 60 checks passed |
 | `npm run release:check -- --allow-dirty` | 16 checks: 15 passed, 0 failed, 1 not tested (POSIX 0600 on Windows), 0 owner blockers; `npm run check` and `npm run build` inside it passed |
+| `git diff --check` | pass (no whitespace errors) |
 
-The working tree intentionally remains dirty and uncommitted: it contains
-pre-existing user/hardening work plus this remediation. Nothing was reset,
-stashed, reverted, committed or published. No live malicious engine or exploit
-was executed against the host.
+## 8. Working-tree preservation
+
+The working tree intentionally remains dirty and uncommitted. Exactly nine
+tracked files changed; nothing else in the tree was modified:
+
+- `src/verify/executor.ts`
+- `src/workspace/trusted-git.ts`
+- `native/landlock-run/src/main.rs`
+- `native/landlock-run/landlock-run-linux-x64`
+- `native/landlock-run/manifest.json`
+- `tests/unit/verification-executor.test.ts`
+- `tests/unit/trusted-git.test.ts`
+- `docs/audits/verification-trust-boundary-hardening.md` (this record)
+- `docs/SECURITY.md` (Linux evidence + residual risks)
+
+The code changes are limited to the three remediation defects (R1–R3) and their
+regression tests; the remaining two files document the audit. Nothing was reset,
+stashed, cleaned, reverted, committed, tagged or published. No live malicious
+engine or exploit was executed against the host; the hostile fixtures were local
+synthetic repositories in `/var/tmp`.
