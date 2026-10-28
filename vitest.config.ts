@@ -19,11 +19,14 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       reporter: ['text-summary', 'json-summary'],
       reportsDirectory: 'coverage',
-      // Measured on the committed suite (2026-10-26, Windows 11 / Node 24.20,
-      // 1,253 tests): statements 77.96, branches 69.35, functions 80.22,
-      // lines 79.65 (lowest of four full runs; runs vary by a few hundredths).
-      // Floors are the integer below each measurement: ~1pp of headroom for
-      // platform-specific skips (POSIX-only tests on Windows, etc.).
+      // Measured on the committed suite (2026-10-28, Windows 11 / Node 24.20,
+      // 1,232 tests): statements 77.31, branches 68.52, functions 79.95,
+      // lines 78.91 (lowest of two full runs; runs vary by a few hundredths).
+      // The native-only migration removed the container modules and their
+      // Docker suites, so the previous 1,253-test baseline no longer applied.
+      // Targeted tests for native policy/capabilities, CLI output, session
+      // commands, JSONL round-trips and workspace resolution restored the
+      // unchanged floors; do not lower a floor to absorb missing coverage.
       thresholds: {
         statements: 77,
         branches: 68,
