@@ -1,7 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { parseDocument, parse as parseYaml } from 'yaml'
 import { bootstrapStore, shipSpecs } from '../bootstrap.ts'
 import {
+  engineHomesDir,
   findManager,
   loadConfig,
   validateConfig,
@@ -280,15 +282,48 @@ interface RunNativeProvider {
   setRunId: (runId: string) => void
 }
 
+function collectRunExtraRoots(
+  ctx: ProjectContext,
+  additionalRoots: Array<string | null | undefined> = [],
+): string[] {
+  const extra = new Set<string>()
+  const projectRoot = ctx.loaded?.rootDir
+  if (projectRoot && existsSync(projectRoot)) {
+    const canonicalProj = resolve(projectRoot)
+    const canonicalWork = resolve(ctx.rootDir)
+    if (canonicalProj.toLowerCase() !== canonicalWork.toLowerCase()) {
+      extra.add(canonicalProj)
+    }
+    const homes = engineHomesDir(canonicalProj)
+    try {
+      mkdirSync(homes, { recursive: true })
+    } catch {}
+    if (existsSync(homes) && canonicalProj.toLowerCase() !== canonicalWork.toLowerCase()) {
+      extra.add(homes)
+    }
+  }
+  for (const root of additionalRoots) {
+    if (root && existsSync(root) && statSync(root).isDirectory()) {
+      const canonical = resolve(root)
+      if (canonical.toLowerCase() !== resolve(ctx.rootDir).toLowerCase()) {
+        extra.add(canonical)
+      }
+    }
+  }
+  return Array.from(extra)
+}
+
 function createRunNativeProvider(
   ctx: ProjectContext,
   store: Store,
   projectId: string,
+  extraRoots?: string[],
 ): RunNativeProvider {
   let runId: string | null = null
   const provider = createNativeExecutionProvider({
     config: ctx.loaded.config,
     rootDir: ctx.rootDir,
+    ...(extraRoots !== undefined && extraRoots.length > 0 ? { extraRoots } : {}),
     onEvent: (event) => {
       appendExecutionEvent(store, projectId, runId, event)
     },
@@ -319,9 +354,10 @@ export function createRunSupervisor(args: {
   const { ctx, store, projectId, run, limits, wakeups, http, bridgeUrl, deps, diagnostic } = args
   const settings = supervisorSettingsFromRuntime(ctx.loaded.config.runtime)
   const budgets = usageBudgetsFromRuntime(ctx.loaded.config.runtime)
-  let supervisorAdapterFor: SupervisorAdapterFactory | undefined = deps.adapterFor
+  let supervisorAdapterFor: SupervisorAdapterFactory | undefined = deps?.adapterFor
   if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
     const nativeProvider = args.nativeProvider
+    const extraAllowedRoots = collectRunExtraRoots(ctx, [run.workspaceRoot])
     supervisorAdapterFor = (ship, session) =>
       nativeAdapterFor(ship, {
         provider: nativeProvider,
@@ -336,6 +372,7 @@ export function createRunSupervisor(args: {
             engineHome: req.configDir,
             isolatedCheckout: session.isolatedCheckout,
             sessionKind: 'run',
+            ...(extraAllowedRoots.length > 0 ? { extraAllowedRoots } : {}),
             ...(args.executionBridge !== undefined ? { bridge: args.executionBridge } : {}),
           }),
       })
@@ -346,6 +383,7 @@ export function createRunSupervisor(args: {
     store,
     projectId,
     rootDir: ctx.rootDir,
+    ...(ctx.loaded?.rootDir ? { projectRootDir: ctx.loaded.rootDir } : {}),
     workspacesRoot: workspaceDir(ctx.rootDir),
     runId: run.id,
     limits,
@@ -355,6 +393,7 @@ export function createRunSupervisor(args: {
     maxRetriesPerTask: settings.maxRetriesPerTask,
     ...(budgets !== undefined ? { usageLedger: new UsageLedger(run.id, budgets, store) } : {}),
     verificationConfigured: ctx.loaded.config.project.verification.length > 0,
+    protectedPaths: ctx.loaded.config.git.protected_paths,
     ...(args.skipManager !== undefined ? { skipManager: args.skipManager } : {}),
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
     ...(deps.onWorkerEvent !== undefined ? { onWorkerEvent: deps.onWorkerEvent } : {}),
@@ -401,7 +440,7 @@ export function startRunInBackground(
   store: Store,
   projectId: string,
   opts: StartRunOptions,
-  deps: RunDeps,
+  deps: RunDeps = {},
   hooks?: { diagnostic?: (line: string) => void },
 ): { runId: string; done: Promise<RunSummary> } {
   const goal = opts.goal.trim()
@@ -416,7 +455,8 @@ export function startRunInBackground(
     ? { ...ctx, rootDir: opts.workspaceRoot }
     : ctx
 
-  const native = createRunNativeProvider(effectiveCtx, store, projectId)
+  const extraRoots = collectRunExtraRoots(effectiveCtx, [ctx.rootDir, opts.workspaceRoot])
+  const native = createRunNativeProvider(effectiveCtx, store, projectId, extraRoots)
 
   const payload: JsonValue = {
     goal,
@@ -547,7 +587,8 @@ export async function runRun(
     const runtime = ctx.loaded.config.runtime
     const budget = runBudgetFromRuntime(runtime)
 
-    native = createRunNativeProvider(ctx, store, projectId)
+    const extraRoots = collectRunExtraRoots(ctx)
+    native = createRunNativeProvider(ctx, store, projectId, extraRoots)
 
     const payload: JsonValue = {
       goal,
@@ -672,7 +713,8 @@ export async function resumeRun(
       : ctx
 
     const runtime = effectiveCtx.loaded.config.runtime
-    native = createRunNativeProvider(effectiveCtx, store, projectId)
+    const extraRoots = collectRunExtraRoots(effectiveCtx, [ctx.rootDir, run.workspaceRoot])
+    native = createRunNativeProvider(effectiveCtx, store, projectId, extraRoots)
     native.setRunId(run.id)
 
     const limits = toolBridgeLimitsFromRuntime(runtime)

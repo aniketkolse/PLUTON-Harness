@@ -259,18 +259,38 @@ export function nativeSpecForShip(args: {
     }
   }
 
+  // An isolated worker gets only its own checkout and its own engine home. The
+  // project root, the shared workspace directory, every engine home and any
+  // session extra roots are manager/chat capabilities: granting them to a
+  // worker would expose sibling Ships' credentials and `.pluton` state even
+  // though the worker only needs its checkout. The provider still adds host
+  // runtime roots needed to execute Node/the engine binary.
+  const isolatedWorker =
+    args.sessionKind === 'run' &&
+    args.isolatedCheckout &&
+    ship.workspacePolicy === 'isolated-task-checkout'
+  if (isolatedWorker) {
+    // The provider refuses a missing allowed root. A worker's own engine home
+    // is a required runtime resource (auth/config/caches), so create it here
+    // rather than widening the roots when a caller has not pre-created it.
+    mkdirSync(args.engineHome, { recursive: true, mode: 0o700 })
+  }
+  const allowedRoots = isolatedWorker
+    ? [canonicalPath(args.workdir), canonicalPath(args.engineHome)]
+    : [
+        args.rootDir,
+        workspaceDir(args.rootDir),
+        join(engineHomesDir(args.rootDir)),
+        ...(args.extraAllowedRoots ?? []),
+      ]
+
   return {
     projectId: args.projectId,
     shipId: ship.id,
     engineKind: ship.engineKind,
     hostWorkdir: args.workdir,
     hostEngineHome: args.engineHome,
-    allowedRoots: [
-      args.rootDir,
-      workspaceDir(args.rootDir),
-      join(engineHomesDir(args.rootDir)),
-      ...(args.extraAllowedRoots ?? []),
-    ],
+    allowedRoots,
     mode,
     network,
     ...(args.bridge !== undefined && network === 'restricted' ? { bridge: args.bridge } : {}),

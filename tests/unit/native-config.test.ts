@@ -216,18 +216,31 @@ describe('native execution config', () => {
     expect(chatSpec.mode).toBe('read-only')
 
     const worker = muse()
+    const extraRoot = root()
+    const workerWorkdir = join(dir, '.pluton', 'workspaces', 'task')
     const workerSpec = nativeSpecForMuse({
       config: loaded.config,
       rootDir: dir,
       projectId: 'project_native',
       muse: worker,
-      workdir: join(dir, '.pluton', 'workspaces', 'task'),
+      workdir: workerWorkdir,
       engineHome: worker.engineHome,
       isolatedCheckout: true,
       sessionKind: 'run',
+      extraAllowedRoots: [extraRoot],
       hostEnv: {},
     })
     expect(workerSpec.mode).toBe('workspace-write')
+    // An isolated worker gets only its checkout and its own engine home. The
+    // project root, shared workspaces, the engine-homes parent and session
+    // extra roots are not worker capabilities.
+    expect(workerSpec.allowedRoots).toHaveLength(2)
+    expect(workerSpec.allowedRoots).toContain(workerWorkdir)
+    expect(workerSpec.allowedRoots).toContain(worker.engineHome)
+    expect(workerSpec.allowedRoots).not.toContain(dir)
+    expect(workerSpec.allowedRoots).not.toContain(join(dir, '.pluton', 'workspaces'))
+    expect(workerSpec.allowedRoots).not.toContain(join(dir, '.pluton', 'engine-homes'))
+    expect(workerSpec.allowedRoots).not.toContain(extraRoot)
   })
 
   it('accepts a checkout directory whose name starts with dots but stays inside workspaces', () => {

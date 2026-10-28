@@ -603,8 +603,8 @@ describe('RunSupervisor ownership — loss recorded inside a swallowed callback'
       // A task-scoped ask parks the task in needs_approval while the claim is live.
       const ask = channel.requestPermission({
         requestId: 'req-lost',
-        description: 'edit a protected file',
-        scope: { path: 'src/protected.ts' },
+        description: 'read a sensitive file',
+        scope: { toolKind: 'read', path: '.env' },
       })
       await waitForDurable('the durable pending approval', () =>
         world.store.listApprovals(world.runId).some((a) => a.status === 'pending'),

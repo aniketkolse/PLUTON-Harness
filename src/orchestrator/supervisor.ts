@@ -135,6 +135,9 @@ export interface SupervisorOptions {
   usageLedger?: UsageLedger
   maxRetriesPerTask?: number
   skipManager?: boolean
+  projectRootDir?: string
+  /** `git.protected_paths`: engine requests touching these ask the operator. */
+  protectedPaths?: readonly string[]
 }
 
 export interface RunOutcome {
@@ -436,6 +439,8 @@ export class RunSupervisor {
   readonly usageLedger: UsageLedger
   private readonly maxRetriesPerTask: number
   private readonly skipManager: boolean
+  private readonly projectRootDir?: string
+  private readonly protectedPaths: readonly string[]
   private readonly mutex = new KeyedMutex()
   private bridgeInstance: PlutonToolBridge | null = null
   private timedOut = false
@@ -467,6 +472,7 @@ export class RunSupervisor {
     this.store = opts.store
     this.projectId = opts.projectId
     this.rootDir = opts.rootDir
+    this.projectRootDir = opts.projectRootDir
     this.runId = opts.runId
     this.limits = opts.limits
     this.maxConcurrentWorkers = opts.maxConcurrentWorkers
@@ -489,6 +495,7 @@ export class RunSupervisor {
     this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
     this.maxRetriesPerTask = opts.maxRetriesPerTask ?? 2
     this.skipManager = opts.skipManager ?? false
+    this.protectedPaths = opts.protectedPaths ?? []
     this.ownershipTtlMs = opts.ownershipTtlMs ?? DEFAULT_OWNERSHIP_TTL_MS
     this.ownershipRenewIntervalMs = Math.max(1, Math.floor(this.ownershipTtlMs / 3))
   }
@@ -652,12 +659,21 @@ export class RunSupervisor {
 
   private instructionsFor(ship: ShipRecord): string | undefined {
     if (!ship.instructionsFile) return undefined
-    try {
-      return readFileSync(join(this.rootDir, ship.instructionsFile), 'utf8')
-    } catch {
-      this.diagnostic(`instructions file for ship '${ship.id}' could not be read: ${ship.instructionsFile}`)
-      return undefined
+    const candidatePaths = [
+      join(this.rootDir, ship.instructionsFile),
+      ...(this.projectRootDir && this.projectRootDir !== this.rootDir
+        ? [join(this.projectRootDir, ship.instructionsFile)]
+        : []),
+    ]
+    for (const p of candidatePaths) {
+      if (existsSync(p)) {
+        try {
+          return readFileSync(p, 'utf8')
+        } catch {}
+      }
     }
+    this.diagnostic(`instructions file for ship '${ship.id}' could not be read: ${ship.instructionsFile}`)
+    return undefined
   }
 
   /** Collect one prompt's stream with an honest hard bound. */
@@ -987,7 +1003,7 @@ export class RunSupervisor {
         configDir: ship.engineHome,
         ...(instructions !== undefined ? { instructions } : {}),
         ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
-        approvals: this.approvalChannel(ship.id, task.id),
+        approvals: this.approvalChannel(ship, task.id, workdir),
       })
       this.liveSessions.set(task.id, session)
       try {
@@ -1296,15 +1312,23 @@ export class RunSupervisor {
    * `task.approval_settled` event, so the CS-8 SSE derivation sees the park
    * and its release like any other task transition.
    */
-  private approvalChannel(shipId: string, taskId: string | null): EnginePermissionChannel {
+  private approvalChannel(ship: ShipRecord, taskId: string | null, workdir: string): EnginePermissionChannel {
     return createEngineApprovalChannel({
       store: this.store,
       projectId: this.projectId,
       runId: this.runId,
       taskId,
-      shipId,
+      shipId: ship.id,
       ttlMinutes: this.limits.approvalTtlMinutes,
       now: this.now,
+      permissionPolicy: {
+        approvalMode: ship.approvalMode,
+        workspacePolicy: ship.workspacePolicy,
+        workdir,
+        projectRoot: this.rootDir,
+        isManager: taskId === null,
+        ...(this.protectedPaths.length > 0 ? { protectedPaths: this.protectedPaths } : {}),
+      },
       // Ownership: a stale channel must never mint an approval or flip task
       // state. `createApproval`/`appendEvent` inside the channel throw on a
       // missed fence (the request resolves fail-closed `deny`); the task-state
@@ -1396,7 +1420,7 @@ export class RunSupervisor {
       configDir: ship.engineHome,
       ...(instructions !== undefined ? { instructions } : {}),
       ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
-      approvals: this.approvalChannel(ship.id, null),
+      approvals: this.approvalChannel(ship, null, this.rootDir),
     })
     // CS-9: register the manager session as an interrupt target while its prompt
     // is in flight (a terminal run must stop its manager too).
