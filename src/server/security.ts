@@ -5,7 +5,10 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
-import { isAbsolute, normalize, resolve, sep } from 'node:path'
+import { normalize, resolve, sep } from 'node:path'
+import { protectedWorkspaceSegment } from '../util/path-safety.ts'
+
+export { protectedWorkspaceSegment }
 
 /** Cryptographically random 256-bit token for local server authentication. */
 export function generateServerToken(): string {

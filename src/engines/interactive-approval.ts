@@ -1,4 +1,9 @@
 import type { ApprovalRecord, ApprovalStatus, JsonValue } from '../domain/models.ts'
+import {
+  evaluateEnginePermission,
+  type EnginePermissionContext,
+  type EnginePermissionVerdict,
+} from '../policy/engine-permissions.ts'
 import type { Store, SupervisorFence } from '../store/store.ts'
 import { redactDeep } from '../util/redact.ts'
 import { stripControlChars, stripControlDeep } from '../util/sanitize.ts'
@@ -87,6 +92,14 @@ export interface EngineApprovalChannelOptions {
   /** Called once when the wait settles, with the final record. */
   onSettled?: (approval: ApprovalRecord, settlement: EngineApprovalSettlement) => void
   /**
+   * Shared engine-boundary policy context. When present, `deny` and `allow`
+   * settle immediately with a durable audit event and no operator row; `ask`
+   * keeps the existing durable approval flow and carries the policy reason on
+   * the card. Absent (legacy callers/tests) preserves the ask-for-everything
+   * behavior.
+   */
+  permissionPolicy?: EnginePermissionContext
+  /**
    * Run-ownership proof (supervisor duty path). When present, the channel's
    * `createApproval` and `approval.requested` append are fence-gated: a stale
    * owner's request fails closed to `deny` and never mints a row (the caller's
@@ -105,7 +118,13 @@ export const DEFAULT_ENGINE_APPROVAL_POLL_MS = 1_500
  */
 export const DEFAULT_ENGINE_APPROVAL_MAX_PENDING = 3
 const MAX_REASON_CHARS = 500
-const MAX_SCOPE_CHARS = 2_000
+/**
+ * Hard cap for the complete scope shown to the operator. A scope that does not
+ * fit is refused (audited as a policy denial) instead of being replaced by an
+ * excerpt: approving an incomplete action would be consent to something the
+ * operator never saw.
+ */
+export const ENGINE_APPROVAL_MAX_SCOPE_CHARS = 16_384
 
 const defaultTimers: EngineApprovalTimers = {
   setTimeout: (fn, ms) => {
@@ -172,11 +191,34 @@ function boundedReason(text: string): string {
  * values under unprefixed keys remain operator-visible text. Correlation
  * fields always win over engine-provided ones.
  */
-function boundedScope(requestId: string | null, scope: JsonValue): JsonValue {
+function boundedScope(
+  requestId: string | null,
+  scope: JsonValue,
+  policy: EnginePermissionVerdict | null = null,
+): { value: JsonValue; complete: boolean } {
+  const policyPayload: JsonValue | null =
+    policy === null
+      ? null
+      : {
+          outcome: policy.outcome,
+          risk: policy.risk,
+          reason: boundedReason(policy.reason),
+          signals: policy.signals,
+        }
   const raw: JsonValue =
     scope !== null && typeof scope === 'object' && !Array.isArray(scope)
-      ? { ...(scope as Record<string, JsonValue>), source: 'engine', engineRequestId: requestId }
-      : { detail: scope, source: 'engine', engineRequestId: requestId }
+      ? {
+          ...(scope as Record<string, JsonValue>),
+          source: 'engine',
+          engineRequestId: requestId,
+          ...(policyPayload !== null ? { policy: policyPayload } : {}),
+        }
+      : {
+          detail: scope,
+          source: 'engine',
+          engineRequestId: requestId,
+          ...(policyPayload !== null ? { policy: policyPayload } : {}),
+        }
   let redacted: JsonValue
   try {
     redacted = stripControlDeep(redactDeep(raw))
@@ -189,12 +231,15 @@ function boundedScope(requestId: string | null, scope: JsonValue): JsonValue {
   } catch {
     json = ''
   }
-  if (json.length <= MAX_SCOPE_CHARS) return redacted
+  if (json.length <= ENGINE_APPROVAL_MAX_SCOPE_CHARS) return { value: redacted, complete: true }
   return {
-    source: 'engine',
-    engineRequestId: requestId,
-    truncated: true,
-    excerpt: json.slice(0, MAX_SCOPE_CHARS),
+    value: {
+      source: 'engine',
+      engineRequestId: requestId,
+      truncated: true,
+      excerpt: json.slice(0, ENGINE_APPROVAL_MAX_SCOPE_CHARS),
+    },
+    complete: false,
   }
 }
 
@@ -209,7 +254,65 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
   /** Ids this channel created and has not settled yet (abort scope). */
   const pendingIds = new Set<string>()
 
+  async function auditPolicy(
+    outcome: 'allow' | 'deny',
+    verdict: EnginePermissionVerdict,
+  ): Promise<boolean> {
+    try {
+      store.appendEvent(
+        {
+          projectId: opts.projectId,
+          runId: opts.runId,
+          taskId: opts.taskId,
+          shipId,
+          type: outcome === 'deny' ? 'approval.policy_denied' : 'approval.policy_allowed',
+          payload: {
+            action: ENGINE_PERMISSION_ACTION,
+            outcome,
+            risk: verdict.risk,
+            reason: boundedReason(verdict.reason),
+            signals: verdict.signals,
+            source: 'engine',
+          },
+        },
+        opts.fence,
+      )
+      return true
+    } catch {
+      // No audit record → no authorization. A denied request stays denied; a
+      // would-be allow becomes a deny rather than an unreported grant.
+      return false
+    }
+  }
+
   async function requestPermission(req: EnginePermissionRequest): Promise<EnginePermissionDecision> {
+    const policyVerdict =
+      opts.permissionPolicy !== undefined
+        ? evaluateEnginePermission(
+            { description: req.description, scope: req.scope },
+            opts.permissionPolicy,
+          )
+        : null
+    if (policyVerdict !== null && policyVerdict.outcome !== 'ask') {
+      const audited = await auditPolicy(policyVerdict.outcome, policyVerdict)
+      return policyVerdict.outcome === 'allow' && audited ? 'allow' : 'deny'
+    }
+
+    // An `ask` is only meaningful when the operator can see the complete
+    // action. If the card would have to be truncated, refuse instead of
+    // presenting a partial scope as if it were the whole request.
+    const display = boundedScope(req.requestId, req.scope, policyVerdict)
+    if (!display.complete) {
+      const denial: EnginePermissionVerdict = {
+        outcome: 'deny',
+        risk: 'high',
+        reason: 'engine permission scope is too large to display completely; refusing operator approval',
+        signals: policyVerdict?.signals ?? [],
+      }
+      await auditPolicy('deny', denial)
+      return 'deny'
+    }
+
     if (pendingIds.size >= maxPending) {
       // Too many open questions for this session already: refuse fail-closed
       // instead of minting another actionable record. No record, waiter or
@@ -228,7 +331,7 @@ export function createEngineApprovalChannel(opts: EngineApprovalChannelOptions):
           requestedByShipId: shipId,
           action: ENGINE_PERMISSION_ACTION,
           reason: boundedReason(req.description),
-          scope: boundedScope(req.requestId, req.scope),
+          scope: display.value,
           expiresAt: ttlMinutes > 0 ? new Date(nowFn() + ttlMinutes * 60_000).toISOString() : null,
         },
         opts.fence,

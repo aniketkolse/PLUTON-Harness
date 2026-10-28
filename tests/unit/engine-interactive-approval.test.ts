@@ -9,6 +9,7 @@ import type { LoadedConfig } from '../../src/config/load.ts'
 import type { ApprovalRecord } from '../../src/domain/models.ts'
 import {
   createEngineApprovalChannel,
+  ENGINE_APPROVAL_MAX_SCOPE_CHARS,
   ENGINE_PERMISSION_ACTION,
   pendingApprovalWaiterCount,
   settleApprovalWaiter,
@@ -16,6 +17,7 @@ import {
   type EngineApprovalTimers,
 } from '../../src/engines/interactive-approval.ts'
 import { admitTask } from '../../src/orchestrator/task-graph.ts'
+import type { EnginePermissionContext } from '../../src/policy/engine-permissions.ts'
 import type { Store } from '../../src/store/store.ts'
 
 /**
@@ -414,7 +416,7 @@ describe('interactive engine approval channel', () => {
     store.close()
   })
 
-  it('bounds the reason and redacts/bounds the operator-visible scope', async () => {
+  it('bounds the reason, redacts secrets, and keeps a displayable scope complete', async () => {
     const { store, projectId } = makeProject()
     const { channel, requested } = makeChannel(store, projectId)
 
@@ -431,7 +433,11 @@ describe('interactive engine approval channel', () => {
     const scopeJson = JSON.stringify(record.scope)
     expect(scopeJson).not.toContain('sk-must-not-leak')
     expect(scopeJson).toContain('[redacted]')
-    expect(scopeJson.length).toBeLessThanOrEqual(2_100)
+    // Below the complete-display cap the operator sees the whole action; the
+    // cap itself is enforced by refusing, never by silently excerpting.
+    expect(scopeJson.length).toBeLessThanOrEqual(ENGINE_APPROVAL_MAX_SCOPE_CHARS)
+    expect(record.scope).not.toMatchObject({ truncated: true })
+    expect(scopeJson).toContain('y'.repeat(10_000))
 
     settleApprovalWaiter(record.id, 'denied')
     await expect(promise).resolves.toBe('deny')
@@ -488,6 +494,145 @@ describe('interactive engine approval channel', () => {
     const deniedRecord = requested[1]!
     await decideApproval(ctx, { approvalRef: deniedRecord.id, decision: 'deny' })
     await expect(denied).resolves.toBe('deny')
+    store.close()
+  })
+})
+
+describe('interactive engine approval channel: policy gate', () => {
+  function policy(overrides: Partial<EnginePermissionContext> = {}): EnginePermissionContext {
+    return {
+      approvalMode: 'ask-for-sensitive-actions',
+      workspacePolicy: 'isolated-task-checkout',
+      workdir: '/repo/.pluton/workspaces/task-1',
+      projectRoot: '/repo',
+      ...overrides,
+    }
+  }
+
+  it('denies an autonomous-bounded request without minting an actionable approval', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested, timers } = makeChannel(store, projectId, {
+      permissionPolicy: policy({ approvalMode: 'autonomous-bounded' }),
+    })
+
+    await expect(
+      channel.requestPermission({
+        requestId: 'auto_1',
+        description: 'engine requested permission: edit src/app.ts',
+        scope: { toolKind: 'edit', paths: ['src/app.ts'] },
+      }),
+    ).resolves.toBe('deny')
+
+    expect(requested).toHaveLength(0)
+    expect(store.listApprovalsByProject(projectId)).toHaveLength(0)
+    expect(timers.live()).toEqual({ timeouts: 0, intervals: 0 })
+    const events = store.eventsSince(projectId, 0).filter((e) => e.type === 'approval.policy_denied')
+    expect(events).toHaveLength(1)
+    expect(events[0]!.payload).toMatchObject({ action: ENGINE_PERMISSION_ACTION, outcome: 'deny', source: 'engine' })
+    store.close()
+  })
+
+  it('allows a recognized read-only request without an operator row', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested, timers } = makeChannel(store, projectId, { permissionPolicy: policy() })
+
+    await expect(
+      channel.requestPermission({
+        requestId: 'read_1',
+        description: 'engine requested permission: read src/app.ts',
+        scope: { toolKind: 'read', paths: ['src/app.ts'] },
+      }),
+    ).resolves.toBe('allow')
+
+    expect(requested).toHaveLength(0)
+    expect(store.listApprovalsByProject(projectId)).toHaveLength(0)
+    expect(timers.live()).toEqual({ timeouts: 0, intervals: 0 })
+    const events = store.eventsSince(projectId, 0).filter((e) => e.type === 'approval.policy_allowed')
+    expect(events).toHaveLength(1)
+    store.close()
+  })
+
+  it('denies a destructive command without asking the operator', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested } = makeChannel(store, projectId, { permissionPolicy: policy() })
+
+    await expect(
+      channel.requestPermission({
+        requestId: 'danger_1',
+        description: 'engine requested permission: run a command',
+        scope: { toolKind: 'execute', command: 'git reset --hard' },
+      }),
+    ).resolves.toBe('deny')
+
+    expect(requested).toHaveLength(0)
+    expect(store.listApprovalsByProject(projectId)).toHaveLength(0)
+    store.close()
+  })
+
+  it('keeps the durable ask flow and attaches the policy reason to the card', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested } = makeChannel(store, projectId, { permissionPolicy: policy() })
+
+    const promise = channel.requestPermission({
+      requestId: 'write_1',
+      description: 'engine requested permission: write src/app.ts',
+      scope: { toolKind: 'edit', paths: ['src/app.ts'] },
+    })
+
+    expect(requested).toHaveLength(1)
+    expect(requested[0]!.scope).toMatchObject({
+      source: 'engine',
+      policy: {
+        outcome: 'ask',
+        risk: 'medium',
+      },
+    })
+    settleApprovalWaiter(requested[0]!.id, 'denied')
+    await expect(promise).resolves.toBe('deny')
+    store.close()
+  })
+
+  it('stores the complete command on an ask instead of a truncated card', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested } = makeChannel(store, projectId, { permissionPolicy: policy() })
+    const command = 'npm test -- --runInBand'
+
+    const promise = channel.requestPermission({
+      requestId: 'run_1',
+      description: 'run the test suite',
+      scope: { toolKind: 'execute', command },
+    })
+
+    expect(requested).toHaveLength(1)
+    expect(requested[0]!.scope).toMatchObject({ command })
+    expect(requested[0]!.scope).not.toMatchObject({ truncated: true })
+    settleApprovalWaiter(requested[0]!.id, 'denied')
+    await expect(promise).resolves.toBe('deny')
+    store.close()
+  })
+
+  it('refuses an ask whose complete scope cannot be displayed', async () => {
+    const { store, projectId } = makeProject()
+    const { channel, requested, timers } = makeChannel(store, projectId, { permissionPolicy: policy() })
+
+    await expect(
+      channel.requestPermission({
+        requestId: 'huge_1',
+        description: 'perform an unmapped action',
+        scope: { toolKind: 'custom', payload: 'x'.repeat(ENGINE_APPROVAL_MAX_SCOPE_CHARS + 100) },
+      }),
+    ).resolves.toBe('deny')
+
+    expect(requested).toHaveLength(0)
+    expect(store.listApprovalsByProject(projectId)).toHaveLength(0)
+    expect(timers.live()).toEqual({ timeouts: 0, intervals: 0 })
+    const events = store.eventsSince(projectId, 0).filter((e) => e.type === 'approval.policy_denied')
+    expect(events).toHaveLength(1)
+    expect(events[0]!.payload).toMatchObject({
+      action: ENGINE_PERMISSION_ACTION,
+      outcome: 'deny',
+      reason: expect.stringMatching(/too large to display/),
+    })
     store.close()
   })
 })
