@@ -1,9 +1,9 @@
 # Pluton-Harness security model
 
 Scope: this document describes what Pluton-Harness protects, how, and — with
-equal weight — what it does **not** protect. It is referenced by
-[ADR-0004](adr/0004-sandbox-container-model.md) and reflects the code as
-committed; every claim names the file that implements it.
+equal weight — what it does **not** protect. It reflects the native-only runtime.
+ADR-0004 records the historical container model and is no longer the execution
+contract.
 
 ## 1. Threat model
 
@@ -47,6 +47,33 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   cannot depend on work outside its own subtree, a terminal task cannot
   delegate, and delegation enforces depth, fan-out and ancestor-assignee rules
   (`src/orchestrator/task-graph.ts`).
+- **Engine permission requests are policy-gated before an approval exists.**
+  ACP `session/request_permission` (and equivalent engine asks) pass through
+  `src/policy/engine-permissions.ts` first. The pure policy returns
+  `allow`/`ask`/`deny` from the Ship's approval mode, workspace policy, session
+  workdir, project root and protected paths:
+  - `autonomous-bounded` and unknown modes deny at the engine boundary; they
+    never turn a proven isolated checkout into blanket engine consent.
+  - A manager or non-isolated/read-only session cannot perform a mutating
+    action (edit, write, delete, move, execute, or an explicit command), even
+    with an operator approval.
+  - Paths outside the project root or session workdir, and paths inside `.git`
+    or `.pluton`, are denied. Sensitive files (`.env`, keys, credentials) and
+    configured protected paths require an operator ask.
+  - A read-only auto-allow requires at least one concrete, contained path.
+    An empty/missing path list, an oversized or malformed scope, conflicting
+    destructive/read fields, or an ask too large to display completely is never
+    auto-allowed: it is denied or asked with the full action shown.
+  - Path identity is normalized for the host: case-folded on Windows/macOS,
+    trailing Win32 dots/spaces stripped, 8.3 aliases (`PLUTON~1`) and
+    junction/symlink escapes rejected (`src/util/path-safety.ts`).
+  - Destructive shell shapes (recursive delete, disk format, hard reset, force
+    push, privilege escalation, remote-code pipe, …) are denied; other commands
+    and unrecognized actions ask.
+  `allow`/`deny` outcomes are audited without creating an operator row. Only
+  `ask` creates the durable, scoped approval the operator can decide; the
+  decision is runtime-enforced by the engine channel and cannot override a
+  policy `deny`.
 
 ## 3. Filesystem containment
 
@@ -59,60 +86,90 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
 - Reads go through an open handle with a hard byte cap (512 000 bytes) taken
   from the handle itself, closing the stat/read TOCTOU window; directory
   listings are capped at 200 entries.
-- `.pluton`, `.git` and `node_modules` are refused areas for every read.
+- `.pluton`, `.git` and `node_modules` are refused areas for every read through
+  the tool bridge, and the operator file API refuses to read, overwrite or
+  delete any path containing those segments (`src/server/security.ts`). The
+  canonical path is checked after `realpath`, so a junction or case variant
+  cannot reach a protected area.
 - **Ships never write into the user's tree.** A Ship with an
   isolated-checkout policy works in a `git clone --local` under
   `.pluton/workspaces/` on a `pluton/<run>/<slug>` branch
   (`src/workspace/manager.ts`; ADR-0005). Removal guards refuse to delete
   anything Pluton did not create.
+- **Session roots are not shared between Ships.** An isolated worker's native
+  session is allowed to reach only its own canonical checkout and its own
+  engine home; project-root state, other workspaces, other Ships' credentials
+  and `.pluton` state are outside its policy. Manager/chat sessions retain the
+  broader project/workspace roots by design, and extra operator roots supplied
+  to a worker session are ignored (`src/execution/factory.ts`).
 
 ## 4. Process execution hygiene
 
-- Every external process — git, docker, tmux, engines, verification checks —
-  goes through `src/util/exec.ts`: **argv arrays only, never a shell string**,
+- Every external process — git, tmux, engines, verification checks — goes
+  through `src/util/exec.ts`: **argv arrays only, never a shell string**,
   sanitized environment, hard timeouts, per-stream output caps with truncation
   markers.
 - Git revisions coming from data (workspace base commits) are validated against
   a hex-object-id pattern and passed after `--end-of-options`, so a stored
   value cannot become a git option (`src/tools/handlers.ts`, `diff.inspect`).
-- Verification checks (`src/verify/runner.ts`) additionally refuse a
-  conservative deny list of shells (`sh`, `bash`, `cmd`, `powershell`, …) and
-  destructive tools (`rm`, `mkfs`, `dd`, `chmod`, …) before spawn; the project
-  configuration is the allow list.
+- **Worker `.git` metadata is untrusted.** Evidence capture, status, diff,
+  commit and integration use the trusted Git layer in
+  `src/workspace/trusted-git.ts`: a throwaway `GIT_DIR` with empty
+  config/hooks/attributes, plumbing commands, raw worktree hashing
+  (`hash-object --no-filters`), and explicitly disabled external diff/textconv,
+  clean filters and fsmonitor. `git status`/`git diff`/`git log` are never run
+  against a worker checkout, because those commands execute repository-owned
+  filters and helpers. Merge runs with a temporarily replaced minimal config;
+  merge drivers, hooks and filters remain excluded. Repository content that
+  needs a worker-defined driver is refused rather than executed.
+- Verification checks (`src/verify/runner.ts`) refuse a conservative deny list
+  of shells (`sh`, `bash`, `cmd`, `powershell`, …) and destructive tools before
+  execution; the project configuration is the allow list. Checks do **not** run
+  directly on the host: they run through the dedicated executor in
+  `src/verify/executor.ts` against a disposable snapshot of the checkout with
+  `network: none`. The snapshot excludes `.git` and top-level `.pluton`, the
+  environment is an allowlist (`PATH`, locale, `TERM`, `TZ`) with
+  `HOME`/`TMPDIR` inside the snapshot, and command resolution refuses
+  executables from the workspace `PATH`. On platforms where Landlock and
+  namespaces cannot be proven, the executor reports unavailable and every check
+  fails closed — there is no silent host fallback. The same boundary runs
+  post-integration acceptance checks.
 
 ## 5. Isolation and the sandbox
 
-- **Native execution** (`sandbox.kind: native` — default runtime; see [`docs/NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and [`docs/MIGRATION.md`](MIGRATION.md)).
-  Runs engine processes directly on the host operating system without Docker.
-  Pluton enforces a strict partial-enforcement model: working directories are
-  confined within allowed project and workspace roots, environment variables are
-  filtered against an explicit allowlist, execution sessions can be capped by an
-  optional wall-clock timeout (`session_timeout_minutes`; `0` disables the cap,
-  while run/task deadlines still bound dispatch), and process trees are terminated
-  cleanly on exit.
-  Because native processes run under the host user account and share the host
-  network stack, native mode **fails closed** unless the operator explicitly
-  acknowledges `sandbox.native.acknowledge_partial_enforcement: true`,
-  `sandbox.native.acknowledge_host_network: true`, and configures
-  `runtime.network_policy: open`.
-- **Docker isolation** (`sandbox.kind: docker` — legacy opt-in container provider; ADR-0004).
-  Each Ship runs in a dedicated Linux container. When the Docker daemon or the
-  worker image is unavailable, Pluton **fails closed** with `SandboxUnavailableError`
-  and an exact fix — it never silently degrades to unsandboxed execution.
-  `network_policy` is enforced by the container's network namespace: `open` uses
-  the Docker bridge, `none` uses `--network none`, and `restricted` uses a
-  dedicated `--internal` network with no default route (see §8.5). A restricted
-  container that cannot prove egress denial from inside is refused before the
-  run starts.
-- **Local process development mode** (`sandbox.kind: local-process`).
-  A dev-only backend requiring an explicit `local_process_acknowledged: true`
-  in the project config, refused otherwise. It runs on the host network, so it
-  refuses `restricted`/`none` rather than pretending to enforce them.
+Native execution (`sandbox.kind: native`) is the **only supported substrate**
+(see [`docs/NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md)). Configs that select
+`sandbox.kind: docker` or `sandbox.kind: local-process` fail closed with
+migration guidance (`src/execution/factory.ts`); there is no container or
+unwrapped-process fallback.
+
+- **Linux confined modes** (`read-only`, `workspace-write`) run every engine
+  process through the verified `landlock-run` helper. The helper applies
+  Landlock ABI ≥ 3 path rules and creates user, mount, PID and (when requested)
+  network namespaces. `read-only` permits writes only to the session temporary
+  directory; `workspace-write` additionally permits the task checkout/work
+  directory and engine home. System runtime roots are read/execute only.
+  A missing helper, helper hash/size mismatch, or Landlock ABI < 3 is an error
+  before dispatch.
+- **Network policy is namespace-based.** `open` uses the host network with no
+  filtering. `restricted` creates a private network namespace with loopback
+  only; the session tool bridge is reached through the helper's loopback proxy.
+  `none` has no network at all, including the bridge, and is therefore rejected
+  for orchestrated commands. `restricted`/`none` require unprivileged user and
+  network namespaces; if unavailable, the session is refused.
+- **Unconfined mode** is an explicit escape hatch for hosts without a verified
+  confinement implementation (currently macOS and Windows) or an operator
+  choosing it on Linux. It requires `acknowledge_unconfined: true` and
+  `network_policy: open`. It runs under the host user account with full host
+  filesystem and network access; only the working-directory check, environment
+  filtering, output bounds, timeouts and process-tree kill remain.
+- **Capability honesty.** The enforcement report distinguishes `landlock` from
+  `none` and `netns` from `host`. CPU, memory and PID limits are recorded but
+  not cgroup-enforced. A process that escapes the helper process tree can
+  outlive graceful termination.
 - **tmux is not a security boundary.** tmux sessions exist for visibility and
-  window-targeted interruption only. In native mode, `pluton attach` connects
-  directly to host native `tmux` sessions; in container mode, it connects via
-  `docker exec` into the container's tmux. Detaching (`Ctrl-B d`) does not kill
-  the running engine or task in either mode.
+  window-targeted interruption only. `pluton attach` connects directly to host
+  tmux; detaching (`Ctrl-B d`) does not kill the running engine or task.
 
 ## 6. Secrets
 
@@ -135,6 +192,33 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   run, tasks with failed dependencies stay visibly `queued`, and when
   verification is configured, `completed` is reachable only through the
   evidence gate (`src/verify/runner.ts`).
+- Verification evidence is scoped to the task **attempt** and records an
+  explicit kind (`git`, `non-git`, `capture-failed`), the git revision, dirty
+  state and content fingerprint the checks ran against, the post-check
+  revision/fingerprint, and the executor identity that ran the check. A
+  `capture-failed` row is never downgraded to non-Git, and a legacy row with no
+  recorded kind can never authorize a fresh verdict. A verdict requires
+  complete evidence for the current attempt, rejects checks that mixed
+  revisions, kinds or worktree states, rejects a check that moved HEAD or
+  changed the worktree, and a run cannot close `completed` while a completed
+  task's current-attempt evidence contains a non-passed check or is missing.
+  An interrupted same-attempt verification is superseded by a fresh run
+  (history is retained, the attempt is not bumped); Git-backed tasks require
+  Git evidence, while an explicit non-Git capture is accepted only for a task
+  with no checkout. Integration always requires Git evidence, compares the
+  checkout with the verified post-check fingerprint, and rebinds the commit to
+  that exact fingerprint (a change between verification and commit is refused,
+  not silently committed). Drift is reported as `blockedDrift` and audited as
+  `integration.drift_detected`, and `pluton integrate` /
+  `pluton approvals approve --continue` exit nonzero when a post-integration
+  check fails.
+- **Tamper detection covers the live worktree, not only commits.** The diff
+  handed to independent verification is generated from the base commit to the
+  live worktree (uncommitted and untracked changes included) through trusted
+  plumbing. Conservative rules reject deleted test files, new
+  `skip`/`xit`/`.only`/`fdescribe`, commented-out or removed assertions, and a
+  changed/removed `"test"` script in `package.json`. Rejection makes the task
+  fail with `tamper_detected` before integration.
 - Pending approvals are capped (3 per run) so a model loop cannot grow state
   without bound.
 
@@ -142,13 +226,18 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
 
 Stated plainly so nobody over-reads the guarantees above:
 
-1. **Container-mode live evidence is Windows-Docker-Desktop-only.** A host-mode
-   live run executed 2026-10-16/17, and a full container-mode live run (engines
-   image, per-Ship containers, `docker exec` spawns, real worker edit closed by
-   the verification gate) executed 2026-10-17 — both in
-   `docs/smoke-live-run.md`. That smoke found and fixed one engine-session leak
-   (`ba68557`). Linux-host container behavior (mount ownership, uid alignment)
-   remains unproven — see gap 9 below.
+1. **Linux confinement evidence is host-dependent and not live-verified here.**
+   Confined modes need the verified helper plus Landlock ABI ≥ 3, and
+   `restricted`/`none` need unprivileged user and network namespaces. The helper
+   has its own selftest and the policy matrix is unit/integration-tested, but this
+   Windows checkout cannot execute Linux Landlock or namespace behavior. A
+   Windows run is not evidence for Linux confinement. macOS and Windows have no
+   verified confinement and run engines only `unconfined` (gap 4). Verification
+   and post-integration checks are stricter: because they execute
+   worker-controlled code, they refuse to run on every non-Linux platform and
+   fail closed instead of using an unconfined host fallback. The Linux
+   executor path is code- and test-confirmed but not executed against a live
+   kernel in this environment.
 2. **HTTP transport authentication is a bearer token over loopback.** Any
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never
@@ -159,79 +248,50 @@ Stated plainly so nobody over-reads the guarantees above:
    slash commands) executes and flips overdue pendings to
    `expired` (fail-closed like a denial, `decided_by: pluton:timeout`). No background timer exists:
    a pending approval nobody looks at stays `pending` in the store until the next sweep.
-4. **Container hardening is Docker's defaults plus the configured resource
-   limits.** No custom seccomp/AppArmor profile, no read-only root filesystem
-   guarantee for the worker image beyond what the Dockerfile sets.
-5. **`restricted` network policy is a container-level egress denial, not a label.**
-   The runtime default is configured in `runtime.network_policy` (`restricted` | `none` | `open`);
-   individual Ships may override it via `network_policy` in `ships.<id>`
-   (the legacy `muses.<id>` key is accepted as an alias). The contract is:
-   - `open` — the Docker bridge (or the configured network). Full egress; explicit opt-in.
-   - `none` — `--network none`. No network at all, including no Pluton tool bridge;
-     reserved for hermetic lifecycle/E2E paths.
-   - `restricted` — a dedicated Docker network created with `--internal`
-     (`runtime.internal_network_name`, or `pluton-restricted-<projectId>`). Docker installs
-     no default route and no masquerading rule for it, and drops traffic to other Docker
-     networks, so direct internet, registry and model-provider connections fail at the
-     routing/firewall layer. There is **no fallback to `bridge`**.
+4. **`unconfined` mode has no OS filesystem or network boundary.** It is the
+   only supported mode on macOS and Windows and an explicit opt-out on Linux.
+   The process runs as the host user, can read or write anything that user can,
+   and uses the host network. It requires `acknowledge_unconfined: true` and
+   `network_policy: open`; only working-directory checks, environment filtering,
+   output bounds, timeouts and process-tree kill remain.
+5. **Network policy is namespace- or host-based, not an egress allowlist.**
+   The runtime default is `runtime.network_policy`; a Ship may override it with
+   `network_policy` (the legacy `muses.<id>` key is accepted as an alias).
+   - `open` — the host network stack, unfiltered. This is the only policy valid
+     with `unconfined`.
+   - `restricted` — a private network namespace with loopback only. The session
+     tool bridge is reachable through the helper's loopback proxy; there is no
+     external network or DNS. Requires unprivileged user and network namespaces.
+   - `none` — no network at all, including the bridge. Orchestrated commands
+     (`run`, `chat`, server) reject it because they require the bridge.
 
-   Enforcement is verified at run start, not assumed: Pluton inspects the network and
-   refuses it unless Docker reports `Internal=true`; it inspects the container and requires
-   it to be attached to exactly that network; and it executes a TCP probe inside the
-   container that tries to connect to `1.1.1.1:443`. A successful connection, a probe that
-   cannot run, or an outer timeout **refuses the run**
-   (`SandboxUnavailableError`) before any engine session starts. Reuse validation compares
-   the network set, so a container created under a different policy is recreated rather than
-   adopted. `local-process` and `native` refuse `restricted`/`none` outright.
-
-   Residual exposure and limits (not claimed as isolation beyond this):
-   - The internal network's **gateway is the Docker host**, so the Pluton tool bridge is
-     reachable; a compromised engine can still attempt connections to host services bound
-     to that gateway. `restricted` denies the internet, not the host.
-   - `host.docker.internal` reachability through an internal network is platform-dependent.
-     The gated Docker E2E (`tests/e2e/restricted-network.e2e.test.ts`) verifies egress denial
-     on Linux; Docker Desktop forwards host services through a different gateway than a
-     Linux bridge, and that path is **not verified here**. If the gateway is unreachable,
-     restricted container sessions fail to reach the tool bridge — they do not fall back to
-     `open`.
-   - Because direct egress is denied, an engine that needs to reach its model provider cannot
-     run under `restricted`. Set that Ship's `network_policy: open` explicitly (least
-     privilege is per Ship), or run it in a mode that does not need provider access.
-   - The probe target is a fixed public address (`1.1.1.1:443`). On a host with no internet
-     connectivity the denial is trivially true; that is the safe direction (no egress).
-   - Policy is **per container**. A task delegated to (or a run started for) a Ship
-     configured with `network_policy: open` runs with that Ship's egress; restricted
-     policy is not inherited across delegation.
-   - There is no application-level URL allowlist to bypass: redirects, DNS resolution and
-     child processes all sit above a routing/firewall denial, so they cannot restore
-     connectivity. The runtime probe connects to a literal IP; the gated E2E repeats the
-     attempt after DNS resolution and from a child shell.
-   - Verification is a run-start check. A container modified after the probe (for example,
-     `docker network connect` by a host operator) is outside what this check observes.
+   Landlock does not mediate sockets; network isolation comes from the network
+   namespace. The policy is fixed when the session starts and is not inherited
+   across delegation: a task delegated to a Ship with `network_policy: open`
+   runs with that Ship's egress. There is no application-level URL allowlist.
+   With `open`, a compromised engine can reach any service the host can reach.
 6. **The operator's terminal is trusted.** `pluton attach`-style inspection and
    human commands are not sandboxed against the host.
-7. **Deny lists are conservative blocklists**, not capability systems. They
-   reduce accidental damage; the config allow list is the real control.
-8. **Container-mode runs bind the tool bridge on all interfaces.** When running in
-   container mode (`sandbox.kind: docker`), containers reach the host through the
-   Docker gateway, so the bridge listens on `0.0.0.0` for the run's duration.
-   Per-session 256-bit bearer tokens gate every call, but the port is LAN-reachable
-   while a container-mode run is live — firewall the host if the network is untrusted.
-   `restricted` containers still receive the bridge URL and a token; they reach it only
-   through the internal network's gateway (see gap 5). In contrast, native host mode
-   (`sandbox.kind: native`) binds strictly to loopback (`127.0.0.1`), eliminating this
-   external LAN exposure.
-9. **Bind-mount ownership is untested on Linux hosts (NOT RUN).** The sandbox
-   passes `--user <uid>:<gid>`; on POSIX non-root hosts `resolveContainerUser()`
-   selects the host uid:gid, while Windows uses `10001:10001`. If that identity
-   does not line up with host-owned engine homes and task checkouts (an explicit
-   override, a root host, or a userns-remapped daemon), writes fail. The
-   2026-10-17 container-mode live E2E proved writes on Windows Docker Desktop,
-   whose mounts are broadly writable — which is exactly why the Linux case stays
-   open, not proven. A reproducible native-Linux check and procedure now exist:
-   `tests/e2e/linux-bind-mount.e2e.test.ts` and
-   `docs/LINUX_BIND_MOUNT_VALIDATION.md`. Status remains **NOT RUN** until it
-   executes on a native Linux host; a skipped or Windows run is not evidence.
+7. **Deny lists and engine permission policy are conservative classifiers**,
+   not capability systems. They inspect the bounded scope fields the engine
+   supplies (tool kind, command, recognized paths, description). A malicious
+   engine can omit or misdescribe a field; the policy then asks or denies, but
+   it cannot prove the action's real effect. The OS sandbox/working-directory
+   configuration remains the enforcement boundary, and an approval grants only
+   the bounded action shown to the operator. Likewise, tamper detection is a
+   conservative set of text rules over the verified diff, not a semantic proof
+   that a test still asserts the right thing; it deliberately errs toward
+   failing the task, and a worker that rewrites tests in a novel way outside
+   those shapes may not be caught.
+8. **The native tool bridge binds to loopback.** Every run/chat session exposes
+   its bridge on `127.0.0.1` only; the former container-mode `0.0.0.0` exposure
+   no longer exists. Per-session 256-bit bearer tokens gate every call, but any
+   local process that obtains a token can call the bridge with that identity.
+   The host is trusted (gap 2).
+9. **CPU, memory and PID limits are advisory.** They are recorded on the session
+   and used for planning/diagnostics, but there is no cgroup enforcement. A
+   process that escapes the helper process tree can also outlive graceful
+   termination. Neither is presented as isolation.
 10. **Engine-side output is redacted by key, not by value.** An engine that
     echoes a secret into its own output (e.g. a request header it was handed)
     could persist it in event payloads; redaction removes known secret-keyed
@@ -247,10 +307,13 @@ Stated plainly so nobody over-reads the guarantees above:
     external subresources and responses carry `Referrer-Policy: no-referrer`.
     The residual exposure is a local same-user process/browser-profile reader —
     the host user is trusted, as everywhere else in this document.
-12. **The operator file viewer resolves links before reading.** `/api/files` and
-    `/api/files/content` refuse symlinks/junctions that canonicalize outside the
-    workspace root (same realpath containment as the engine tool bridge), so a
-    malicious repository cannot turn the viewer into an arbitrary-file read.
+12. **The operator file viewer resolves links and protects runtime areas.**
+    `/api/files` and `/api/files/content` refuse symlinks/junctions that
+    canonicalize outside the workspace root, and refuse any read, overwrite or
+    delete under `.git`, `.pluton` or `node_modules` (case-insensitive on
+    Windows and macOS, which use case-insensitive filesystems by default). The
+    same path is checked both lexically and after `realpath`, so a link or case
+    variant cannot bypass the gate (`src/server/security.ts`).
 
 ## 9. Reporting
 
