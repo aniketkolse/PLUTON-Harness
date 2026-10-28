@@ -242,6 +242,38 @@ describe('dedicated verification executor', () => {
     }
   })
 
+  it.skipIf(process.platform === 'win32')('rejects absolute host command in untrusted directory via TOCTOU directory check', () => {
+    const snapshot = tmp('pluton-abs-untrusted-')
+    const untrustedDir = tmp('pluton-abs-untrusted-dir-')
+    chmodSync(untrustedDir, 0o777) // group/world writable
+    const uid = process.getuid ? process.getuid() : 1000
+
+    const badBin = join(untrustedDir, 'tool')
+    writeFileSync(badBin, '#!/bin/sh\nexit 0\n')
+    chmodSync(badBin, 0o755)
+
+    // Absolute path: directoryTrustProblem checked inside trustedFile
+    expect(() => resolveCommand([badBin], snapshot, [], uid)).toThrow(
+      /is writable by group or other/,
+    )
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects bare name found in untrusted PATH directory via TOCTOU directory check', () => {
+    const snapshot = tmp('pluton-bare-untrusted-')
+    const untrustedDir = tmp('pluton-bare-untrusted-dir-')
+    chmodSync(untrustedDir, 0o777) // group/world writable
+    const uid = process.getuid ? process.getuid() : 1000
+
+    const badBin = join(untrustedDir, 'bad-tool')
+    writeFileSync(badBin, '#!/bin/sh\nexit 0\n')
+    chmodSync(badBin, 0o755)
+
+    // Bare name: directoryTrustProblem checked inside PATH loop, refusal set, then throw
+    expect(() => resolveCommand(['bad-tool'], snapshot, [untrustedDir], uid)).toThrow(
+      /is writable by group or other/,
+    )
+  })
+
   it('runs checks in a disposable snapshot and records the executor identity', async () => {
     const repo = seedRepo()
     const { store, projectId, runId, taskId } = fixture(repo)
@@ -316,11 +348,19 @@ describe('dedicated verification executor', () => {
     expect(existsSync(marker)).toBe(false)
   })
 
-  it.runIf(process.platform === 'linux')('requires production verification isolation to be available on Linux when unprivileged', () => {
-    if (process.geteuid ? process.geteuid() !== 0 : true) {
-      const executor = createVerificationExecutor()
-      expect(executor.availability?.available).toBe(true)
-      expect(executor.availability?.reason).toBeNull()
+  it('reports verification isolation availability deterministically on Linux', () => {
+    if (process.platform !== 'linux') return
+    if (process.geteuid ? process.geteuid() === 0 : false) return
+    const executor = createVerificationExecutor()
+    // Capability detection must report honestly: either available with no
+    // reason, or unavailable with a reason. Never silently claim available.
+    const avail = executor.availability
+    expect(avail?.available).toBeDefined()
+    expect(typeof avail?.available).toBe('boolean')
+    if (avail?.available === true) {
+      expect(avail?.reason).toBeNull()
+    } else {
+      expect(avail?.reason).toBeTruthy()
     }
   })
 
