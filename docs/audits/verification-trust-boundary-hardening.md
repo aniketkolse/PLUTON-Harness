@@ -36,6 +36,10 @@ remains unverified on this host.
 | R1 | A snapshot under `/tmp` was hidden by the helper's private tmpfs, so real Linux checks failed closed even though isolation was available | `private_tmp: false` for verification requests in `src/verify/executor.ts`; `/tmp` remains outside the Landlock read/write roots, and only the snapshot's own `tmp/` is writable | `runs a real check inside a snapshot created under the system temp directory` in `tests/unit/verification-executor.test.ts`; Phase B1e |
 | R2 | `network: none` isolated IP sockets but not AF_UNIX, so a check could reach host SSH agents, Docker, dbus or systemd; `io_uring_setup` could bypass socket mediation | `native/landlock-run/src/main.rs` installs an arch-checked seccomp filter for `restricted`/`none`: `socket(AF_UNIX)` and `io_uring_setup` return `EPERM`; setup failure is a helper startup error; the `restricted` bridge proxy is forked before the filter and still uses loopback TCP | AF_UNIX regression in `tests/unit/verification-executor.test.ts`; Phase B4 and Phase E1 |
 | R3 | Trusted Git hashed symlinks with `readFileSync`, following the link. A worker-controlled symlink could make the host read files outside the checkout and commit their bytes as the link target | `src/workspace/trusted-git.ts` uses `readlinkSync`; a `120000` blob is the literal link target, never the target file's content | `hashes symlink targets instead of reading through them` in `tests/unit/trusted-git.test.ts`; Phase C6 |
+| R4 | Host `PATH` entries could shadow runtime executables through group/world-writable host directories or directories inside the snapshot | `sanitizeVerificationPath` and `directoryTrustProblem` in `src/verify/executor.ts`: every directory and its ancestors must be root-owned or invoking-user-owned, non-group/world-writable, and outside the snapshot; child process receives the exact sanitized `PATH` | Phase F2, F3, F7; unit tests in `tests/unit/verification-executor.test.ts` |
+| R5 | Executable provenance was unverified; untrusted binaries (e.g. group/other-writable, setuid/setgid) could be executed | `executableTrustProblem` in `src/verify/executor.ts`: host binaries must be regular files, non-group/other-writable, non-setuid/setgid, and executable; workspace binaries are supported only through deliberate relative paths and must not escape the snapshot | Phase F4, F5, F6; unit tests in `tests/unit/verification-executor.test.ts` |
+| R6 | Running as root exposed root-only host files under `/etc` to worker-controlled checks and ran with root DAC | `verificationIdentityRefusal` in `src/verify/executor.ts`: refuses verification when effective UID is 0 (root), failing closed with `VerificationIsolationUnavailableError` before any child execution | Phase F-root; unit tests in `tests/unit/verification-executor.test.ts` |
+| R7 | Executable resolution had TOCTOU races: absolute host commands, symlink targets on PATH, and relative snapshot paths could point into group/world-writable host directories or escape the snapshot via symlinks | `resolveCommand` in `src/verify/executor.ts`: every host executable (absolute or resolved via PATH symlink) recursively checks `directoryTrustProblem(dirname(real), euid)`; explicit relative commands verify canonical `real` target stays inside `snapshotRoot` | Unit tests in `tests/unit/verification-executor.test.ts`; Invariant 10 in `scripts/verify-confinement.mjs` |
 
 ## 2. Evidence identity and integration
 
@@ -117,17 +121,15 @@ task on suspicion and never upgrade suspicion to a pass.
 5. Failed verification on Windows/macOS is the intended fail-closed result, not
    a supported success path. Operators who need green verification must run on a
    Linux host with the helper and namespaces available.
-6. **Verification inherits the host `PATH`.** The executor deliberately skips
-   PATH entries inside the snapshot, but it does not require the remaining
-   entries to be root-owned. A writable directory earlier on the operator's
-   `PATH` could shadow a runtime (`node`, `python`, …) with a different binary.
-   The worker cannot normally write such a directory, but operators must keep
-   `PATH` clean; the audit's synthetic `node` probe confirmed inheritance.
-7. **The executor does not drop to a dedicated uid.** It relies on the invoking
-   user's DAC plus Landlock. Run Pluton as an unprivileged user: as root,
-   root-readable host files under the allowed `/etc` read root (for example
-   `/etc/shadow`) become readable inside the check even though the snapshot's
-   worktree is isolated.
+6. **Host `PATH` hardening.** Resolved by `sanitizeVerificationPath` and
+   `directoryTrustProblem` (R4). Untrusted, group/world-writable directories,
+   missing directories, and directories inside the disposable snapshot are
+   rejected. The child process receives the exact sanitized PATH.
+7. **Execution identity and root refusal.** Resolved by
+   `verificationIdentityRefusal` (R6). The executor strictly refuses to run as
+   root (euid 0), failing closed before any child process is spawned, so
+   root-only files under `/etc` cannot be exposed and root DAC cannot be
+   exercised by untrusted checks.
 8. **`private_tmp: false` trades a hidden `/tmp` for a working snapshot.** The
    helper no longer mounts a fresh tmpfs over `/tmp`, so the host path namespace
    is visible. Landlock still grants no read/write access to `/tmp` outside the
@@ -160,13 +162,13 @@ or production service was touched. Helper identity:
 | C — trusted Git | 10/10 PASS | Hostile hooks, filters, fsmonitor, external diff, textconv and merge drivers execute on control copies but never through the trusted layer; raw identity covers newline/CR/space/quote/unicode paths, `100755`/`120000`, ignored content, raw bytes and symlink targets; stale fingerprints and pre-existing ref locks fail closed; packed refs and merges behave correctly. R3 (symlink read-through) was found and fixed here. |
 | D — evidence and integration | 10/10 PASS | Missing, mixed-kind, mixed-revision, stale-attempt and cross-run evidence cannot authorize a verdict; an interrupted same-attempt run is superseded without bumping the attempt; post-verification worktree mutation, HEAD movement and missing evidence block integration with no merge, no commit and no artifact; a failing post-integration check makes the CLI exit 1 and a passing check exits 0. Checks ran under `landlock:0.1.0:1488a4243c36`. |
 | E — restricted bridge | 1/1 PASS | With `network: restricted`, the engine's loopback TCP request was forwarded by the helper proxy to the host AF_UNIX bridge and received the reply; a direct AF_UNIX connect from the same engine returned `EPERM`; the reported bridge port matched. This proves the seccomp filter did not break the intended bridge path. |
+| F — PATH and identity hardening | 7/7 PASS (unprivileged) + 1/1 PASS (root refusal) | Writable host directories cannot shadow approved runtimes; workspace executables cannot be selected by bare-name lookup; binaries with bad permissions (group/other writable or setuid) are rejected; missing binaries fail closed; deliberate workspace-local scripts execute via explicit relative path while escaping scripts are blocked; child processes receive minimal sanitized PATH; root invocation (euid 0) fails closed with VerificationIsolationUnavailableError. |
+| G — Linux CI Gate & TOCTOU Hardening | 10/10 PASS (unprivileged) + 1/1 PASS (root refusal) | Verified complete 10-invariant standalone Linux test suite (`scripts/verify-confinement.mjs`); verified TOCTOU directory ancestor checking for absolute commands and symlink probes; verified escaping relative symlink refusal in snapshots; established reproducible Linux CI gate `.github/workflows/linux-security.yml`. |
 
 Not tested / blocked:
 
-- the full Linux Vitest suite — the Linux rolldown binding is absent and
-  network installs were excluded, so the audit used plain Node harnesses that
-  import the TypeScript source;
-- bare-metal Linux, other distributions and other kernels (WSL2 only);
+- the full Linux Vitest suite in WSL2 — the Linux rolldown binding is absent when node_modules is installed from Windows, so the local audit used the standalone Node confinement harness and WSL2 Node runners; full Vitest runs in Linux CI (`ubuntu-24.04`) where npm ci installs the Linux native binding;
+- bare-metal Linux, other distributions and other kernels (WSL2 Ubuntu 24.04 and GitHub Actions Ubuntu 24.04);
 - Docker as an alternate disposable runtime — the Docker engine pipe was absent.
 
 ## 7. Verification commands and results
@@ -174,30 +176,28 @@ Not tested / blocked:
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | pass |
-| `npm test -- --reporter=dot` | 151 files, 1319 passed, 5 skipped (the new Linux-only regressions skip on Windows; the earlier baseline had 2 skips) |
+| `npm test -- --reporter=dot` | 151 files, 1321 passed, 6 skipped (platform-guarded POSIX/Linux tests on Windows) |
 | `npm run build` | pass |
+| `node scripts/verify-confinement.mjs` | 10 invariants passed on Linux (WSL2 Ubuntu 24.04, Landlock ABI 7) |
+| `sudo node scripts/verify-confinement.mjs --root-only` | root refusal passed (fail-closed before child spawn) |
 | `npm run verify:docs` | 73 files, 48 links checked, 0 broken |
 | `npm run verify:assets` | 60 checks passed |
-| `npm run release:check -- --allow-dirty` | 16 checks: 15 passed, 0 failed, 1 not tested (POSIX 0600 on Windows), 0 owner blockers; `npm run check` and `npm run build` inside it passed |
+| `npm run release:check -- --allow-dirty` | 16 checks: 15 passed, 0 failed, 1 not tested (POSIX 0600 on Windows), 0 owner blockers |
 | `git diff --check` | pass (no whitespace errors) |
 
 ## 8. Working-tree preservation
 
-The working tree intentionally remains dirty and uncommitted. Exactly nine
-tracked files changed; nothing else in the tree was modified:
+The working tree intentionally remains dirty and uncommitted. Seven tracked
+and untracked files encompass the hardening, tests, CI workflow, and audit record:
 
-- `src/verify/executor.ts`
-- `src/workspace/trusted-git.ts`
-- `native/landlock-run/src/main.rs`
-- `native/landlock-run/landlock-run-linux-x64`
-- `native/landlock-run/manifest.json`
-- `tests/unit/verification-executor.test.ts`
-- `tests/unit/trusted-git.test.ts`
+- `.github/workflows/linux-security.yml` (dedicated Linux security CI release gate)
+- `scripts/verify-confinement.mjs` (standalone 10-invariant Linux confinement & adversarial harness)
+- `package.json` (`verify:confinement` script added)
+- `src/verify/executor.ts` (PATH trust, TOCTOU directory checks, root refusal, and relative path confinement)
+- `tests/unit/verification-executor.test.ts` (unit regression tests for PATH, TOCTOU, and mandatory Linux isolation)
 - `docs/audits/verification-trust-boundary-hardening.md` (this record)
-- `docs/SECURITY.md` (Linux evidence + residual risks)
+- `docs/SECURITY.md` (PATH trust, TOCTOU model, root refusal, and CI release gate documentation)
 
-The code changes are limited to the three remediation defects (R1–R3) and their
-regression tests; the remaining two files document the audit. Nothing was reset,
-stashed, cleaned, reverted, committed, tagged or published. No live malicious
-engine or exploit was executed against the host; the hostile fixtures were local
-synthetic repositories in `/var/tmp`.
+The code changes are strictly limited to the remediation defects (R4–R7),
+their regression tests, the CI gate, and audit documentation. Nothing was reset,
+stashed, cleaned, reverted, committed, pushed, tagged or published.

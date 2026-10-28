@@ -31,6 +31,7 @@
     "test:live": "vitest run --config vitest.live.config.ts",
     "check": "npm run typecheck && npm run test",
     "verify:assets": "node scripts/verify-assets.mjs",
+    "verify:confinement": "node scripts/verify-confinement.mjs",
     "verify:docs": "node scripts/verify-docs.mjs",
     "release:check": "node scripts/release-check.mjs",
     "smoke:package": "node scripts/smoke-package.mjs"

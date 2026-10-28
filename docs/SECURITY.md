@@ -324,24 +324,68 @@ Stated plainly so nobody over-reads the guarantees above:
     Windows and macOS, which use case-insensitive filesystems by default). The
     same path is checked both lexically and after `realpath`, so a link or case
     variant cannot bypass the gate (`src/server/security.ts`).
-13. **Verification inherits the host `PATH`.** The executor skips PATH entries
-    inside the snapshot and resolves the command from the remaining host PATH,
-    adding the resolved command's directory to the exec roots. A writable
-    directory earlier on the operator's `PATH` could shadow a runtime with a
-    different binary. The worker cannot normally write such a directory, but
-    operators must keep `PATH` clean.
-14. **The executor does not drop to a dedicated uid.** It relies on the invoking
-    user's DAC plus Landlock. Run Pluton as an unprivileged user: as root,
-    root-readable host files under the allowed `/etc` read root (for example
-    `/etc/shadow`) are readable inside the check even though the worktree is
-    isolated.
+13. **Verification enforces a trusted `PATH`, executable provenance, and TOCTOU safety.**
+    The executor canonicalizes every host PATH entry and verifies that each ancestor
+    directory is owned by root or the invoking user and not writable by group or
+    other (closing `/tmp`, sticky, or world-writable directory injection). Any
+    directory inside the disposable snapshot is rejected. Resolved host binaries
+    (whether found via PATH or specified as absolute paths) must be regular files,
+    not group/other-writable, not setuid/setgid, and executable, and every ancestor
+    directory of the canonical binary must satisfy the non-group/world-writable and
+    ownership policy (`directoryTrustProblem`). Snapshot binaries are supported
+    exclusively via deliberate relative paths, must remain strictly inside the
+    disposable snapshot (escaping symlinks are rejected), and must not be
+    world-writable. The child process receives the exact sanitized minimal `PATH`.
+    TOCTOU limitation: the directory tree is validated against modification by
+    other users; modification by the invoking user or root between check and spawn
+    remains within the host user's existing privileges.
+14. **Verification strictly refuses execution as root.** If Pluton or the
+    verification command is invoked with effective UID 0 (root), the executor
+    reports unavailable and every check fails closed (`VerificationIsolationUnavailableError`).
+    Running as root would expose root-only system files (such as `/etc/shadow`)
+    under the allowed system read roots (`/etc`, `/usr`, …) to untrusted
+    worker code; verification must run as an unprivileged operator user.
 15. **The seccomp filter is a narrow denylist, not a syscall allowlist.** It
     denies AF_UNIX and `io_uring_setup` for `restricted`/`none`; other IPC or
     kernel interfaces are not enumerated, and `open` sessions are intentionally
     unfiltered. The `restricted` bridge proxy runs outside the filter by design
     and is trusted helper code.
 
-## 9. Reporting
+## 9. Linux CI Security Release Gate
+
+The repository enforces verification confinement guarantees on every push and pull
+request via a dedicated Linux CI workflow (`.github/workflows/linux-security.yml`).
+
+The gate runs on a standard Ubuntu 24.04 runner with kernel Landlock ABI >= 3,
+unprivileged user namespaces, and seccomp enabled:
+
+1. **Helper Identity & Integrity:** Validates that the committed native helper
+   `native/landlock-run/landlock-run-linux-x64` matches the SHA-256 and size
+   recorded in `native/landlock-run/manifest.json`, probes the binary for Landlock
+   and namespace capabilities, and executes `native/landlock-run/selftest.sh`.
+2. **Mandatory Security Tests (No Silent Fallback):** The Linux test runner fails
+   if production Landlock isolation is unavailable. Mandatory tests cannot fall
+   back to unconfined execution or mocks.
+3. **Live Confinement Harness (`scripts/verify-confinement.mjs`):**
+   Executes 10 required security invariants against the live Linux kernel boundary:
+   - Invariant 1: Filesystem read/write confinement (Landlock enforces boundaries).
+   - Invariant 2: Snapshot and symlink containment (escaping links refused).
+   - Invariant 3: Environment allowlisting (secrets stripped, HOME/TMPDIR isolated).
+   - Invariant 4: Network and AF_UNIX restrictions (loopback denied, seccomp blocks AF_UNIX).
+   - Invariant 5: Process timeout and descendant termination (tree killed on timeout).
+   - Invariant 6: Hostile Git hooks and filters neutralized (trusted-git snapshot).
+   - Invariant 7: Evidence binding and fail-closed verdicts (no evidence, no green).
+   - Invariant 8: Verification fingerprint mismatch blocks integration.
+   - Invariant 9: Root invocation unconditionally refused (tested via sudo).
+   - Invariant 10: PATH sanitization, executable provenance, and TOCTOU prevention.
+4. **Full Suite & Release Gate:** Runs TypeScript typecheck, production build, full
+   Vitest suite, documentation link verification (`npm run verify:docs`), embedded asset
+   verification (`npm run verify:assets`), and the release check (`npm run release:check`).
+5. **Artifacts & Audit Trail:** Publishes runtime metadata (distribution, kernel,
+   architecture, Node version, Landlock ABI, helper version/hash) and invariant logs
+   as CI artifacts.
+
+## 10. Reporting
 
 This is a local-first, single-operator tool with no telemetry. Security
 relevant findings against the implementation should be filed as issues with a

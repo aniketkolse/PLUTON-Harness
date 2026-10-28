@@ -1,0 +1,132 @@
+name: Linux Security Release Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-gate:
+    name: Linux Verification Trust Boundary & Confinement Gate
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create artifact directory
+        run: mkdir -p .pluton-ci
+
+      - name: Record system and runtime environment
+        run: |
+          {
+            echo "=== System Environment ==="
+            echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')"
+            echo "Kernel: $(uname -srm)"
+            echo "Architecture: $(uname -m)"
+            echo "Node.js: $(node --version)"
+            echo "npm: $(npm --version)"
+            echo "Invoking User: $(id)"
+          } | tee .pluton-ci/system-environment.txt
+
+      - name: Validate native helper identity & probe
+        run: |
+          chmod 0755 native/landlock-run/landlock-run-linux-x64
+          HELPER_SHA=$(sha256sum native/landlock-run/landlock-run-linux-x64 | cut -d' ' -f1)
+          EXPECTED_SHA=$(node -e "import('./src/execution/capabilities.ts').then(m => { const man = m.readHelperManifest(); console.log(man?.targets?.['linux-x64']?.sha256 ?? ''); })")
+          EXPECTED_VER=$(node -e "import('./src/execution/capabilities.ts').then(m => { const man = m.readHelperManifest(); console.log(man?.version ?? ''); })")
+          
+          echo "=== Native Helper Identity ===" | tee .pluton-ci/helper-identity.txt
+          echo "Helper File: native/landlock-run/landlock-run-linux-x64" | tee -a .pluton-ci/helper-identity.txt
+          echo "Helper Version: $EXPECTED_VER" | tee -a .pluton-ci/helper-identity.txt
+          echo "Actual SHA256:   $HELPER_SHA" | tee -a .pluton-ci/helper-identity.txt
+          echo "Expected SHA256: $EXPECTED_SHA" | tee -a .pluton-ci/helper-identity.txt
+
+          if [ "$HELPER_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Native helper hash mismatch! Actual: $HELPER_SHA, Expected: $EXPECTED_SHA"
+            exit 1
+          fi
+
+          echo "=== Helper Probe ===" | tee -a .pluton-ci/helper-identity.txt
+          PROBE_OUTPUT=$(./native/landlock-run/landlock-run-linux-x64 --probe)
+          echo "$PROBE_OUTPUT" | tee -a .pluton-ci/helper-identity.txt
+          
+          LANDLOCK_ABI=$(echo "$PROBE_OUTPUT" | node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => { const p = JSON.parse(d); if (typeof p.landlockAbi !== 'number') process.exit(1); console.log(p.landlockAbi); });")
+          echo "Kernel Landlock ABI: $LANDLOCK_ABI" | tee -a .pluton-ci/helper-identity.txt
+
+      - name: Run native helper selftest
+        run: |
+          cd native/landlock-run
+          ./selftest.sh | tee ../../.pluton-ci/helper-selftest.log
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Production build
+        run: npm run build
+
+      - name: Full test suite (Vitest)
+        run: npm test -- --reporter=default | tee .pluton-ci/vitest.log
+
+      - name: Live Linux Confinement & Adversarial Harness (Unprivileged)
+        run: node scripts/verify-confinement.mjs | tee .pluton-ci/confinement-unprivileged.log
+
+      - name: Live Linux Confinement Harness (Root Refusal Gate)
+        run: sudo node scripts/verify-confinement.mjs --root-only | tee .pluton-ci/confinement-root.log
+
+      - name: Documentation link integrity
+        run: npm run verify:docs
+
+      - name: Embedded asset integrity
+        run: npm run verify:assets
+
+      - name: Release gate validation
+        run: npm run release:check
+
+      - name: Generate summary report
+        if: always()
+        run: |
+          {
+            echo "## Linux Security Release Gate Report"
+            echo ""
+            echo "### System & Helper Environment"
+            echo '```'
+            cat .pluton-ci/system-environment.txt 2>/dev/null || true
+            cat .pluton-ci/helper-identity.txt 2>/dev/null || true
+            echo '```'
+            echo ""
+            echo "### Confinement Invariants (Unprivileged)"
+            echo '```'
+            cat .pluton-ci/confinement-unprivileged.log 2>/dev/null || true
+            echo '```'
+            echo ""
+            echo "### Confinement Invariants (Root Refusal)"
+            echo '```'
+            cat .pluton-ci/confinement-root.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload security gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-security-gate-report
+          path: .pluton-ci/
+          retention-days: 14

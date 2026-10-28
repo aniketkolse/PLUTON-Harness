@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +12,10 @@ import {
   buildVerificationEnvironment,
   createVerificationExecutor,
   createVerificationSnapshot,
+  executableTrustProblem,
+  resolveCommand,
+  sanitizeVerificationPath,
+  verificationIdentityRefusal,
   VerificationIsolationUnavailableError,
   type VerificationExecutionRequest,
 } from '../../src/verify/executor.ts'
@@ -169,6 +173,75 @@ describe('dedicated verification executor', () => {
     expect(env['PLUTON_STATE_DIR']).toBeUndefined()
   })
 
+  it('refuses root execution identity policy', () => {
+    expect(verificationIdentityRefusal(0)).toMatch(/refuses to run as root/i)
+    expect(verificationIdentityRefusal(1000)).toBeNull()
+    expect(verificationIdentityRefusal(null)).toBeNull()
+  })
+
+  it('sanitizes host PATH and drops entries inside the snapshot or non-absolute entries', () => {
+    const snapshot = tmp('pluton-verify-path-snap-')
+    const valid = tmp('pluton-verify-path-valid-')
+    const inside = join(snapshot, 'bin')
+    writeFileSync(inside, 'fake') // not a directory
+
+    const result = sanitizeVerificationPath(
+      `relative/bin:/does/not/exist:${inside}:${valid}`,
+      snapshot,
+      process.getuid ? process.getuid() : 1000,
+    )
+    expect(result.directories).not.toContain('relative/bin')
+    expect(result.directories).not.toContain('/does/not/exist')
+    expect(result.directories).not.toContain(inside)
+    expect(result.rejected.some((r) => r.reason.includes('not an absolute path'))).toBe(true)
+    expect(result.rejected.some((r) => r.reason.includes('does not exist'))).toBe(true)
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects world/group-writable directories and untrusted executables on POSIX', () => {
+    const snapshot = tmp('pluton-posix-snap-')
+    const untrustedDir = tmp('pluton-posix-writable-')
+    const uid = process.getuid ? process.getuid() : 1000
+    // Make directory group/world writable
+    chmodSync(untrustedDir, 0o777)
+    const pathResult = sanitizeVerificationPath(untrustedDir, snapshot, uid)
+    expect(pathResult.directories).not.toContain(untrustedDir)
+    expect(pathResult.rejected.some((r) => r.reason.includes('writable by group or other'))).toBe(true)
+
+    const testFile = join(tmp('pluton-posix-file-'), 'binary')
+    writeFileSync(testFile, '#!/bin/sh\nexit 0\n')
+    chmodSync(testFile, 0o777)
+    expect(executableTrustProblem(testFile, uid, 'host')).toMatch(/writable by group or other/)
+
+    // Non-executable
+    chmodSync(testFile, 0o644)
+    expect(executableTrustProblem(testFile, uid, 'host')).toMatch(/not executable/)
+
+    // TOCTOU: Absolute path in untrusted directory is rejected
+    const badAbsolute = join(untrustedDir, 'tool')
+    writeFileSync(badAbsolute, '#!/bin/sh\nexit 0\n')
+    chmodSync(badAbsolute, 0o755)
+    expect(() => resolveCommand([badAbsolute], snapshot, [], uid)).toThrow(/directory is writable by group or other/)
+
+    // TOCTOU: Symlink on PATH pointing into untrusted directory is rejected
+    const trustedDir = tmp('pluton-posix-trusted-')
+    chmodSync(trustedDir, 0o755)
+    const symlinkProbe = join(trustedDir, 'symtool')
+    symlinkSync(badAbsolute, symlinkProbe)
+    expect(() => resolveCommand(['symtool'], snapshot, [trustedDir], uid)).toThrow(/directory is writable by group or other/)
+  })
+
+  it('refuses relative commands that escape the snapshot via symlink or parent traversal', () => {
+    const snapshot = tmp('pluton-escape-snap-')
+    const uid = process.getuid ? process.getuid() : 1000
+    expect(() => resolveCommand(['../outside.sh'], snapshot, [], uid)).toThrow(/must stay inside the disposable snapshot/)
+
+    if (process.platform !== 'win32') {
+      const escapingSymlink = join(snapshot, 'escape-link.sh')
+      symlinkSync('/bin/sh', escapingSymlink)
+      expect(() => resolveCommand(['./escape-link.sh'], snapshot, [], uid)).toThrow(/must stay inside the disposable snapshot/)
+    }
+  })
+
   it('runs checks in a disposable snapshot and records the executor identity', async () => {
     const repo = seedRepo()
     const { store, projectId, runId, taskId } = fixture(repo)
@@ -241,6 +314,14 @@ describe('dedicated verification executor', () => {
     expect(report.results[0]?.status).toBe('failed')
     expect(report.results[0]?.note).toMatch(/isolation/i)
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it.runIf(process.platform === 'linux')('requires production verification isolation to be available on Linux when unprivileged', () => {
+    if (process.geteuid ? process.geteuid() !== 0 : true) {
+      const executor = createVerificationExecutor()
+      expect(executor.availability?.available).toBe(true)
+      expect(executor.availability?.reason).toBeNull()
+    }
   })
 
   it.runIf(

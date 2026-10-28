@@ -57,6 +57,8 @@ const MAX_SNAPSHOT_DEPTH = 64
 const MAX_COMMAND_ARGS = 256
 const MAX_ARG_CHARS = 32_768
 const MAX_ENV_VALUE_CHARS = 32_768
+const MAX_PATH_CHARS = 16 * 1024
+const MAX_PATH_ENTRIES = 64
 const SYSTEM_READ_ROOTS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/opt']
 const ENV_ALLOWLIST = ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'TZ', 'TERM'] as const
 
@@ -125,6 +127,164 @@ function existingDirs(paths: readonly string[]): string[] {
     }
   }
   return found
+}
+
+function currentEuid(): number | null {
+  return typeof process.geteuid === 'function' ? process.geteuid() : null
+}
+
+/**
+ * Execution-identity policy for verification.
+ *
+ * Checks execute worker-controlled project code. As root, Landlock still
+ * confines writes, but the explicit system read roots (`/etc`, `/usr`, …) are
+ * root-readable, so a check could read root-only host files such as
+ * `/etc/shadow`, and a compromised check would run with root's DAC. There is
+ * no uid drop here: dropping would require chowning every snapshot and the
+ * helper startup path, and a half-implemented transition is worse than none.
+ * Root verification is therefore refused, not silently downgraded.
+ */
+export function verificationIdentityRefusal(euid: number | null): string | null {
+  if (euid === 0) {
+    return 'verification refuses to run as root: checks execute untrusted project code and root would expose root-only host files under the system read roots; run Pluton as an unprivileged user'
+  }
+  return null
+}
+
+export interface RejectedPathEntry {
+  entry: string
+  reason: string
+}
+
+export interface TrustedVerificationPath {
+  /** Minimal PATH handed to the check: only accepted runtime directories. */
+  path: string
+  /** Canonical accepted directories, in PATH order. */
+  directories: string[]
+  /** Entries dropped from the host PATH, with the reason (diagnostics only). */
+  rejected: RejectedPathEntry[]
+}
+
+/**
+ * Every component of a runtime directory must be root-owned or owned by the
+ * invoking user and must not be group/other-writable. This rejects `/tmp`
+ * style sticky world-writable roots, other users' home directories and any
+ * directory another local principal could write between resolution and exec.
+ */
+function directoryTrustProblem(directory: string, euid: number): string | null {
+  if (process.platform === 'win32') return null
+  let current = directory
+  for (;;) {
+    let info: ReturnType<typeof statSync>
+    try {
+      info = statSync(current)
+    } catch {
+      return `is no longer readable: ${current}`
+    }
+    if (!info.isDirectory()) return `is not a directory: ${current}`
+    if ((info.mode & 0o022) !== 0) return `is writable by group or other: ${current}`
+    if (info.uid !== 0 && info.uid !== euid) {
+      return `is owned by uid ${String(info.uid)}, not root or the invoking uid: ${current}`
+    }
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
+/**
+ * Build the executable search path for a verification check.
+ *
+ * The host PATH is input, not authority: each absolute entry is canonicalized
+ * and every ancestor must pass the ownership/writability policy. Entries
+ * inside the disposable snapshot are never accepted, so a workspace cannot
+ * supply the runtime that executes it. The result is also the exact PATH the
+ * check and its children receive, which keeps resolution and execution
+ * consistent.
+ */
+export function sanitizeVerificationPath(
+  hostPath: string | undefined,
+  snapshotRoot: string,
+  euid: number,
+): TrustedVerificationPath {
+  const snapshot = realOrNull(snapshotRoot) ?? snapshotRoot
+  const rejected: RejectedPathEntry[] = []
+  const directories: string[] = []
+  const seen = new Set<string>()
+  const entries = (hostPath === undefined || hostPath === '' ? DEFAULT_PATH : hostPath).split(':')
+  let inspected = 0
+  for (const entry of entries) {
+    if (entry === '') continue
+    inspected += 1
+    if (inspected > MAX_PATH_ENTRIES) {
+      rejected.push({ entry, reason: `PATH has more than ${String(MAX_PATH_ENTRIES)} entries` })
+      break
+    }
+    if (entry.length > MAX_PATH_CHARS) {
+      rejected.push({ entry: entry.slice(0, 120), reason: 'PATH entry is too long' })
+      continue
+    }
+    if (!isAbsolute(entry)) {
+      rejected.push({ entry, reason: 'is not an absolute path' })
+      continue
+    }
+    const real = realOrNull(entry)
+    if (real === null) {
+      rejected.push({ entry, reason: 'does not exist' })
+      continue
+    }
+    if (isInside(snapshot, real)) {
+      rejected.push({ entry, reason: 'is inside the disposable snapshot' })
+      continue
+    }
+    const problem = directoryTrustProblem(real, euid)
+    if (problem !== null) {
+      rejected.push({ entry, reason: problem })
+      continue
+    }
+    if (seen.has(real)) continue
+    seen.add(real)
+    directories.push(real)
+  }
+  return { path: directories.join(':'), directories, rejected }
+}
+
+/**
+ * Provenance checks for the executable itself. Host binaries must be regular
+ * files owned by root or the invoking uid, must not be group/other-writable,
+ * and must not be setuid/setgid (the helper sets `no_new_privs`, but an
+ * unexpected mode is still a refusal, not something to rely on). Snapshot
+ * binaries are worker-owned by design; only world-writable files are refused,
+ * because another local principal could otherwise swap the content after the
+ * snapshot was copied.
+ */
+export function executableTrustProblem(
+  path: string,
+  euid: number,
+  location: 'host' | 'snapshot',
+): string | null {
+  let info: ReturnType<typeof statSync>
+  try {
+    info = statSync(path)
+  } catch {
+    return 'does not exist'
+  }
+  if (!info.isFile()) return 'is not a regular file'
+  if (location === 'host') {
+    if ((info.mode & 0o022) !== 0) return 'is writable by group or other'
+    if (info.uid !== 0 && info.uid !== euid) {
+      return `is owned by uid ${String(info.uid)}, not root or the invoking uid`
+    }
+    if ((info.mode & 0o6000) !== 0) return 'is setuid or setgid'
+  } else if ((info.mode & 0o002) !== 0) {
+    return 'is writable by other users'
+  }
+  try {
+    accessSync(path, fsConstants.X_OK)
+  } catch {
+    return 'is not executable'
+  }
+  return null
 }
 
 /**
@@ -224,38 +384,74 @@ export function createVerificationSnapshot(workspaceRoot: string): string {
   }
 }
 
-function resolveCommand(command: string[], snapshotRoot: string, pathValue: string): string {
+export function resolveCommand(
+  command: string[],
+  snapshotRoot: string,
+  trustedDirectories: readonly string[],
+  euid: number,
+): string {
   const first = command[0]
   if (first === undefined || first === '') throw new ValidationError('verification command is empty')
-  let candidate: string
-  if (isAbsolute(first)) {
-    candidate = first
-  } else if (first.includes('/') || first.includes('\\')) {
-    candidate = resolve(snapshotRoot, first)
-  } else {
-    candidate = ''
-    for (const entry of pathValue.split(':')) {
-      if (entry === '' || !isAbsolute(entry)) continue
-      // A PATH entry inside the workspace would let the worker choose the
-      // executable that runs on the host. Skip it; the command must come from
-      // an operator-controlled runtime location.
-      const realEntry = realOrNull(entry)
-      if (realEntry === null) continue
-      if (isInside(snapshotRoot, realEntry)) continue
-      const probe = join(entry, first)
-      if (existsSync(probe)) {
-        candidate = probe
-        break
+
+  const trustedFile = (candidate: string): string => {
+    const real = realOrNull(candidate)
+    if (real === null) throw new ValidationError(`verification command does not exist: ${candidate}`)
+    const location = isInside(snapshotRoot, real) ? 'snapshot' : 'host'
+    const problem = executableTrustProblem(real, euid, location)
+    if (problem !== null) {
+      throw new ValidationError(`verification command '${first}' is not trusted: it ${problem} (${real})`)
+    }
+    if (location === 'host') {
+      const dirProblem = directoryTrustProblem(dirname(real), euid)
+      if (dirProblem !== null) {
+        throw new ValidationError(
+          `verification command '${first}' is not trusted: directory ${dirProblem} (${dirname(real)})`,
+        )
       }
     }
-    if (candidate === '') throw new ValidationError(`verification command '${first}' was not found on the trusted PATH`)
+    return real
   }
-  const real = realOrNull(candidate)
-  if (real === null) throw new ValidationError(`verification command does not exist: ${candidate}`)
-  const info = statSync(real)
-  if (!info.isFile()) throw new ValidationError(`verification command is not a regular file: ${real}`)
-  accessSync(real, fsConstants.X_OK)
-  return real
+
+  if (isAbsolute(first)) return trustedFile(first)
+
+  // Explicit relative paths are the deliberate way to run repository tooling:
+  // they resolve inside the disposable snapshot only, never on the host.
+  if (first.includes('/') || first.includes('\\')) {
+    const candidate = resolve(snapshotRoot, first)
+    if (!isInside(snapshotRoot, candidate)) {
+      throw new ValidationError(`verification command must stay inside the disposable snapshot: ${first}`)
+    }
+    const real = realOrNull(candidate)
+    if (real === null || !isInside(snapshotRoot, real)) {
+      throw new ValidationError(`verification command must stay inside the disposable snapshot: ${first}`)
+    }
+    return trustedFile(candidate)
+  }
+
+  let refusal: string | null = null
+  for (const directory of trustedDirectories) {
+    const probe = join(directory, first)
+    if (!existsSync(probe)) continue
+    const real = realOrNull(probe)
+    if (real === null) continue
+    // An untrusted candidate is a refusal, not a reason to keep searching:
+    // silently skipping it would hide a shadowing attempt.
+    const problem = executableTrustProblem(real, euid, 'host')
+    if (problem !== null) {
+      refusal = `${probe}: it ${problem}`
+      break
+    }
+    const dirProblem = directoryTrustProblem(dirname(real), euid)
+    if (dirProblem !== null) {
+      refusal = `${probe}: directory ${dirProblem}`
+      break
+    }
+    return real
+  }
+  if (refusal !== null) {
+    throw new ValidationError(`verification command '${first}' is not trusted: ${refusal}`)
+  }
+  throw new ValidationError(`verification command '${first}' was not found on the trusted PATH`)
 }
 
 function buildHelperRequest(
@@ -403,6 +599,8 @@ class LandlockVerificationExecutor implements VerificationExecutor {
     this.arch = opts.arch
     const capability = detectCapabilities({ root: this.root, platform: 'linux', arch: this.arch })
     const missing: string[] = []
+    const identity = verificationIdentityRefusal(currentEuid())
+    if (identity !== null) missing.push(identity)
     if (!capability.helper.available) missing.push(capability.helper.detail ?? 'native helper is unavailable')
     if (capability.landlockAbi === null) missing.push('Landlock ABI is unavailable')
     if (!capability.networkNamespaces) missing.push('network namespaces are unavailable')
@@ -431,8 +629,23 @@ class LandlockVerificationExecutor implements VerificationExecutor {
 
     const snapshotRoot = realOrNull(request.workspaceRoot)
     if (snapshotRoot === null) throw new ValidationError(`verification snapshot is missing: ${request.workspaceRoot}`)
+    const euid = currentEuid()
+    if (euid === null) {
+      throw new VerificationIsolationUnavailableError(
+        'verification refuses to run without a verifiable effective uid',
+      )
+    }
+    const identityProblem = verificationIdentityRefusal(euid)
+    if (identityProblem !== null) throw new VerificationIsolationUnavailableError(identityProblem)
     const env = updatedEnv(snapshotRoot, request.env)
-    const command = resolveCommand(request.command, snapshotRoot, env['PATH'] ?? DEFAULT_PATH)
+    const trustedPath = sanitizeVerificationPath(env['PATH'], snapshotRoot, euid)
+    if (trustedPath.directories.length === 0) {
+      throw new ValidationError(
+        'no trusted runtime directories remain on PATH; verification requires absolute, non-group/world-writable runtime directories owned by root or the invoking user',
+      )
+    }
+    env['PATH'] = trustedPath.path
+    const command = resolveCommand(request.command, snapshotRoot, trustedPath.directories, euid)
     const sessionId = newId('verification')
     const helperRequest = buildHelperRequest(request, snapshotRoot, command, env, sessionId)
     const requestPath = join(snapshotRoot, 'tmp', `request-${sessionId}.json`)
