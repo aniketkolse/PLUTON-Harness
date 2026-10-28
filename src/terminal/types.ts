@@ -1,14 +1,14 @@
 /**
- * Terminal contract (ADR-0005). Terminals are tmux sessions inside the Ship
- * container, driven through the SandboxManager — never through a host shell and
- * never on the Windows host natively (no tl;dr tmux for Windows exists here).
+ * Terminal contract (ADR-0005). Terminals are host tmux sessions driven by the
+ * native terminal manager — never through a shell string. tmux is a visibility
+ * and interruption tool, not a security boundary.
  *
  * Terminal lifecycle is deliberately decoupled from task lifecycle: closing a
  * window or detaching a session never fails or completes a task.
  */
 
 export interface TerminalEnsureOptions {
-  /** Working directory inside the container (created by tmux if needed). */
+  /** Working directory on the host (created by tmux if needed). */
   cwd?: string
 }
 
@@ -41,7 +41,7 @@ export type TerminalFailureReason =
 export interface TerminalManager {
   /** Idempotent: creates the session (with a `shell` window) if missing. */
   ensureSession(containerName: string, sessionName: string, options?: TerminalEnsureOptions): Promise<TerminalEnsureResult>
-  /** Honest probe: true/false; throws TerminalUnavailableError when tmux/container is broken. */
+  /** Honest probe: true/false; throws TerminalUnavailableError when tmux is broken. */
   sessionExists(containerName: string, sessionName: string): Promise<boolean>
   /** Idempotent per (session, window); the session must already exist. */
   ensureWindow(
@@ -58,4 +58,4 @@ export interface TerminalManager {
 }
 
 export const TMUX_MISSING_FIX =
-  'the Ship container image must contain tmux — rebuild it with `pluton sandbox build-image`, then re-run `pluton doctor`'
+  'install tmux on the host (e.g. apt install tmux, brew install tmux, or choco install tmux), then re-run `pluton doctor`'
