@@ -172,7 +172,6 @@ export interface TrustedVerificationPath {
  * directory another local principal could write between resolution and exec.
  */
 function directoryTrustProblem(directory: string, euid: number): string | null {
-  if (process.platform === 'win32') return null
   let current = directory
   for (;;) {
     let info: ReturnType<typeof statSync>
