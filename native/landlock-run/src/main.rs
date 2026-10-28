@@ -9,13 +9,16 @@
 //! 4. a PID namespace (the engine is PID 1 of its own namespace);
 //! 5. a fresh `/proc`;
 //! 6. a Landlock filesystem allowlist (read / execute / write roots);
-//! 7. `execve` of the engine with a cleared environment.
+//! 7. a seccomp filter that denies AF_UNIX sockets (and `io_uring_setup`) for
+//!    `restricted`/`none`, because those live in the host's socket namespace;
+//! 8. `execve` of the engine with a cleared environment.
 //!
 //! For `restricted` sessions a trusted proxy process (outside the Landlock
 //! domain, inside the network namespace) listens on loopback and forwards to
 //! the host-side bridge's AF_UNIX socket. Landlock does not mediate network
-//! sockets; network isolation is provided by the network namespace, never by
-//! Landlock.
+//! sockets; IP network isolation is provided by the network namespace, and
+//! host-local AF_UNIX IPC is denied by seccomp. The proxy runs before the
+//! filtered child is forked, so its bridge socket is unaffected.
 //!
 //! The helper fails closed: any setup step that cannot be completed is a
 //! startup error (exit 125), never a silent downgrade.
@@ -67,6 +70,39 @@ const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
 const ACCESS_READ: u64 = ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
+
+// Seccomp BPF program used for restricted/none sessions. A network namespace
+// isolates IP sockets, but AF_UNIX sockets belong to the host socket namespace
+// and would otherwise let a confined engine reach host agents and daemons.
+const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const BPF_LD: u16 = 0x00;
+const BPF_W: u16 = 0x00;
+const BPF_ABS: u16 = 0x20;
+const BPF_JMP: u16 = 0x05;
+const BPF_JEQ: u16 = 0x10;
+const BPF_K: u16 = 0x00;
+const BPF_RET: u16 = 0x06;
+
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: u32 = 0xC000_003E;
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: u32 = 0xC000_00B7;
+
+fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter { code, jt, jf, k }
+}
 
 #[repr(C)]
 struct RulesetAttr {
@@ -566,7 +602,51 @@ fn child_setup(req: &Request) -> Result<(), String> {
         libc::umask(0o077);
     }
     mount_proc()?;
-    apply_landlock(req)
+    apply_landlock(req)?;
+    if req.network != "open" {
+        apply_local_ipc_filter()?;
+    }
+    Ok(())
+}
+
+/// Deny host-local IPC channels that a network namespace cannot isolate.
+///
+/// `restricted` and `none` promise no host networking. The network namespace
+/// only covers IP sockets; AF_UNIX sockets stay in the host socket namespace,
+/// so without this filter a confined engine could still talk to the host SSH
+/// agent, Docker, dbus or systemd. `io_uring_setup` is denied as well because
+/// io_uring operations are not seccomp-mediated and would otherwise provide a
+/// way around the socket denial.
+fn apply_local_ipc_filter() -> Result<(), String> {
+    let filter = [
+        bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4), // seccomp_data.arch
+        bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
+        bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0), // seccomp_data.nr
+        bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 3),
+        bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16), // seccomp_data.args[0] (domain)
+        bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 0, 1),
+        bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0),
+        bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_io_uring_setup as u32, 0, 1),
+        bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    ];
+    let mut program = libc::sock_fprog {
+        len: filter.len() as libc::c_ushort,
+        filter: filter.as_ptr() as *mut libc::sock_filter,
+    };
+    let rc = unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            SECCOMP_MODE_FILTER,
+            &mut program as *mut libc::sock_fprog as libc::c_ulong,
+        )
+    };
+    if rc != 0 {
+        return Err(os_error("prctl(PR_SET_SECCOMP)"));
+    }
+    Ok(())
 }
 
 fn apply_landlock(req: &Request) -> Result<(), String> {
