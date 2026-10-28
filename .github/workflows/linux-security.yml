@@ -83,6 +83,7 @@ jobs:
       - name: Run native helper selftest
         run: |
           set -eo pipefail
+          chmod +x native/landlock-run/selftest.sh
           cd native/landlock-run
           ./selftest.sh | tee ../../.pluton-ci/helper-selftest.log
 
