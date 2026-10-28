@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -10,6 +11,7 @@ import { Store } from '../../src/store/store.ts'
 import {
   buildVerificationEnvironment,
   createVerificationExecutor,
+  createVerificationSnapshot,
   VerificationIsolationUnavailableError,
   type VerificationExecutionRequest,
 } from '../../src/verify/executor.ts'
@@ -239,5 +241,73 @@ describe('dedicated verification executor', () => {
     expect(report.results[0]?.status).toBe('failed')
     expect(report.results[0]?.note).toMatch(/isolation/i)
     expect(existsSync(marker)).toBe(false)
+  })
+
+  it.runIf(
+    process.platform === 'linux' && createVerificationExecutor().availability?.available === true,
+  )('runs a real check inside a snapshot created under the system temp directory', async () => {
+    const repo = seedRepo()
+    const snapshot = createVerificationSnapshot(repo)
+    try {
+      const executor = createVerificationExecutor()
+      const result = await executor.run({
+        command: [
+          process.execPath,
+          '-e',
+          "require('node:fs').writeFileSync('snapshot-ran.txt', 'yes')",
+        ],
+        cwd: snapshot,
+        workspaceRoot: snapshot,
+        env: {},
+        timeoutMs: 30_000,
+        maxOutputBytes: 4_096,
+        network: 'none',
+      })
+      expect(result.exitCode).toBe(0)
+      expect(existsSync(join(snapshot, 'snapshot-ran.txt'))).toBe(true)
+    } finally {
+      rmSync(snapshot, { recursive: true, force: true })
+    }
+  })
+
+  it.runIf(
+    process.platform === 'linux' && createVerificationExecutor().availability?.available === true,
+  )('denies host AF_UNIX sockets even when the network policy is none', async () => {
+    const repo = seedRepo()
+    const snapshot = createVerificationSnapshot(repo)
+    const socketPath = join(tmpdir(), `pluton-verify-unix-${process.pid}-${Date.now()}.sock`)
+    const server = createServer((socket) => socket.end('HOST_IPC_REACHED'))
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(socketPath, resolve)
+    })
+    try {
+      const executor = createVerificationExecutor()
+      const result = await executor.run({
+        command: [
+          process.execPath,
+          '-e',
+          [
+            "const net = require('node:net')",
+            `const socket = net.connect(${JSON.stringify(socketPath)})`,
+            "socket.on('connect', () => { console.log('CONNECTED'); socket.destroy() })",
+            "socket.on('error', (error) => { console.log('DENIED:' + error.code); process.exit(0) })",
+          ].join(';'),
+        ],
+        cwd: snapshot,
+        workspaceRoot: snapshot,
+        env: {},
+        timeoutMs: 30_000,
+        maxOutputBytes: 4_096,
+        network: 'none',
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('DENIED:EPERM')
+      expect(result.stdout).not.toContain('CONNECTED')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      rmSync(socketPath, { force: true })
+      rmSync(snapshot, { recursive: true, force: true })
+    }
   })
 })
