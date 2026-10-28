@@ -1361,11 +1361,15 @@ sessionCmd
 sessionCmd
   .command('import <file>')
   .description('import a chat session from a JSONL file')
-  .action(async (filePath: string, _opts: unknown, cmd: Command) => {
+  .option(
+    '--workspace-root <path>',
+    'local workspace directory for a cross-host restore (the exported path is host-specific)',
+  )
+  .action(async (filePath: string, opts: { workspaceRoot?: string }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const result = importSession(ctx, filePath)
+      const result = importSession(ctx, filePath, opts)
       emitOk(io, json, `imported session ${result.sessionId} (${result.messageCount} message(s))`, result)
     })
   })
@@ -1394,11 +1398,15 @@ sessionCmd
 sessionCmd
   .command('import-run <file>')
   .description('import an orchestration run from a JSONL file')
-  .action(async (filePath: string, _opts: unknown, cmd: Command) => {
+  .option(
+    '--workspace-root <path>',
+    'local workspace directory for a cross-host restore (the exported path is host-specific)',
+  )
+  .action(async (filePath: string, opts: { workspaceRoot?: string }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
       const ctx = requireProject(process.cwd())
-      const result = importRun(ctx, filePath)
+      const result = importRun(ctx, filePath, opts)
       emitOk(
         io,
         json,
