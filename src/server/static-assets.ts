@@ -585,6 +585,8 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
   --accent-plan: #f59e0b;
   --accent-build: #60a5fa;
   --accent-cyan: #38bdf8;
+  --accent-lavender: #a78bfa;
+  --accent-lavender-soft: #c4b5fd;
   --accent-ok: #34d399;
   --accent-warn: #fbbf24;
   --accent-danger: #f87171;
@@ -1194,8 +1196,51 @@ select.mini-select {
 .msg-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
 .msg-avatar { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
 .msg-avatar svg { width: 14px; height: 14px; }
-.msg-you { color: var(--text-muted); }
-.msg-pluton { color: var(--accent-cyan); }
+.msg-you { color: var(--accent-cyan); }
+.msg-pluton { color: var(--accent-lavender); }
+
+.msg-thinking {
+  margin: 6px 0 10px 0;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  background: rgba(167, 139, 250, 0.05);
+  overflow: hidden;
+  font-size: 12.5px;
+}
+.msg-thinking summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--accent-lavender);
+  background: rgba(167, 139, 250, 0.09);
+  list-style: none;
+}
+.msg-thinking summary::-webkit-details-marker { display: none; }
+.msg-thinking summary::before {
+  content: '\u25b8';
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 150ms ease;
+}
+.msg-thinking[open] summary::before {
+  transform: rotate(90deg);
+}
+.msg-thinking-body {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid rgba(167, 139, 250, 0.15);
+}
 
 .msg-user {
   align-self: stretch;
@@ -2456,6 +2501,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   function renderMarkdown(source) {
     var text = source === null || source === undefined ? '' : String(source);
+    var thinkPrefix = '';
+    text = text.replace(/<think>([\\s\\S]*?)(?:<\\/think>|$)/gi, function (_, thought) {
+      if (thought.trim()) {
+        thinkPrefix += '<details class="msg-thinking">' +
+          '<summary><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>Thinking</summary>' +
+          '<div class="msg-thinking-body">' + escapeHtml(thought.trim()) + '</div>' +
+          '</details>';
+      }
+      return '';
+    });
     var lines = text.split('\\n');
     var html = '';
     var inCode = false;
@@ -2555,7 +2610,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
     flushPara();
     closeLists();
-    return html;
+    return thinkPrefix + html;
   }
 
   // ------------------------------------------------------------- messages
@@ -2568,7 +2623,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var head = document.createElement('div');
     head.className = 'msg-head';
     if (role === 'user') {
-      head.innerHTML = '<span class="msg-avatar">' + USER_ICON + '</span><span class="msg-you">You</span>';
+      head.innerHTML = '<span class="msg-avatar msg-you">' + USER_ICON + '</span><span class="msg-you">You</span>';
     } else if (role === 'assistant') {
       head.innerHTML = '<span class="msg-avatar msg-pluton" aria-hidden="true">' + ANCHOR_ICON + '</span><span class="msg-pluton">PLUTON</span>';
     } else {
@@ -2924,7 +2979,20 @@ details:not([open]) > .tool-card-head .tool-chevron {
     streamFlushPending = false;
     var body = state.liveBody;
     if (!body) return;
-    body.innerHTML = renderMarkdown(state.streamingText) + '<span class="caret-blink"></span>';
+    var html = '';
+    if (state.streamingThought && state.streamingThought.trim()) {
+      var isStillThinking = !state.streamingText;
+      html += '<details class="msg-thinking"' + (isStillThinking ? ' open' : '') + '>' +
+        '<summary><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>Thinking' + (isStillThinking ? '\u2026' : '') + '</summary>' +
+        '<div class="msg-thinking-body">' + escapeHtml(state.streamingThought.trim()) + (isStillThinking ? '<span class="caret-blink"></span>' : '') + '</div>' +
+        '</details>';
+    }
+    if (state.streamingText) {
+      html += renderMarkdown(state.streamingText) + '<span class="caret-blink"></span>';
+    } else if (!state.streamingThought) {
+      html += '<span class="caret-blink"></span>';
+    }
+    body.innerHTML = html;
     maybeScroll(false);
   }
 
@@ -2946,11 +3014,29 @@ details:not([open]) > .tool-card-head .tool-chevron {
       list.appendChild(node);
       state.liveBody = node.querySelector('.msg-body');
       state.streamingText = text;
+      state.streamingThought = '';
       flushStreamingToken();
       trimMessagesList();
       return;
     }
-    state.streamingText += text;
+    state.streamingText = (state.streamingText || '') + text;
+    scheduleStreamFlush();
+  }
+
+  function appendStreamingThought(text) {
+    var list = el('messagesList');
+    if (!list) return;
+    if (!state.liveBody) {
+      var node = buildMessage('assistant', '');
+      list.appendChild(node);
+      state.liveBody = node.querySelector('.msg-body');
+      state.streamingText = '';
+      state.streamingThought = text;
+      flushStreamingToken();
+      trimMessagesList();
+      return;
+    }
+    state.streamingThought = (state.streamingThought || '') + text;
     scheduleStreamFlush();
   }
 
@@ -2960,10 +3046,19 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var note = failed
         ? '<div class="msg-error">[Turn failed]</div>'
         : (interrupted ? '<div class="muted">[Turn interrupted by operator]</div>' : '');
-      state.liveBody.innerHTML = renderMarkdown(state.streamingText) + note;
+      var html = '';
+      if (state.streamingThought && state.streamingThought.trim()) {
+        html += '<details class="msg-thinking">' +
+          '<summary><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>Thinking</summary>' +
+          '<div class="msg-thinking-body">' + escapeHtml(state.streamingThought.trim()) + '</div>' +
+          '</details>';
+      }
+      html += renderMarkdown(state.streamingText) + note;
+      state.liveBody.innerHTML = html;
       state.liveBody = null;
     }
     state.streamingText = '';
+    state.streamingThought = '';
   }
 
   // ------------------------------------------------------------------ SSE
@@ -3009,8 +3104,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
       handleWorkerEvent(ev);
     } else if (ev.type === 'token' && ev.sessionId === state.activeSessionId) {
       appendStreamingToken(ev.text);
+    } else if (ev.type === 'thought' && ev.sessionId === state.activeSessionId) {
+      appendStreamingThought(ev.text);
     } else if (ev.type === 'tool' && ev.sessionId === state.activeSessionId) {
       appendToolEvent(ev.tool);
+      scheduleFilesRefresh();
     } else if (ev.type === 'turn_start' && ev.sessionId === state.activeSessionId) {
       setBusy(true);
       if (state.queueLength && state.queueLength > 0) {
@@ -3024,6 +3122,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       if (!state.queueLength || state.queueLength <= 0) {
         setBusy(false);
       }
+      scheduleFilesRefresh(true);
     } else if (ev.type === 'usage' && ev.sessionId === state.activeSessionId) {
       updateUsage(ev);
     } else if (ev.type === 'approval_requested') {
@@ -3044,12 +3143,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
       state.activeRunId = ev.runId;
       applyRunState(ev.state, ev.goal, ev.error, ev.summary);
       refreshActiveRun();
+      scheduleFilesRefresh();
     } else if (ev.type === 'task_state') {
       if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
       state.tasks[ev.taskId] = { id: ev.taskId, title: ev.title, state: ev.state, runId: ev.runId };
       if (ev.runId) state.activeRunId = ev.runId;
       updateActivityBadge();
       reconstituteWorkerPartitions();
+      scheduleFilesRefresh();
     }
   }
 
@@ -4536,24 +4637,55 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (retry) retry.addEventListener('click', retryFn);
   }
 
-  async function loadFilesList() {
+  var filesRefreshTimer = null;
+  function scheduleFilesRefresh(immediate) {
+    if (filesRefreshTimer) clearTimeout(filesRefreshTimer);
+    if (immediate) {
+      filesRefreshTimer = null;
+      loadFilesList(true);
+      return;
+    }
+    filesRefreshTimer = setTimeout(function () {
+      filesRefreshTimer = null;
+      loadFilesList(true);
+    }, 350);
+  }
+
+  async function loadFilesList(background) {
     var list = el('filesList');
-    if (list) list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
+    if (list && !background && (!state.fileList || state.fileList.length === 0)) {
+      list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
+    }
     try {
       var res = state.activeSessionId
         ? await apiFetch('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
         : await apiFetch('/api/files');
-      state.fileList = res.files || [];
+      var newFiles = res.files || [];
+      var changed = !state.fileList || state.fileList.length !== newFiles.length;
+      if (!changed) {
+        for (var i = 0; i < newFiles.length; i++) {
+          if (state.fileList[i] !== newFiles[i]) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      state.fileList = newFiles;
       var listNode = el('filesList');
       if (!listNode) return;
       if (state.fileList.length === 0) {
         listNode.innerHTML = '<div class="empty-hint">No files in the workspace.</div>';
         return;
       }
+      if (!changed && listNode.children.length > 0 && !listNode.querySelector('.empty-hint')) {
+        return;
+      }
       listNode.innerHTML = renderFileTree(state.fileList);
       bindFileTree(listNode);
     } catch (err) {
-      renderFileListError(el('filesList'), err.message, function () { loadFilesList(); });
+      if (!background) {
+        renderFileListError(el('filesList'), err.message, function () { loadFilesList(); });
+      }
     }
   }
 
@@ -4848,9 +4980,31 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
   }
 
+  var busyFilePollTimer = null;
+  function startBusyFilePolling() {
+    if (busyFilePollTimer) return;
+    busyFilePollTimer = setInterval(function () {
+      if (!state.busy) {
+        stopBusyFilePolling();
+        return;
+      }
+      loadFilesList(true);
+    }, 2000);
+  }
+  function stopBusyFilePolling() {
+    if (busyFilePollTimer) {
+      clearInterval(busyFilePollTimer);
+      busyFilePollTimer = null;
+    }
+  }
+
   function setBusy(busy, busyLabel) {
     state.busy = busy;
-    if (!busy) {
+    if (busy) {
+      startBusyFilePolling();
+    } else {
+      stopBusyFilePolling();
+      scheduleFilesRefresh(true);
       state.queueLength = 0;
     }
     updateQueueBadge();
@@ -5426,14 +5580,18 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
     if (ev.type === 'worker.started' || ev.type === 'worker.progress') {
       worker.status = 'running';
+      scheduleFilesRefresh();
     } else if (ev.type === 'worker.question' || ev.type === 'worker.waiting') {
       worker.status = 'waiting';
     } else if (ev.type === 'worker.completed') {
       worker.status = 'completed';
+      scheduleFilesRefresh();
     } else if (ev.type === 'worker.failed') {
       worker.status = 'failed';
+      scheduleFilesRefresh();
     } else if (ev.type === 'worker.cancelled') {
       worker.status = 'cancelled';
+      scheduleFilesRefresh();
     } else if (ev.type === 'worker.created') {
       worker.status = 'created';
     }

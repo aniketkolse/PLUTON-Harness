@@ -125,6 +125,7 @@ export function applyEngineEvent(s: ChatViewState, ev: EngineEvent): ChatViewSta
         busy: ev.status === 'busy' || ev.status === 'starting',
       }
 
+    case 'thought':
     case 'result':
       return s
   }

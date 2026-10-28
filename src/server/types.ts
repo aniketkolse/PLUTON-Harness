@@ -150,6 +150,7 @@ export interface WorkerSSEEvent {
 
 export type ServerSSEEvent =
   | { type: 'token'; sessionId: string; text: string }
+  | { type: 'thought'; sessionId: string; text: string }
   | { type: 'turn_start'; sessionId: string; userText: string; mode?: string }
   | { type: 'turn_end'; sessionId: string; interrupted: boolean; failed: boolean }
   | { type: 'tool'; sessionId: string; tool: ToolActivityState }

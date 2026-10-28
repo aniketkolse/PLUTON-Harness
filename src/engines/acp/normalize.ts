@@ -174,6 +174,11 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
       if (text === null || text === '') return { events: [], kind, ignored: true }
       return { events: [{ kind: 'text', text }], kind, ignored: false }
     }
+    case 'agent_thought_chunk': {
+      const text = textOf(u['content'])
+      if (text === null || text === '') return { events: [], kind, ignored: true }
+      return { events: [{ kind: 'thought', text }], kind, ignored: false }
+    }
     case 'tool_call': {
       const name = toolEventName(u)
       const callId = toolCallId(u)
@@ -257,7 +262,6 @@ export function normalizeSessionUpdate(update: unknown, ctx: NormalizeContext = 
         ignored: false,
       }
     }
-    case 'agent_thought_chunk':
     case 'user_message_chunk':
     case 'available_commands_update':
     case 'current_mode_update':

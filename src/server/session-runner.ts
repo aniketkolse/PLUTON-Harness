@@ -3,6 +3,7 @@ import { createEngineApprovalChannel, type EnginePermissionChannel } from '../en
 import type { ChatSessionRecord, InboxItemRecord, ShipRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import type { ServerEventBroadcaster } from './events.ts'
+import type { ServerSSEEvent } from './types.ts'
 
 export interface SessionRunnerOptions {
   store: Store
@@ -107,19 +108,61 @@ export class SessionRunner {
     if (this.activeDrains.has(sessionId)) return
     this.activeDrains.add(sessionId)
 
-    this.drain(sessionId).finally(() => {
+    let drainCompleted = false
+    try {
+      await this.drain(sessionId)
+      drainCompleted = true
+    } catch (err) {
+      // A drain is a background operation kicked off by enqueue(). It must
+      // never reject into an unhandled promise or leave the session marked
+      // busy forever; report the failure and let the durable inbox row say
+      // what happened.
+      const message = err instanceof Error ? err.message : String(err)
+      this.safeBroadcast({ type: 'token', sessionId, text: `\n[Queue failure: ${message}]` })
+      this.safeBroadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+    } finally {
       this.activeDrains.delete(sessionId)
-    })
+      // Close the enqueue/drain race: a prompt can land after drain() saw an
+      // empty queue but before this marker is removed. wake() returns early
+      // while a drain is active, so that prompt would otherwise stay
+      // 'enqueued' until an unrelated prompt arrived. Re-check durable state
+      // (never in-memory state) and start one more drain when needed.
+      //
+      // Only re-check after a successful drain: if the drain failed (for
+      // example the store could not mark the row 'processing'), immediately
+      // re-entering would spin forever on the same unreadable row. The row
+      // stays 'enqueued' and the next enqueue or operator action retries it.
+      if (drainCompleted && this.hasEnqueuedWork(sessionId)) {
+        void this.wake(sessionId)
+      }
+    }
+  }
+
+  private hasEnqueuedWork(sessionId: string): boolean {
+    try {
+      return this.store.listPendingInbox(sessionId).some((item) => item.state === 'enqueued')
+    } catch {
+      // The store is the source of truth; if it cannot be read, the next
+      // enqueue or server restart recovery will surface the problem.
+      return false
+    }
   }
 
   private async drain(sessionId: string): Promise<void> {
     const session = this.store.getChatSessionOrNull(sessionId)
-    if (!session) return
+    if (!session) {
+      try {
+        this.store.cancelPendingInbox(sessionId)
+      } catch {
+        // Best effort: session is gone, clear any orphan inbox entries.
+      }
+      return
+    }
 
     const ship = this.store.getShip(session.shipId)
     if (!ship) {
-      this.broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: Ship '${session.shipId}' not found]` })
-      this.broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+      this.safeBroadcast({ type: 'token', sessionId, text: `\n[Error: Ship '${session.shipId}' not found]` })
+      this.safeBroadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
       this.store.cancelPendingInbox(sessionId)
       return
     }
@@ -129,8 +172,37 @@ export class SessionRunner {
       const nextItem = pending.find((i) => i.state === 'enqueued')
       if (!nextItem) break
 
+      // Marking the row 'processing' is the ownership claim. If this write
+      // fails, do not process the prompt: leave it enqueued and let wake()
+      // report the queue failure. Retrying here would spin on the same row.
       this.store.updateInboxState(nextItem.id, 'processing')
-      await this.executeItem(session, ship, nextItem)
+      try {
+        await this.executeItem(session, ship, nextItem)
+      } catch (err) {
+        // executeItem's own finally handles engine failures, but a store or
+        // broadcasting failure before/around it would otherwise leave the row
+        // in 'processing' until the next server restart. Fail the row now and
+        // keep draining the remaining prompts.
+        //
+        // Never downgrade a row that executeItem already settled: its final
+        // state write can commit and a later broadcast can still throw.
+        let alreadySettled = false
+        try {
+          const current = this.store.getInboxItem(nextItem.id)
+          if (current && current.state !== 'processing') {
+            alreadySettled = true
+          } else {
+            this.store.updateInboxState(nextItem.id, 'failed')
+          }
+        } catch {
+          // Best effort: the queue loop must survive a failing store.
+        }
+        if (!alreadySettled) {
+          const message = err instanceof Error ? err.message : String(err)
+          this.safeBroadcast({ type: 'token', sessionId, text: `\n[Turn failure: ${message}]` })
+          this.safeBroadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+        }
+      }
     }
   }
 
@@ -145,7 +217,7 @@ export class SessionRunner {
       role: 'user',
       text: userText,
     })
-    this.broadcaster.broadcast({ type: 'turn_start', sessionId, userText, mode })
+    this.safeBroadcast({ type: 'turn_start', sessionId, userText, mode })
 
     const sessionWorkspace = this.options.workspaceResolver(sessionId)
     const adapter = this.options.adapterResolver(ship, sessionWorkspace)
@@ -160,11 +232,11 @@ export class SessionRunner {
         shipId: ship.id,
         ttlMinutes: this.options.approvalTimeoutMinutes,
         onRequested: (approval) => {
-          this.broadcaster.broadcast({ type: 'approval_requested', approval })
+          this.safeBroadcast({ type: 'approval_requested', approval })
         },
         onSettled: (approval, settlement) => {
           if (settlement !== 'decision') {
-            this.broadcaster.broadcast({ type: 'approval_decided', approval })
+            this.safeBroadcast({ type: 'approval_decided', approval })
           }
         },
       })
@@ -192,8 +264,8 @@ export class SessionRunner {
       } catch (err) {
         this.options.onSessionDropped?.(sessionId)
         const message = err instanceof Error ? err.message : String(err)
-        this.broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${message}]` })
-        this.broadcaster.broadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
+        this.safeBroadcast({ type: 'token', sessionId, text: `\n[Error: ${message}]` })
+        this.safeBroadcast({ type: 'turn_end', sessionId, interrupted: false, failed: true })
         this.store.updateInboxState(item.id, 'failed')
         approvals.abort('engine session failed to start')
         return
@@ -205,6 +277,7 @@ export class SessionRunner {
 
     entry.interrupted = false
     let assistantText = ''
+    let thoughtText = ''
     let failed = false
 
     try {
@@ -220,10 +293,14 @@ export class SessionRunner {
         switch (ev.kind) {
           case 'text':
             assistantText += ev.text
-            this.broadcaster.broadcast({ type: 'token', sessionId, text: ev.text })
+            this.safeBroadcast({ type: 'token', sessionId, text: ev.text })
+            break
+          case 'thought':
+            thoughtText += ev.text
+            this.safeBroadcast({ type: 'thought', sessionId, text: ev.text })
             break
           case 'tool':
-            this.broadcaster.broadcast({
+            this.safeBroadcast({
               type: 'tool',
               sessionId,
               tool: {
@@ -237,7 +314,7 @@ export class SessionRunner {
             })
             break
           case 'usage':
-            this.broadcaster.broadcast({
+            this.safeBroadcast({
               type: 'usage',
               sessionId,
               inputTokens: ev.inputTokens ?? 0,
@@ -247,20 +324,24 @@ export class SessionRunner {
             break
           case 'error':
             failed = true
-            this.broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Error: ${ev.message}]` })
+            this.safeBroadcast({ type: 'token', sessionId, text: `\n[Error: ${ev.message}]` })
             break
         }
       }
     } catch (err) {
       failed = true
       const errMsg = err instanceof Error ? err.message : String(err)
-      this.broadcaster.broadcast({ type: 'token', sessionId, text: `\n[Engine failure: ${errMsg}]` })
+      this.safeBroadcast({ type: 'token', sessionId, text: `\n[Engine failure: ${errMsg}]` })
     } finally {
-      if (assistantText.trim().length > 0) {
+      const persistedText =
+        thoughtText.trim().length > 0
+          ? `<think>\n${thoughtText.trim()}\n</think>${assistantText.trim().length > 0 ? `\n\n${assistantText.trim()}` : ''}`
+          : assistantText
+      if (persistedText.trim().length > 0) {
         this.store.appendChatMessage({
           sessionId,
           role: 'assistant',
-          text: assistantText,
+          text: persistedText,
         })
       }
       const wasInterrupted = (entry as { interrupted?: boolean }).interrupted === true
@@ -271,12 +352,21 @@ export class SessionRunner {
       } else {
         this.store.updateInboxState(item.id, 'delivered')
       }
-      this.broadcaster.broadcast({
+      this.safeBroadcast({
         type: 'turn_end',
         sessionId,
         interrupted: wasInterrupted,
         failed: failed && !wasInterrupted,
       })
+    }
+  }
+
+  private safeBroadcast(event: ServerSSEEvent): void {
+    try {
+      this.broadcaster.broadcast(event)
+    } catch {
+      // Best-effort delivery: a broken broadcast subscriber or serialization
+      // failure must not crash the drain loop or fail durable state transitions.
     }
   }
 

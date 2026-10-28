@@ -97,13 +97,13 @@ describe('opencode binary resolution', () => {
 })
 
 describe('session update normalization', () => {
-  it('maps message chunks, skips thoughts, and ignores unknown kinds', () => {
+  it('maps message chunks and thoughts, and ignores unknown kinds', () => {
     expect(
       normalizeSessionUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } }),
     ).toMatchObject({ events: [{ kind: 'text', text: 'hi' }], ignored: false })
     expect(
       normalizeSessionUpdate({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } }),
-    ).toMatchObject({ events: [], ignored: true })
+    ).toMatchObject({ events: [{ kind: 'thought', text: 'thinking' }], ignored: false })
     expect(normalizeSessionUpdate({ sessionUpdate: 'brand_new_kind' })).toMatchObject({ events: [], ignored: true })
     expect(normalizeSessionUpdate(null)).toMatchObject({ events: [], kind: null, ignored: true })
   })

@@ -273,11 +273,12 @@ describe('opencode adapter: prompts and events', () => {
   it('replays the recorded transcript into normalized events and a success result', async () => {
     const { session } = await startWithScript()
     const events = await collect(session.sendPrompt({ text: 'Reply with exactly the text PLUTON_ACP_OK and nothing else.' }))
-    expect(events.map((e) => e.kind)).toEqual(['status', 'text', 'usage', 'usage', 'result'])
-    expect(events[1]).toEqual({ kind: 'text', text: 'PLUTON_ACP_OK' })
-    expect(events[2]).toMatchObject({ kind: 'usage', costUsd: 0 })
-    expect(events[3]).toMatchObject({ kind: 'usage', inputTokens: 16525, outputTokens: 8 })
-    expect(events[4]).toMatchObject({ kind: 'result', outcome: 'success', summary: 'stopReason: end_turn' })
+    expect(events.map((e) => e.kind)).toEqual(['status', 'thought', 'text', 'usage', 'usage', 'result'])
+    expect(events[1]).toMatchObject({ kind: 'thought' })
+    expect(events[2]).toEqual({ kind: 'text', text: 'PLUTON_ACP_OK' })
+    expect(events[3]).toMatchObject({ kind: 'usage', costUsd: 0 })
+    expect(events[4]).toMatchObject({ kind: 'usage', inputTokens: 16525, outputTokens: 8 })
+    expect(events[5]).toMatchObject({ kind: 'result', outcome: 'success', summary: 'stopReason: end_turn' })
     await session.close()
   })
 

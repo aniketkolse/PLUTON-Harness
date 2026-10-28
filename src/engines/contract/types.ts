@@ -123,6 +123,7 @@ export interface EngineSessionInfo {
 export type EngineEvent =
   | { kind: 'status'; status: 'starting' | 'ready' | 'busy' | 'idle'; detail?: string }
   | { kind: 'text'; text: string }
+  | { kind: 'thought'; text: string }
   | {
       kind: 'tool'
       name: string
