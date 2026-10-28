@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -278,6 +278,98 @@ describe('Pluton application server REST & SSE API', () => {
         headers: { 'x-pluton-token': server.token },
       })
       expect(missingRes.status).toBe(404)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('never reads, overwrites, or deletes .git, .pluton, or node_modules through the file API', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const headers = { 'Content-Type': 'text/plain; charset=utf-8', 'x-pluton-token': server.token }
+      mkdirSync(join(rootDir, '.git'), { recursive: true })
+      writeFileSync(join(rootDir, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n', 'utf8')
+      writeFileSync(join(rootDir, '.pluton', 'operator-secret.txt'), 'do-not-touch', 'utf8')
+      writeFileSync(join(rootDir, '.gitignore'), 'dist/\n', 'utf8')
+
+      for (const target of ['.git/config', '.pluton/operator-secret.txt', 'node_modules/pkg/index.js']) {
+        const read = await fetch(
+          `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent(target)}`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        expect(read.status, `read ${target}`).toBe(403)
+
+        const write = await fetch(
+          `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent(target)}`,
+          { method: 'PUT', headers, body: 'corrupted' },
+        )
+        expect(write.status, `write ${target}`).toBe(403)
+
+        const remove = await fetch(
+          `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent(target)}`,
+          { method: 'DELETE', headers: { 'x-pluton-token': server.token } },
+        )
+        expect(remove.status, `delete ${target}`).toBe(403)
+      }
+
+      expect(readFileSync(join(rootDir, '.git', 'config'), 'utf8')).toContain('repositoryformatversion')
+      expect(readFileSync(join(rootDir, '.pluton', 'operator-secret.txt'), 'utf8')).toBe('do-not-touch')
+
+      if (process.platform === 'win32') {
+        const caseVariant = await fetch(
+          `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('.GIT/config')}`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        expect(caseVariant.status).toBe(403)
+      }
+
+      // A look-alike name is not a protected area.
+      const harmless = await fetch(
+        `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('.gitignore')}`,
+        { headers: { 'x-pluton-token': server.token } },
+      )
+      expect(harmless.status).toBe(200)
+      expect(((await harmless.json()) as { content: string }).content).toBe('dist/\n')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('rejects a workspace link whose canonical target is a protected directory', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      mkdirSync(join(rootDir, '.git'), { recursive: true })
+      writeFileSync(join(rootDir, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n', 'utf8')
+      const linkPath = join(rootDir, 'linked-git')
+      let linked = false
+      try {
+        if (process.platform === 'win32') {
+          execFileSync('cmd', ['/c', 'mklink', '/J', linkPath, join(rootDir, '.git')], { stdio: 'pipe' })
+        } else {
+          symlinkSync(join(rootDir, '.git'), linkPath, 'dir')
+        }
+        linked = true
+      } catch {
+        linked = false
+      }
+      if (!linked) return
+
+      // The lexical path is harmless; only the canonical (realpath) check
+      // reveals that it resolves to .git/config.
+      const read = await fetch(
+        `http://127.0.0.1:${server.port}/api/files/content?path=${encodeURIComponent('linked-git/config')}`,
+        { headers: { 'x-pluton-token': server.token } },
+      )
+      expect(read.status).toBe(403)
+      expect(((await read.json()) as { error: string }).error).toMatch(/protected workspace path/)
+
+      const files = await fetch(`http://127.0.0.1:${server.port}/api/files`, {
+        headers: { 'x-pluton-token': server.token },
+      })
+      const listing = (await files.json()) as { ok: boolean; files: string[] }
+      expect(listing.files.some((file) => file.startsWith('linked-git'))).toBe(false)
     } finally {
       await server.close()
     }

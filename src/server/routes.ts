@@ -24,9 +24,9 @@ import {
 import type { NativeExecutionProvider } from '../execution/native.ts'
 import type { ExecutionBridgeSpec } from '../execution/native.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
-import { run as execRun } from '../util/exec.ts'
+import { diffWorktreePatch } from '../workspace/trusted-git.ts'
 import { PLUTON_VERSION } from '../version.ts'
-import { safeResolvePath } from './security.ts'
+import { safeResolvePath, protectedWorkspaceSegment } from './security.ts'
 import { pickNativeFolder } from './folder-picker.ts'
 import { describeWorkspace, resolveWorkspaceRoot } from './workspace.ts'
 import type { ServerEventBroadcaster } from './events.ts'
@@ -1541,6 +1541,14 @@ export class ApiRouter {
     if (!resolved) {
       return { ok: false, status: 403, error: 'access denied: path outside workspace' }
     }
+    const protectedSegment = protectedWorkspaceSegment(relative(rootDir, resolved))
+    if (protectedSegment !== null) {
+      return {
+        ok: false,
+        status: 403,
+        error: `access denied: '${protectedSegment}' is a protected workspace path`,
+      }
+    }
     let canonical: string
     let canonicalRoot: string
     try {
@@ -1552,6 +1560,14 @@ export class ApiRouter {
     const canonicalRel = relative(canonicalRoot, canonical)
     if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
       return { ok: false, status: 403, error: 'access denied: path resolves outside workspace (via a link)' }
+    }
+    const canonicalProtected = protectedWorkspaceSegment(canonicalRel)
+    if (canonicalProtected !== null) {
+      return {
+        ok: false,
+        status: 403,
+        error: `access denied: '${canonicalProtected}' is a protected workspace path`,
+      }
     }
     let stat
     try {
@@ -1567,14 +1583,16 @@ export class ApiRouter {
 
   private listWorkspaceFiles(rootDir: string, maxFiles = 300): string[] {
     const results: string[] = []
-    const ignored = new Set(['.git', 'node_modules', '.pluton', 'dist', '.DS_Store', 'coverage'])
+    // Protected segments are rejected by the same predicate as file reads so
+    // the listing cannot drift from the access check (`.GIT` on Windows/macOS).
+    const ignored = new Set(['dist', '.DS_Store', 'coverage'])
 
     function scan(dir: string): void {
       if (results.length >= maxFiles) return
       try {
         const entries = readdirSync(dir, { withFileTypes: true })
         for (const entry of entries) {
-          if (ignored.has(entry.name)) continue
+          if (ignored.has(entry.name) || protectedWorkspaceSegment(entry.name) !== null) continue
           const fullPath = join(dir, entry.name)
           // Never follow links/junctions: a junction inside the workspace must not
           // expose listings (or contents) of directories outside it.
