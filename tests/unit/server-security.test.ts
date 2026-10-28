@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   generateServerToken,
   isLoopbackRequest,
+  protectedWorkspaceSegment,
   safeResolvePath,
   validateOriginAndHost,
   verifyToken,
@@ -98,6 +99,32 @@ describe('server security', () => {
       expect(safeResolvePath(root, 'C:\\Windows\\system32\\cmd.exe')).toBeNull()
       // …and root case differences are normalized away on Windows.
       expect(safeResolvePath('y:\\pluton', 'src/main.ts')).not.toBeNull()
+    }
+  })
+
+  it('identifies protected workspace segments with per-platform normalization', () => {
+    expect(protectedWorkspaceSegment('src/main.ts')).toBeNull()
+    expect(protectedWorkspaceSegment('.gitignore')).toBeNull()
+    expect(protectedWorkspaceSegment('src/git/config')).toBeNull()
+    expect(protectedWorkspaceSegment('.git/config')).toBe('.git')
+    expect(protectedWorkspaceSegment('src/.git/hooks/pre-commit')).toBe('.git')
+    expect(protectedWorkspaceSegment('.pluton/state/pluton.sqlite')).toBe('.pluton')
+    expect(protectedWorkspaceSegment('node_modules/pkg/index.js')).toBe('node_modules')
+
+    // Windows: case-insensitive, and trailing dots/spaces resolve to the same
+    // directory. macOS: case-insensitive (default APFS/HFS+). Linux: exact.
+    expect(protectedWorkspaceSegment('.GIT/config', 'win32')).toBe('.GIT')
+    expect(protectedWorkspaceSegment('.pluton.\\state\\pluton.sqlite', 'win32')).toBe('.pluton.')
+    expect(protectedWorkspaceSegment('.GIT/config', 'darwin')).toBe('.GIT')
+    expect(protectedWorkspaceSegment('NODE_MODULES/pkg', 'darwin')).toBe('NODE_MODULES')
+    expect(protectedWorkspaceSegment('.GIT/config', 'linux')).toBeNull()
+    expect(protectedWorkspaceSegment('.git/config', 'linux')).toBe('.git')
+
+    // The default stays host-accurate.
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      expect(protectedWorkspaceSegment('.GIT/config')).toBe('.GIT')
+    } else {
+      expect(protectedWorkspaceSegment('.GIT/config')).toBeNull()
     }
   })
 })
