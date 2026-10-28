@@ -330,17 +330,51 @@ export interface ApprovalRecord {
   answer?: string | null
 }
 
+/**
+ * What the workspace evidence capture actually found.
+ *
+ * - `git`: a complete, trusted Git snapshot.
+ * - `non-git`: the directory is deliberately not a Git checkout.
+ * - `capture-failed`: Git metadata existed but could not be trusted/read.
+ *
+ * NULL on a verification row means legacy/incomplete evidence and is never
+ * accepted as fresh.
+ */
+export type VerificationEvidenceKind = 'git' | 'non-git' | 'capture-failed'
+
 export interface VerificationCheckRecord {
   id: string
   projectId: string
   runId: string
   taskId: string | null
+  /** The task attempt this evidence belongs to (0 for run-level checks). */
+  attempt: number
   name: string
   /** argv array — never a shell string. */
   command: string[]
   cwd: string | null
   /** Which workspace/checkout the check ran in (null until executed). */
   workspaceId: string | null
+  /** What the pre-check evidence capture found; NULL is legacy/incomplete. */
+  evidenceKind: VerificationEvidenceKind | null
+  /** HEAD revision the check was run against; null when git evidence is unavailable. */
+  revision: string | null
+  /** Whether the worktree was dirty before the check; null when unknown. */
+  worktreeDirty: boolean | null
+  /** Fingerprint of the worktree state the check was run against. */
+  worktreeFingerprint: string | null
+  /** What the post-check evidence capture found. */
+  postEvidenceKind: VerificationEvidenceKind | null
+  /** HEAD revision immediately after the check's evidence was captured. */
+  postRevision: string | null
+  /** Fingerprint after the check finished; integration must match this exactly. */
+  postWorktreeFingerprint: string | null
+  /** Whether the worktree was dirty after the check; null when unknown. */
+  postWorktreeDirty: boolean | null
+  /** Confinement mechanism that actually ran (or refused) the check. */
+  executor: string | null
+  /** Set when an interrupted run was superseded by a fresh run of the same attempt. */
+  supersededAt: string | null
   status: 'pending' | 'passed' | 'failed' | 'skipped'
   exitCode: number | null
   /** Bounded stdout/stderr artifacts written under .pluton/state/artifacts/. */

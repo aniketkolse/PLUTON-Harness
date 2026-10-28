@@ -467,6 +467,46 @@ export const MIGRATIONS: Migration[] = [
        SELECT id, IFNULL(run_id, ''), type, payload_json FROM events`,
     ],
   },
+  {
+    version: 13,
+    name: 'verification-attempt-evidence',
+    // Additive only: legacy rows default to attempt 0 with unknown (NULL)
+    // revision evidence. A verdict requires evidence for the task's CURRENT
+    // attempt; historical rows stay as immutable history instead of being
+    // rewritten or deleted.
+    statements: [
+      `ALTER TABLE verification_checks ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE verification_checks ADD COLUMN revision TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN worktree_dirty INTEGER`,
+      `ALTER TABLE verification_checks ADD COLUMN worktree_fingerprint TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN post_revision TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN post_worktree_fingerprint TEXT`,
+      `CREATE INDEX idx_verification_checks_task_attempt ON verification_checks(task_id, attempt)`,
+    ],
+  },
+  {
+    version: 14,
+    name: 'verification-evidence-identity',
+    // Evidence identity is stored, not inferred from NULLs:
+    // - `evidence_kind` distinguishes a real Git snapshot, an explicit non-Git
+    //   directory and a capture failure. Legacy rows stay NULL and can never
+    //   authorize a fresh verdict.
+    // - post-check kind/dirty state are recorded with the post fingerprint.
+    // - `executor` names the confinement mechanism that actually ran (or
+    //   refused) the check.
+    // - `superseded_at` retires the rows of an interrupted run when the same
+    //   attempt is verified again, without deleting evidence or bumping the
+    //   attempt.
+    statements: [
+      `ALTER TABLE verification_checks ADD COLUMN evidence_kind TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN post_evidence_kind TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN post_worktree_dirty INTEGER`,
+      `ALTER TABLE verification_checks ADD COLUMN executor TEXT`,
+      `ALTER TABLE verification_checks ADD COLUMN superseded_at TEXT`,
+      `CREATE INDEX idx_verification_checks_task_attempt_active
+         ON verification_checks(task_id, attempt, superseded_at)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

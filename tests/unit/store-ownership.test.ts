@@ -631,6 +631,8 @@ describe('migration v7', () => {
       'v10:native-execution-sessions',
       'v11:session-inbox',
       'v12:full-text-search',
+      'v13:verification-attempt-evidence',
+      'v14:verification-evidence-identity',
     ])
 
     const store = new Store(db)

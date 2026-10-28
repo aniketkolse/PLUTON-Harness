@@ -72,8 +72,8 @@ describe('chat migrations', () => {
     const db = openDatabase(path)
     openDbs.push(db)
     const result = migrate(db)
-    expect(SCHEMA_VERSION).toBe(12)
-    expect(result.to).toBe(12)
+    expect(SCHEMA_VERSION).toBe(14)
+    expect(result.to).toBe(14)
     expect(result.applied).toEqual([
       'v1:initial-schema',
       'v2:unique-sandbox-and-terminal-per-muse',
@@ -87,6 +87,8 @@ describe('chat migrations', () => {
       'v10:native-execution-sessions',
       'v11:session-inbox',
       'v12:full-text-search',
+      'v13:verification-attempt-evidence',
+      'v14:verification-evidence-identity',
     ])
     const tables = (
       db

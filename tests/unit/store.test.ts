@@ -95,6 +95,8 @@ describe('migrations', () => {
       'v10:native-execution-sessions',
       'v11:session-inbox',
       'v12:full-text-search',
+      'v13:verification-attempt-evidence',
+      'v14:verification-evidence-identity',
     ])
     const second = migrate(db)
     expect(second.applied).toEqual([])
@@ -147,6 +149,8 @@ describe('migrations', () => {
       'v10:native-execution-sessions',
       'v11:session-inbox',
       'v12:full-text-search',
+      'v13:verification-attempt-evidence',
+      'v14:verification-evidence-identity',
     ])
     const sandboxIds = db.prepare('SELECT id FROM sandboxes ORDER BY id').all().map((r) => r['id'])
     expect(sandboxIds).toEqual(['sb_new', 'sb_null_new'])
@@ -205,8 +209,8 @@ describe('migrations', () => {
     const result = migrate(db)
     expect(result.from).toBe(5)
     expect(result.to).toBe(SCHEMA_VERSION)
-    expect(SCHEMA_VERSION).toBe(12)
-    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology', 'v9:session-workspaces', 'v10:native-execution-sessions', 'v11:session-inbox', 'v12:full-text-search'])
+    expect(SCHEMA_VERSION).toBe(14)
+    expect(result.applied).toEqual(['v6:task-assignment-snapshot', 'v7:run-supervisor-ownership', 'v8:muse-to-ship-terminology', 'v9:session-workspaces', 'v10:native-execution-sessions', 'v11:session-inbox', 'v12:full-text-search', 'v13:verification-attempt-evidence', 'v14:verification-evidence-identity'])
 
     const store = new Store(db)
     const task = store.getTask('task_v5')
@@ -246,7 +250,7 @@ describe('migrations', () => {
 
     const result = migrate(db)
     expect(result.from).toBe(9)
-    expect(result.applied).toEqual(['v10:native-execution-sessions', 'v11:session-inbox', 'v12:full-text-search'])
+    expect(result.applied).toEqual(['v10:native-execution-sessions', 'v11:session-inbox', 'v12:full-text-search', 'v13:verification-attempt-evidence', 'v14:verification-evidence-identity'])
 
     const store = new Store(db)
     const legacy = store.getSandbox('sb_docker')

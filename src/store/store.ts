@@ -48,6 +48,7 @@ import {
   type TaskRecord,
   type TerminalRecord,
   type VerificationCheckRecord,
+  type VerificationEvidenceKind,
   type WorkspaceRecord,
 } from '../domain/models.ts'
 import { canonicalJson, payloadHash } from '../util/canonical.ts'
@@ -250,11 +251,19 @@ export interface NewVerificationCheckSpec {
   projectId: string
   runId: string
   taskId: string | null
+  /** Task attempt; defaults to 0 (run-level/manual checks). */
+  attempt?: number
   name: string
-  /** argv array â€” never a shell string. */
+  /** argv array — never a shell string. */
   command: string[]
   cwd: string | null
   workspaceId: string | null
+  /** What the evidence capture found; NULL/omitted is legacy/incomplete. */
+  evidenceKind?: VerificationEvidenceKind | null
+  /** Pre-check git evidence; all null when the capture was not a Git snapshot. */
+  revision?: string | null
+  worktreeDirty?: boolean | null
+  worktreeFingerprint?: string | null
 }
 
 export interface UpsertSandboxSpec {
@@ -1354,20 +1363,26 @@ export class Store {
     const now = nowIso()
     this.db
       .prepare(
-        `INSERT INTO verification_checks (id, project_id, run_id, task_id, name, command_json, cwd, workspace_id,
+        `INSERT INTO verification_checks (id, project_id, run_id, task_id, attempt, name, command_json, cwd,
+                                          workspace_id, evidence_kind, revision, worktree_dirty, worktree_fingerprint,
                                           status, exit_code, stdout_artifact, stderr_artifact, duration_ms,
                                           created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)`,
       )
       .run(
         id,
         spec.projectId,
         spec.runId,
         spec.taskId,
+        spec.attempt ?? 0,
         spec.name,
         stringifyJson(spec.command),
         spec.cwd,
         spec.workspaceId,
+        spec.evidenceKind ?? null,
+        spec.revision ?? null,
+        spec.worktreeDirty === undefined || spec.worktreeDirty === null ? null : Number(spec.worktreeDirty),
+        spec.worktreeFingerprint ?? null,
         now,
         now,
       )
@@ -1399,6 +1414,48 @@ export class Store {
     return rows.map(rowToVerificationCheck)
   }
 
+  /** Evidence rows for one task attempt, newest order stable by creation. */
+  listVerificationChecksByTaskAttempt(taskId: string, attempt: number): VerificationCheckRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM verification_checks WHERE task_id = ? AND attempt = ? ORDER BY created_at ASC, id ASC',
+      )
+      .all(taskId, attempt) as Row[]
+    return rows.map(rowToVerificationCheck)
+  }
+
+  /**
+   * Evidence rows of the current (non-superseded) verification run for one
+   * task attempt. An interrupted run keeps its rows as history, but a fresh
+   * `pluton verify` supersedes them so the verdict only sees complete attempts.
+   */
+  listCurrentVerificationChecksByTaskAttempt(taskId: string, attempt: number): VerificationCheckRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM verification_checks
+         WHERE task_id = ? AND attempt = ? AND superseded_at IS NULL
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all(taskId, attempt) as Row[]
+    return rows.map(rowToVerificationCheck)
+  }
+
+  /**
+   * Retire every not-yet-superseded evidence row for a task attempt. Called
+   * before a fresh verification run so a crash mid-run (pending rows, a
+   * half-written result) can be retried without editing the database or
+   * bumping the attempt. Historical rows stay queryable.
+   */
+  supersedeVerificationChecks(taskId: string, attempt: number): number {
+    const result = this.db
+      .prepare(
+        `UPDATE verification_checks SET superseded_at = ?, updated_at = ?
+         WHERE task_id = ? AND attempt = ? AND superseded_at IS NULL`,
+      )
+      .run(nowIso(), nowIso(), taskId, attempt)
+    return Number(result.changes)
+  }
+
   /**
    * Record a check's outcome. Only `pending` may move to a final status; a
    * re-set of the same status is an idempotent no-op, and a decided check is
@@ -1412,6 +1469,8 @@ export class Store {
       stdoutArtifact?: string | null
       stderrArtifact?: string | null
       durationMs?: number | null
+      /** Confinement mechanism that actually ran (or refused) the check. */
+      executor?: string | null
     },
   ): VerificationCheckRecord {
     const check = this.getVerificationCheck(id)
@@ -1425,7 +1484,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE verification_checks SET status = ?, exit_code = ?, stdout_artifact = ?, stderr_artifact = ?,
-                                        duration_ms = ?, updated_at = ?
+                                        duration_ms = ?, executor = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -1434,9 +1493,58 @@ export class Store {
         patch.stdoutArtifact ?? null,
         patch.stderrArtifact ?? null,
         patch.durationMs ?? null,
+        patch.executor ?? null,
         now,
         id,
       )
+    return this.getVerificationCheck(id)
+  }
+
+  /**
+   * Attach the post-check evidence. This is a separate write because the
+   * check must run first; evidence is immutable once recorded (a differing
+   * rewrite is refused, an identical re-write is idempotent).
+   *
+   * `postEvidenceKind`/`postWorktreeDirty` default to the pre-check values for
+   * older callers/tests, but the verification runner always records the real
+   * post-capture values (a failed post-capture must stay a failure).
+   */
+  setVerificationCheckPostEvidence(
+    id: string,
+    evidence: {
+      postEvidenceKind?: VerificationEvidenceKind | null
+      postRevision: string | null
+      postWorktreeDirty?: boolean | null
+      postWorktreeFingerprint: string | null
+    },
+  ): VerificationCheckRecord {
+    const check = this.getVerificationCheck(id)
+    const postKind = evidence.postEvidenceKind ?? check.evidenceKind
+    const postDirty =
+      evidence.postWorktreeDirty === undefined
+        ? check.worktreeDirty === null
+          ? null
+          : Number(check.worktreeDirty)
+        : evidence.postWorktreeDirty === null
+          ? null
+          : Number(evidence.postWorktreeDirty)
+    const changed =
+      (check.postEvidenceKind !== null && check.postEvidenceKind !== postKind) ||
+      (check.postRevision !== null && check.postRevision !== evidence.postRevision) ||
+      (check.postWorktreeDirty !== null && check.postWorktreeDirty !== (postDirty === null ? null : postDirty !== 0)) ||
+      (check.postWorktreeFingerprint !== null &&
+        check.postWorktreeFingerprint !== evidence.postWorktreeFingerprint)
+    if (changed) {
+      throw new ValidationError(`verification check ${id} already has different post-check evidence; evidence is immutable`)
+    }
+    const now = nowIso()
+    this.db
+      .prepare(
+        `UPDATE verification_checks SET post_evidence_kind = ?, post_revision = ?, post_worktree_dirty = ?,
+                                        post_worktree_fingerprint = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(postKind, evidence.postRevision, postDirty, evidence.postWorktreeFingerprint, now, id)
     return this.getVerificationCheck(id)
   }
 
@@ -2512,15 +2620,46 @@ function rowToVerificationCheck(r: Row): VerificationCheckRecord {
   }
   const exitCode = r['exit_code']
   const durationMs = r['duration_ms']
+  const dirty = nnum(r, 'worktree_dirty')
+  const postDirty = nnum(r, 'post_worktree_dirty')
+  const evidenceKind = nstr(r, 'evidence_kind')
+  if (
+    evidenceKind !== null &&
+    evidenceKind !== 'git' &&
+    evidenceKind !== 'non-git' &&
+    evidenceKind !== 'capture-failed'
+  ) {
+    throw new InternalError(`db row: invalid verification evidence kind '${evidenceKind}'`)
+  }
+  const postEvidenceKind = nstr(r, 'post_evidence_kind')
+  if (
+    postEvidenceKind !== null &&
+    postEvidenceKind !== 'git' &&
+    postEvidenceKind !== 'non-git' &&
+    postEvidenceKind !== 'capture-failed'
+  ) {
+    throw new InternalError(`db row: invalid verification post evidence kind '${postEvidenceKind}'`)
+  }
   return {
     id: str(r, 'id'),
     projectId: str(r, 'project_id'),
     runId: str(r, 'run_id'),
     taskId: nstr(r, 'task_id'),
+    attempt: num(r, 'attempt'),
     name: str(r, 'name'),
     command: parseJsonText<string[]>(nstr(r, 'command_json'), []),
     cwd: nstr(r, 'cwd'),
     workspaceId: nstr(r, 'workspace_id'),
+    evidenceKind,
+    revision: nstr(r, 'revision'),
+    worktreeDirty: dirty === null ? null : dirty !== 0,
+    worktreeFingerprint: nstr(r, 'worktree_fingerprint'),
+    postEvidenceKind,
+    postRevision: nstr(r, 'post_revision'),
+    postWorktreeFingerprint: nstr(r, 'post_worktree_fingerprint'),
+    postWorktreeDirty: postDirty === null ? null : postDirty !== 0,
+    executor: nstr(r, 'executor'),
+    supersededAt: nstr(r, 'superseded_at'),
     status,
     exitCode: exitCode === null || exitCode === undefined ? null : num(r, 'exit_code'),
     stdoutArtifact: nstr(r, 'stdout_artifact'),
