@@ -1,11 +1,16 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { VerificationCheckConfig } from '../config/schema.ts'
 import { ValidationError } from '../domain/errors.ts'
-import type { JsonValue } from '../domain/models.ts'
+import type { JsonValue, VerificationCheckRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState } from '../domain/state.ts'
 import type { Store } from '../store/store.ts'
-import { run } from '../util/exec.ts'
+import { captureWorkspaceEvidence, type WorkspaceEvidence } from './evidence.ts'
+import {
+  createVerificationExecutor,
+  createVerificationSnapshot,
+  type VerificationExecutor,
+} from './executor.ts'
 import { IndependentVerifier } from './independent.ts'
 
 /**
@@ -84,6 +89,8 @@ export interface VerificationRunOptions {
   timeoutMs?: number
   /** Injectable clock (tests); defaults to Date.now. */
   now?: () => number
+  /** Test seam: replaces the platform verification executor. */
+  executor?: VerificationExecutor
 }
 
 export interface VerificationCheckResult {
@@ -95,13 +102,38 @@ export interface VerificationCheckResult {
   durationMs: number
   /** Human reason when the check did not pass. */
   note: string | null
+  /** Confinement mechanism that actually ran (or refused) the check. */
+  executor: string
 }
 
 export interface VerificationRunReport {
   runId: string
   taskId: string | null
+  /** Task attempt this evidence belongs to (0 for run-level checks). */
+  attempt: number
   results: VerificationCheckResult[]
   allPassed: boolean
+  /** Git evidence: the state checks were run against, and the post-check state. */
+  evidence: {
+    kind: WorkspaceEvidence['kind']
+    available: boolean
+    revision: string | null
+    worktreeDirty: boolean | null
+    worktreeFingerprint: string | null
+    postKind: WorkspaceEvidence['kind']
+    postRevision: string | null
+    postWorktreeDirty: boolean | null
+    postWorktreeFingerprint: string | null
+  }
+}
+
+const NO_EVIDENCE: WorkspaceEvidence = {
+  kind: 'capture-failed',
+  available: false,
+  reason: 'no verification evidence was captured',
+  revision: null,
+  worktreeDirty: null,
+  worktreeFingerprint: null,
 }
 
 /**
@@ -113,78 +145,183 @@ export async function runVerificationChecks(opts: VerificationRunOptions): Promi
   const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_CHECK_MAX_OUTPUT_BYTES
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS
   const now = opts.now ?? Date.now
+  const run = opts.store.getRun(opts.runId)
+  if (run.projectId !== opts.projectId) {
+    throw new ValidationError(
+      `run ${opts.runId} belongs to project ${run.projectId}, not ${opts.projectId}; refusing to record verification evidence`,
+    )
+  }
+  let taskId: string | null = null
+  let attempt = 0
+  if (opts.taskId !== null) {
+    const task = opts.store.getTask(opts.taskId)
+    if (task.runId !== opts.runId) {
+      throw new ValidationError(
+        `task ${opts.taskId} belongs to run ${task.runId}, not ${opts.runId}; refusing to record verification evidence`,
+      )
+    }
+    if (task.state !== 'verifying') {
+      throw new ValidationError(
+        `task ${opts.taskId} is '${task.state}'; only a task in 'verifying' can be verified`,
+      )
+    }
+    taskId = task.id
+    attempt = task.attempt
+    // A previous attempt of this same verification may have been interrupted
+    // (crash, Ctrl-C, engine death). Retire its rows so a fresh run is a clean,
+    // complete evidence set; do not delete history and do not bump the task
+    // attempt just to make the gate pass.
+    opts.store.supersedeVerificationChecks(task.id, attempt)
+  }
   const results: VerificationCheckResult[] = []
+  let firstBefore: WorkspaceEvidence | null = null
+  let lastAfter: WorkspaceEvidence | null = null
   mkdirSync(opts.artifactsDir, { recursive: true })
 
-  for (const check of opts.checks) {
-    const row = opts.store.createVerificationCheck({
-      projectId: opts.projectId,
-      runId: opts.runId,
-      taskId: opts.taskId,
-      name: check.name,
-      command: check.command,
-      cwd: opts.cwd,
-      workspaceId: opts.workspaceId,
-    })
-    const started = now()
-    let status: 'passed' | 'failed' = 'failed'
-    let exitCode: number | null = null
-    let note: string | null = null
-    let stdout = ''
-    let stderr = ''
+  const executor = opts.executor ?? createVerificationExecutor()
+  const availability = executor.availability ?? { available: true, reason: null }
+  let snapshot: string | null = null
+  let snapshotError: string | null = null
+  if (availability.available) {
+    try {
+      snapshot = createVerificationSnapshot(opts.cwd)
+    } catch (error) {
+      // A failed snapshot is an infrastructure refusal: every check fails
+      // closed and nothing is executed on the host.
+      snapshotError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  const refusal = !availability.available
+    ? availability.reason ?? 'verification isolation is unavailable'
+    : snapshotError
 
-    const denied = deniedCommandReason(check.command)
-    if (denied !== null) {
-      note = denied
-      stderr = denied
-    } else {
-      const res = await run(check.command, { cwd: opts.cwd, timeoutMs, maxOutputBytes })
-      exitCode = res.exitCode
-      stdout = res.stdout
-      stderr = res.stderr
-      if (res.timedOut) {
-        note = `check timed out after ${String(timeoutMs)}ms`
-      } else if (res.exitCode === 0) {
-        status = 'passed'
-      } else if (res.exitCode === null) {
-        note = 'check failed to start'
+  try {
+    for (const check of opts.checks) {
+      // Capture evidence per check: a check that moves HEAD (or rewrites the
+      // worktree) must not be able to lend its result to a different revision.
+      const before = await captureWorkspaceEvidence(opts.cwd)
+      const row = opts.store.createVerificationCheck({
+        projectId: opts.projectId,
+        runId: opts.runId,
+        taskId,
+        attempt,
+        name: check.name,
+        command: check.command,
+        cwd: opts.cwd,
+        workspaceId: opts.workspaceId,
+        evidenceKind: before.kind,
+        revision: before.revision,
+        worktreeDirty: before.worktreeDirty,
+        worktreeFingerprint: before.worktreeFingerprint,
+      })
+      const started = now()
+      let status: 'passed' | 'failed' = 'failed'
+      let exitCode: number | null = null
+      let note: string | null = null
+      let stdout = ''
+      let stderr = ''
+      let executorId = executor.id
+
+      const denied = deniedCommandReason(check.command)
+      if (denied !== null) {
+        note = denied
+        stderr = denied
+      } else if (refusal !== null || snapshot === null) {
+        note = `verification isolation is unavailable: ${refusal ?? 'no disposable snapshot'}`
+        stderr = note
       } else {
-        note = `exit code ${String(res.exitCode)}`
+        try {
+          const res = await executor.run({
+            command: check.command,
+            cwd: snapshot,
+            workspaceRoot: snapshot,
+            env: {},
+            timeoutMs,
+            maxOutputBytes,
+            network: 'none',
+          })
+          executorId = res.executor
+          exitCode = res.exitCode
+          stdout = res.stdout
+          stderr = res.stderr
+          if (res.timedOut) {
+            note = `check timed out after ${String(timeoutMs)}ms`
+          } else if (res.exitCode === 0) {
+            status = 'passed'
+          } else if (res.exitCode === null) {
+            note = 'check failed to start'
+          } else {
+            note = `exit code ${String(res.exitCode)}`
+          }
+        } catch (error) {
+          note = `verification isolation is unavailable: ${error instanceof Error ? error.message : String(error)}`
+          stderr = note
+        }
       }
-    }
 
-    const durationMs = now() - started
-    const artifacts = writeCheckArtifacts(opts.artifactsDir, row.id, stdout, stderr)
-    opts.store.setVerificationCheckResult(row.id, {
-      status,
-      exitCode,
-      stdoutArtifact: artifacts.stdout,
-      stderrArtifact: artifacts.stderr,
-      durationMs,
-    })
-    const payload: JsonValue = {
-      checkId: row.id,
-      name: check.name,
-      status,
-      exitCode,
-      durationMs,
-      ...(note !== null ? { note } : {}),
+      const durationMs = now() - started
+      const artifacts = writeCheckArtifacts(opts.artifactsDir, row.id, stdout, stderr)
+      opts.store.setVerificationCheckResult(row.id, {
+        status,
+        exitCode,
+        stdoutArtifact: artifacts.stdout,
+        stderrArtifact: artifacts.stderr,
+        durationMs,
+        executor: executorId,
+      })
+      const after = await captureWorkspaceEvidence(opts.cwd)
+      opts.store.setVerificationCheckPostEvidence(row.id, {
+        postEvidenceKind: after.kind,
+        postRevision: after.revision,
+        postWorktreeDirty: after.worktreeDirty,
+        postWorktreeFingerprint: after.worktreeFingerprint,
+      })
+      if (firstBefore === null) firstBefore = before
+      lastAfter = after
+      const payload: JsonValue = {
+        checkId: row.id,
+        name: check.name,
+        status,
+        exitCode,
+        durationMs,
+        executor: executorId,
+        ...(note !== null ? { note } : {}),
+        attempt,
+        ...(before.revision !== null ? { revision: before.revision } : {}),
+        ...(after.revision !== null ? { postRevision: after.revision } : {}),
+      }
+      opts.store.appendEvent({
+        projectId: opts.projectId,
+        runId: opts.runId,
+        taskId,
+        type: 'verification.run',
+        payload,
+      })
+      results.push({ checkId: row.id, name: check.name, status, exitCode, durationMs, note, executor: executorId })
     }
-    opts.store.appendEvent({
-      projectId: opts.projectId,
-      runId: opts.runId,
-      taskId: opts.taskId,
-      type: 'verification.run',
-      payload,
-    })
-    results.push({ checkId: row.id, name: check.name, status, exitCode, durationMs, note })
+  } finally {
+    if (snapshot !== null) rmSync(snapshot, { recursive: true, force: true })
   }
 
+  const before = firstBefore ?? NO_EVIDENCE
+  const after = lastAfter ?? NO_EVIDENCE
   return {
     runId: opts.runId,
-    taskId: opts.taskId,
+    taskId,
+    attempt,
     results,
     allPassed: results.every((r) => r.status === 'passed'),
+    evidence: {
+      kind: before.kind,
+      available: before.available,
+      revision: before.revision,
+      worktreeDirty: before.worktreeDirty,
+      worktreeFingerprint: before.worktreeFingerprint,
+      postKind: after.kind,
+      postRevision: after.revision,
+      postWorktreeDirty: after.worktreeDirty,
+      postWorktreeFingerprint: after.worktreeFingerprint,
+    },
   }
 }
 
@@ -207,6 +344,109 @@ export interface TaskVerdict {
   state: 'completed' | 'failed'
   passed: boolean
   summary: string
+}
+
+/**
+ * Return why a set of same-attempt evidence rows cannot support a verdict, or
+ * null when they are internally consistent.
+ *
+ * A verdict is only ever allowed on evidence that says exactly what was
+ * checked and where:
+ * - the evidence kind is explicit (NULL is a legacy row, not "non-Git");
+ * - a Git snapshot has a complete revision, dirty state, fingerprint, post
+ *   revision/fingerprint and executor identity;
+ * - every check saw the same HEAD and the same byte-level worktree state, and
+ *   no check moved either one;
+ * - a capture failure is never downgraded to non-Git.
+ *
+ * `requireGit` is set for a task with a Pluton-managed (Git) checkout, and for
+ * integration: a non-Git directory cannot attest a Git branch.
+ */
+export interface VerificationEvidenceRules {
+  requireGit?: boolean
+}
+
+export function verificationEvidenceProblem(
+  checks: VerificationCheckRecord[],
+  rules: VerificationEvidenceRules = {},
+): string | null {
+  if (checks.length === 0) return 'no verification checks were recorded for the current attempt'
+  if (checks.some((c) => c.supersededAt !== null)) {
+    return 'superseded verification evidence cannot authorize a verdict'
+  }
+
+  const first = checks[0] as VerificationCheckRecord
+  if (first.evidenceKind === null) {
+    return 'verification evidence has no recorded kind (legacy or incomplete row); re-run verification'
+  }
+  if (checks.some((c) => c.evidenceKind !== first.evidenceKind)) {
+    return 'checks recorded different kinds of workspace evidence'
+  }
+  if (first.evidenceKind === 'capture-failed') {
+    return 'workspace evidence capture failed; a failed capture cannot authorize a verdict'
+  }
+  if (rules.requireGit === true && first.evidenceKind !== 'git') {
+    return 'a Git-backed task has non-Git verification evidence; refusing to accept it'
+  }
+
+  if (first.evidenceKind === 'git') {
+    const revisions = new Set<string>()
+    const fingerprints = new Set<string>()
+    const postFingerprints = new Set<string>()
+    for (const check of checks) {
+      if (check.postEvidenceKind !== 'git') {
+        return `check '${check.name}' has no complete post-check Git evidence`
+      }
+      if (
+        check.revision === null ||
+        check.postRevision === null ||
+        check.worktreeDirty === null ||
+        check.postWorktreeDirty === null ||
+        check.worktreeFingerprint === null ||
+        check.postWorktreeFingerprint === null
+      ) {
+        return `check '${check.name}' has incomplete Git evidence (revision, dirty state or fingerprint is missing)`
+      }
+      if (check.executor === null || check.executor.trim() === '') {
+        return `check '${check.name}' has no recorded executor identity`
+      }
+      if (check.revision !== check.postRevision) {
+        return `check '${check.name}' moved HEAD from ${check.revision} to ${check.postRevision}`
+      }
+      revisions.add(check.revision)
+      fingerprints.add(check.worktreeFingerprint)
+      postFingerprints.add(check.postWorktreeFingerprint)
+    }
+    if (revisions.size > 1) return 'checks were run against different HEAD revisions'
+    if (fingerprints.size > 1) return 'checks were run against different worktree states'
+    if (postFingerprints.size > 1) return 'checks left the worktree in different states'
+    const pre = [...fingerprints][0] as string
+    const post = [...postFingerprints][0] as string
+    if (pre !== post) return 'a verification check changed the worktree after it was checked'
+    return null
+  }
+
+  // Explicit non-Git evidence: the absence of a revision is only valid when
+  // the capture actually proved there is no Git metadata.
+  for (const check of checks) {
+    if (check.postEvidenceKind !== 'non-git') {
+      return `check '${check.name}' has no complete post-check non-Git evidence`
+    }
+    if (
+      check.revision !== null ||
+      check.worktreeDirty !== null ||
+      check.worktreeFingerprint !== null ||
+      check.postRevision !== null ||
+      check.postWorktreeDirty !== null ||
+      check.postWorktreeFingerprint !== null
+    ) {
+      return `check '${check.name}' mixes non-Git evidence with Git fields`
+    }
+    if (check.executor === null || check.executor.trim() === '') {
+      return `check '${check.name}' has no recorded executor identity`
+    }
+  }
+  return null
 }
 
 export interface ApplyVerificationOptions {
@@ -233,13 +473,21 @@ export function applyTaskVerificationVerdict(
       `task ${taskId} is '${task.state}'; only a task in 'verifying' can receive a verification verdict`,
     )
   }
-  const checks = store.listVerificationChecksByTask(taskId)
+  const checks = store.listCurrentVerificationChecksByTaskAttempt(taskId, task.attempt)
   if (checks.length === 0) {
     throw new ValidationError(
-      `no verification checks were recorded for task ${taskId}; refusing to complete it (no evidence, no green)`,
+      `no verification checks were recorded for task ${taskId} attempt ${String(task.attempt)}; refusing to complete it (no evidence, no green)`,
     )
   }
+  for (const check of checks) {
+    if (check.taskId !== taskId || check.runId !== task.runId || check.attempt !== task.attempt) {
+      throw new ValidationError(
+        `verification check ${check.id} is bound to ${check.taskId ?? '(no task)'}/${check.runId} attempt ${String(check.attempt)}, not task ${taskId} run ${task.runId} attempt ${String(task.attempt)}; refusing to apply a verdict`,
+      )
+    }
+  }
   const run = store.getRun(task.runId)
+  const workspace = store.getWorkspaceByTask(taskId)
   const unmet = checks.filter((c) => c.status !== 'passed')
 
   const verifier = opts?.verifier ?? new IndependentVerifier()
@@ -261,6 +509,15 @@ export function applyTaskVerificationVerdict(
           : undefined,
     },
   )
+
+  if (unmet.length === 0 && report.verdict === 'verified') {
+    const evidenceProblem = verificationEvidenceProblem(checks, { requireGit: workspace !== null })
+    if (evidenceProblem !== null) {
+      throw new ValidationError(
+        `verification evidence for task ${taskId} attempt ${String(task.attempt)} is incomplete or inconsistent: ${evidenceProblem}; refusing to apply a verdict`,
+      )
+    }
+  }
 
   store.recordVerification({
     runId: task.runId,
@@ -312,8 +569,21 @@ export function applyTaskVerificationVerdict(
       task.result !== null && typeof task.result === 'object' && !Array.isArray(task.result)
         ? (task.result as Record<string, JsonValue>)
         : {}
+    const latestPost = [...checks].reverse().find((c) => c.postWorktreeFingerprint !== null)
     store.setTaskState(taskId, 'completed', {
-      result: { ...prior, verifiedBy: checks.map((c) => c.id), verificationSummary: report.summary },
+      result: {
+        ...prior,
+        verifiedBy: checks.map((c) => c.id),
+        verificationSummary: report.summary,
+        verificationEvidence: {
+          attempt: task.attempt,
+          revision: checks[0]?.revision ?? null,
+          postRevision: checks[0]?.postRevision ?? null,
+          worktreeFingerprint: checks[0]?.worktreeFingerprint ?? null,
+          postWorktreeFingerprint: latestPost?.postWorktreeFingerprint ?? null,
+          checks: checks.length,
+        },
+      },
     })
     store.appendEvent({
       projectId: run.projectId,
@@ -440,27 +710,71 @@ export function finalizeRunVerdict(store: Store, runId: string): RunVerdict | nu
 
   const allCompleted = tasks.every((t) => t.state === 'completed')
   const cancelledTaskIds = tasks.filter((t) => t.state === 'cancelled').map((t) => t.id)
-  const state: RunState = allCompleted ? 'completed' : 'failed'
+
+  // Defense in depth: a task may be `completed` while its current attempt's
+  // evidence is stale (e.g. passed on attempt 0, re-run on attempt 1 without a
+  // verdict). A run must never close green on evidence that does not attest the
+  // work currently in the checkout.
+  const evidenceProblems: string[] = []
+  if (allCompleted) {
+    for (const task of tasks) {
+      const workspace = store.getWorkspaceByTask(task.id)
+      const current = store.listCurrentVerificationChecksByTaskAttempt(task.id, task.attempt)
+      if (current.length === 0) {
+        // A task with a Pluton-managed checkout is Git-backed and must have
+        // current-attempt evidence. A task that was verified on an earlier
+        // attempt must also not close green on a re-run with no evidence at
+        // all: absence is only tolerated for a task where verification was
+        // never configured and there is no checkout to attest.
+        const everVerified = store.listVerificationChecksByTask(task.id).length > 0
+        if (workspace !== null || everVerified) {
+          evidenceProblems.push(`task ${task.id} attempt ${String(task.attempt)}: no verification evidence for the current attempt`)
+        }
+        continue
+      }
+      const problem = verificationEvidenceProblem(current, { requireGit: workspace !== null })
+      if (problem !== null) {
+        evidenceProblems.push(`task ${task.id} attempt ${String(task.attempt)}: ${problem}`)
+        continue
+      }
+      const failed = current.filter((c) => c.status !== 'passed')
+      if (failed.length > 0) {
+        evidenceProblems.push(
+          `task ${task.id} attempt ${String(task.attempt)}: ${String(failed.length)} check(s) not passed (${failed.map((c) => c.name).join(', ')})`,
+        )
+      }
+    }
+  }
+
+  const state: RunState = allCompleted && evidenceProblems.length === 0 ? 'completed' : 'failed'
   store.setRunState(runId, state, {
     // The manager's answer (persisted when the run entered `verifying`) is the
     // run's final summary — the verification label only fills in when no
     // answer was ever produced.
-    finalSummary: allCompleted
-      ? (run.finalSummary ?? `${String(tasks.length)}/${String(tasks.length)} tasks verified`)
-      : cancelledTaskIds.length > 0
-        ? `verification failed; ${String(cancelledTaskIds.length)} task(s) were cancelled`
-        : 'verification failed',
+    finalSummary:
+      allCompleted && evidenceProblems.length === 0
+        ? (run.finalSummary ?? `${String(tasks.length)}/${String(tasks.length)} tasks verified`)
+        : evidenceProblems.length > 0
+          ? 'verification evidence is missing or invalid; refusing to complete the run'
+          : cancelledTaskIds.length > 0
+            ? `verification failed; ${String(cancelledTaskIds.length)} task(s) were cancelled`
+            : 'verification failed',
   })
   store.appendEvent({
     projectId: run.projectId,
     runId,
     type: 'run.finished',
     payload: {
-      outcome: allCompleted ? 'success' : 'failure',
-      via: 'verification',
+      outcome: allCompleted && evidenceProblems.length === 0 ? 'success' : 'failure',
+      via: evidenceProblems.length > 0 ? 'verification_evidence' : 'verification',
       tasks: tasks.length,
       ...(cancelledTaskIds.length > 0 ? { cancelledTasks: cancelledTaskIds.length } : {}),
+      ...(evidenceProblems.length > 0 ? { evidenceProblems } : {}),
     },
   })
-  return { runId, state, outcome: allCompleted ? 'success' : 'failure' }
+  return {
+    runId,
+    state,
+    outcome: allCompleted && evidenceProblems.length === 0 ? 'success' : 'failure',
+  }
 }

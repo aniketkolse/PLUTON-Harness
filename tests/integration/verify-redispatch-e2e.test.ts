@@ -9,9 +9,14 @@ import { loadConfig } from '../../src/config/load.ts'
 import { admitTask } from '../../src/orchestrator/task-graph.ts'
 import { resumeRun } from '../../src/cli/commands/run.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
+import { createVerificationExecutor } from '../../src/verify/executor.ts'
 
 const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
 const NODE = JSON.stringify(process.execPath)
+// `pluton verify` cannot inject a test executor. The completion e2e only runs
+// where production verification confinement is actually available; elsewhere
+// the same test asserts fail-closed behaviour instead.
+const ISOLATION_AVAILABLE = createVerificationExecutor().availability?.available === true
 
 let projectDir: string
 
@@ -93,7 +98,7 @@ function runCli(args: string[]): { status: number; stdout: string; stderr: strin
 }
 
 describe('PR-4: E2E Verification Gate Re-dispatch', () => {
-  it('unblocks downstream task via pluton verify --dispatch and runs pipeline to completion', async () => {
+  it.runIf(ISOLATION_AVAILABLE)('unblocks downstream task via pluton verify --dispatch and runs pipeline to completion', async () => {
     const loaded = loadConfig(projectDir)
     const { store, projectId } = bootstrapStore(loaded)
 
@@ -212,6 +217,95 @@ describe('PR-4: E2E Verification Gate Re-dispatch', () => {
       expect(finalTask1.state).toBe('completed')
       expect(finalTask2.state).toBe('completed')
       expect(finalRun.state).toBe('completed')
+    } finally {
+      reopened.store.close()
+    }
+  })
+
+  it.runIf(!ISOLATION_AVAILABLE)('fails closed and does not redispatch when verification cannot be confined', () => {
+    const loaded = loadConfig(projectDir)
+    const { store, projectId } = bootstrapStore(loaded)
+
+    let runId: string
+    let task1Id: string
+    let task2Id: string
+
+    try {
+      const run = store.createRun({
+        projectId,
+        goal: 'fail closed without verification confinement',
+        origin: 'cli',
+        requestedBy: 'test-e2e',
+        acceptanceCriteria: [],
+        managerMuseId: 'manager',
+        budget: {
+          maxConcurrentWorkers: 2,
+          maxTasks: 10,
+          maxDelegationDepth: 3,
+          maxRunMinutes: 30,
+          defaultTaskMinutes: 10,
+        },
+      })
+      runId = run.id
+      store.setRunState(runId, 'active')
+      const task1 = admitTask(
+        store,
+        {
+          runId,
+          parentTaskId: null,
+          title: 'upstream task 1',
+          brief: 'echo upstream-finished',
+          acceptanceCriteria: [],
+          assigneeMuseId: 'worker-a',
+        },
+        { maxChildrenPerTask: 5 },
+      )
+      task1Id = task1.id
+      store.setTaskState(task1Id, 'admitted')
+      store.setTaskState(task1Id, 'running')
+      store.setTaskState(task1Id, 'verifying', { result: { outcome: 'success', summary: 'upstream complete' } })
+      const task2 = admitTask(
+        store,
+        {
+          runId,
+          parentTaskId: null,
+          title: 'downstream task 2',
+          brief: 'echo downstream-finished',
+          acceptanceCriteria: [],
+          assigneeMuseId: 'worker-a',
+          dependsOn: [task1Id],
+        },
+        { maxChildrenPerTask: 5 },
+      )
+      task2Id = task2.id
+      store.setRunState(runId, 'verifying')
+    } finally {
+      store.close()
+    }
+
+    const res = runCli(['verify', '--run', runId, '--dispatch', '--json'])
+    expect(res.status).toBe(0)
+    const env = JSON.parse(res.stdout) as {
+      ok: boolean
+      data: {
+        tasks: { taskId: string; verdict: string; checks: { status: string; note: string | null }[] }[]
+        runVerdict: { state: string; outcome: string; redispatchedTasks?: string[] } | null
+        redispatchSummary?: unknown
+      }
+    }
+    expect(env.ok).toBe(true)
+    expect(env.data.tasks[0]?.taskId).toBe(task1Id)
+    expect(env.data.tasks[0]?.verdict).toBe('failed')
+    expect(env.data.tasks[0]?.checks[0]?.status).toBe('failed')
+    expect(env.data.tasks[0]?.checks[0]?.note).toMatch(/verification isolation is unavailable/)
+    expect(env.data.redispatchSummary).toBeUndefined()
+    expect(env.data.runVerdict?.redispatchedTasks ?? []).toEqual([])
+
+    const reopened = bootstrapStore(loadConfig(projectDir))
+    try {
+      expect(reopened.store.getTask(task1Id).state).toBe('failed')
+      expect(reopened.store.getTask(task2Id).state).toBe('queued')
+      expect(reopened.store.getRun(runId).state).not.toBe('completed')
     } finally {
       reopened.store.close()
     }

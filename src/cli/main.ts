@@ -15,6 +15,7 @@ import { stateDir } from '../config/load.ts'
 import { TERMINAL_TASK_STATES } from '../domain/state.ts'
 import { registerBuiltinEngines } from '../engines/registry.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../verify/runner.ts'
+import { diffWorktreePatch } from '../workspace/trusted-git.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { bootstrapStore } from '../bootstrap.ts'
 import { inheritStdioSpawn } from '../terminal/attach.ts'
@@ -804,6 +805,13 @@ program
         if (targets.length === 0) {
           throw new ValidationError(`run ${run.id} has no tasks in 'verifying'; nothing to verify`)
         }
+        for (const target of targets) {
+          if (target.runId !== run.id) {
+            throw new ValidationError(
+              `task ${target.id} belongs to run ${target.runId}, not ${run.id}; refusing to verify it under this run`,
+            )
+          }
+        }
         const artifactsDir = join(stateDir(ctx.loaded.rootDir), 'artifacts')
         const taskReports: {
           taskId: string
@@ -830,17 +838,16 @@ program
           let diffText = ''
           let changedFiles: string[] = []
           if (ws !== null) {
-            const diffRes = await execRun(['git', '-C', ws.path, 'diff', `${ws.baseCommit}...HEAD`], {
-              timeoutMs: 15_000,
-              maxOutputBytes: 100_000,
-            }).catch(() => null)
-            if (diffRes && diffRes.exitCode === 0) diffText = diffRes.stdout
-            const nameRes = await execRun(['git', '-C', ws.path, 'diff', '--name-only', `${ws.baseCommit}...HEAD`], {
-              timeoutMs: 10_000,
-              maxOutputBytes: 50_000,
-            }).catch(() => null)
-            if (nameRes && nameRes.exitCode === 0) {
-              changedFiles = nameRes.stdout.split('\n').map((s: string) => s.trim()).filter(Boolean)
+            try {
+              const diff = await diffWorktreePatch(ws.path, ws.baseCommit)
+              diffText = diff.diff
+              changedFiles = diff.files
+            } catch (error) {
+              throw new ValidationError(
+                `could not capture the verified diff for task ${task.id} through trusted Git plumbing: ${
+                  error instanceof Error ? error.message : String(error)
+                }; refusing to apply a verdict`,
+              )
             }
           }
           const verdict = applyTaskVerificationVerdict(store, task.id, { diffText, changedFiles })

@@ -7,7 +7,7 @@ import { decideApproval, sweepExpiredApprovals } from '../../src/cli/commands/ap
 import type { ProjectContext } from '../../src/cli/context.ts'
 import type { LoadedConfig } from '../../src/config/load.ts'
 import { PERMISSIONS, type Permission } from '../../src/domain/permissions.ts'
-import type { ApprovalRecord, MuseRecord, TaskRecord } from '../../src/domain/models.ts'
+import type { ApprovalMode, ApprovalRecord, MuseRecord, TaskRecord } from '../../src/domain/models.ts'
 import { defaultCapabilities } from '../../src/engines/contract/types.ts'
 import type {
   EngineAdapter,
@@ -38,6 +38,7 @@ import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
 import type { PlutonToolBridge, ToolBridgeLimits } from '../../src/tools/bridge.ts'
 import { applyTaskVerificationVerdict, finalizeRunVerdict, runVerificationChecks } from '../../src/verify/runner.ts'
+import { hostTestExecutor } from '../helpers/verification.ts'
 import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
 
 /**
@@ -95,6 +96,8 @@ interface World {
 interface MakeWorldOptions {
   managerScript?: MockScriptStep[]
   managerTools?: (bridge: PlutonToolBridge) => Promise<void>
+  /** Manager approval mode (default `autonomous-bounded`; direct channel asks need an ask mode). */
+  managerApprovalMode?: ApprovalMode
   workerScripts?: Record<string, MockScriptStep[]>
   isolatedMuses?: string[]
   repoGit?: boolean
@@ -163,7 +166,7 @@ function makeWorld(opts: MakeWorldOptions = {}): World {
       instructionsFile: null,
       workspacePolicy: 'coordinator-read-only',
       permissions: [...PERMISSIONS],
-      approvalMode: 'autonomous-bounded',
+      approvalMode: opts.managerApprovalMode ?? 'autonomous-bounded',
       engineHome: '.pluton/engine-homes/manager',
     },
     {
@@ -750,6 +753,9 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     let taskId = ''
     const world = makeWorld({
       onStartSession: (muse, req) => captured.push({ muse, req }),
+      // Engine session asks are operator-gated here; the default
+      // `autonomous-bounded` mode denies at the channel boundary by design.
+      managerApprovalMode: 'ask-always',
       managerTools: async (bridge) => {
         taskId = (await createViaBridge(bridge, { title: 'A1', assigneeMuseId: 'worker-a' })).id
       },
@@ -776,8 +782,8 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     // An engine ask becomes a durable approval bound to this run/task/Muse …
     const request = worker!.req.approvals!.requestPermission({
       requestId: 'call_w1',
-      description: 'engine requested permission: write src/app.ts',
-      scope: { toolKind: 'edit' },
+      description: 'engine requested permission: read .env',
+      scope: { toolKind: 'read', path: '.env' },
     })
     const mine = world.store
       .listApprovals(world.runId)
@@ -799,8 +805,8 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     // The manager session gets its own channel, bound to the manager Muse.
     const ask = manager!.req.approvals!.requestPermission({
       requestId: 'call_m1',
-      description: 'engine requested permission: run a shell command',
-      scope: {},
+      description: 'engine requested permission: use an external tool',
+      scope: { toolKind: 'mcp.call' },
     })
     const managerPending = world.store
       .listApprovals(world.runId)
@@ -870,6 +876,7 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
       cwd: world.dir,
       workspaceId: null,
       artifactsDir: join(world.dir, '.pluton', 'state', 'artifacts'),
+      executor: hostTestExecutor(),
     })
     expect(report.allPassed).toBe(true)
     const verdict = applyTaskVerificationVerdict(world.store, task?.id as string)
@@ -1506,7 +1513,7 @@ function makeAskingWorld(opts: {
     managerTools: opts.managerTools ?? delegateOneTask,
     workerScripts: {
       'worker-a': opts.workerScript ?? [
-        { requestPermission: { description: 'engine requested permission: write src/app.ts' } },
+        { requestPermission: { description: 'engine requested permission: read .env' } },
       ],
     },
     ...(opts.onStartSession !== undefined ? { onStartSession: opts.onStartSession } : {}),
@@ -1531,7 +1538,7 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
     const approval = pendingEngineApprovals(world)[0] as ApprovalRecord
     const task = onlyTask(world)
     expect(approval).toMatchObject({ taskId: task.id, requestedByMuseId: 'worker-a' })
-    expect(approval.reason).toContain('write src/app.ts')
+    expect(approval.reason).toContain('read .env')
     // The engine is waiting on the operator: the task says so, not "running".
     expect(task.state).toBe('needs_approval')
 
@@ -1542,7 +1549,7 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
     // Read INSIDE the hook: it fires after onSettled's flip, so the task was
     // already back to running when the engine received its answer.
     expect(observations[0]).toMatchObject({ muse: 'worker-a', decision: 'allow', taskState: 'running' })
-    expect(observations[0]?.request.description).toContain('write src/app.ts')
+    expect(observations[0]?.request.description).toContain('read .env')
 
     const out = await run
     expect(out.state).toBe('completed')
@@ -1614,7 +1621,7 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
     const { world, observations } = makeAskingWorld({
       workerScript: [
         {
-          requestPermission: { description: 'engine requested permission: write src/app.ts' },
+          requestPermission: { description: 'engine requested permission: read .env' },
           outcome: 'cancelled',
         },
       ],
@@ -1661,7 +1668,7 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
     const { world } = makeAskingWorld({
       workerScript: [
         {
-          requestPermission: { description: 'engine requested permission: write src/app.ts' },
+          requestPermission: { description: 'engine requested permission: read .env' },
           outcome: 'success',
         },
       ],
@@ -1702,6 +1709,9 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
     const managerChannels: EnginePermissionChannel[] = []
     let ask!: Promise<EnginePermissionDecision>
     const world = makeWorld({
+      // Engine permission asks need an ask-capable mode: `autonomous-bounded`
+      // denies at the channel boundary.
+      managerApprovalMode: 'ask-always',
       // The adapter's delayMs is the engine's own work (not a test sleep): the
       // manager's prompt must outlive the decision below, because closing the
       // manager session settles its pending asks fail-closed, and the worker's
@@ -1715,8 +1725,8 @@ describe('RunSupervisor — waiting-for-approval worker state (CS-4)', () => {
         )
         ask = (managerChannels[0] as EnginePermissionChannel).requestPermission({
           requestId: 'mgr_1',
-          description: 'engine requested permission: run a shell command',
-          scope: {},
+          description: 'engine requested permission: use an external tool',
+          scope: { toolKind: 'mcp.call' },
         })
       },
       onStartSession: (museId, req) => {

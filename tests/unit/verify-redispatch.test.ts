@@ -121,6 +121,53 @@ function createTestSetup(): { store: Store; runId: string; task1Id: string; task
   return { store, runId: run.id, task1Id: task1.id, task2Id: task2.id }
 }
 
+function recordCheck(
+  store: Store,
+  spec: {
+    runId: string
+    taskId: string
+    attempt?: number
+    name: string
+    status?: 'passed' | 'failed'
+    revision?: string
+    postRevision?: string
+    fingerprint?: string
+    postFingerprint?: string
+  },
+): ReturnType<Store['createVerificationCheck']> {
+  const revision = spec.revision ?? 'a'.repeat(40)
+  const postRevision = spec.postRevision ?? revision
+  const fingerprint = spec.fingerprint ?? 'f'.repeat(64)
+  const postFingerprint = spec.postFingerprint ?? fingerprint
+  const status = spec.status ?? 'passed'
+  const check = store.createVerificationCheck({
+    projectId: store.getRun(spec.runId).projectId,
+    runId: spec.runId,
+    taskId: spec.taskId,
+    attempt: spec.attempt ?? 0,
+    name: spec.name,
+    command: ['true'],
+    cwd: '/tmp',
+    workspaceId: null,
+    evidenceKind: 'git',
+    revision,
+    worktreeDirty: false,
+    worktreeFingerprint: fingerprint,
+  })
+  store.setVerificationCheckResult(check.id, {
+    status,
+    exitCode: status === 'passed' ? 0 : 1,
+    executor: 'test:host',
+  })
+  store.setVerificationCheckPostEvidence(check.id, {
+    postEvidenceKind: 'git',
+    postRevision,
+    postWorktreeDirty: false,
+    postWorktreeFingerprint: postFingerprint,
+  })
+  return check
+}
+
 describe('PR-4: Verification Gate Re-dispatch', () => {
   it('unblocks downstream dependent task and transitions run to active with redispatched outcome', () => {
     const { store, runId, task1Id, task2Id } = createTestSetup()
@@ -130,19 +177,7 @@ describe('PR-4: Verification Gate Re-dispatch', () => {
       expect(store.listReadyTasks(runId).map((t) => t.id)).toEqual([])
 
       // Simulate passing verification checks for task 1
-      const check = store.createVerificationCheck({
-        projectId: store.getRun(runId).projectId,
-        runId,
-        taskId: task1Id,
-        name: 'test-check',
-        command: ['echo', 'ok'],
-        cwd: '/tmp',
-        workspaceId: null,
-      })
-      store.setVerificationCheckResult(check.id, {
-        status: 'passed',
-        exitCode: 0,
-      })
+      recordCheck(store, { runId, taskId: task1Id, name: 'test-check' })
 
       const task1Verdict = applyTaskVerificationVerdict(store, task1Id)
       expect(task1Verdict.state).toBe('completed')
@@ -240,6 +275,179 @@ describe('PR-4: Verification Gate Re-dispatch', () => {
       })
     } finally {
       store.close()
+    }
+  })
+
+  it('requires evidence for the current attempt, not a stale earlier attempt', () => {
+    const { store, task1Id } = createTestSetup()
+    try {
+      const stale = recordCheck(store, {
+        runId: store.getTask(task1Id).runId,
+        taskId: task1Id,
+        attempt: 0,
+        name: 'a0-pass',
+      })
+
+      // Move to attempt 1 exactly like a repair cycle does.
+      store.setTaskState(task1Id, 'queued', { attempt: 1 })
+      store.setTaskState(task1Id, 'admitted')
+      store.setTaskState(task1Id, 'running')
+      store.setTaskState(task1Id, 'verifying')
+
+      expect(() => applyTaskVerificationVerdict(store, task1Id)).toThrow(/no verification checks.*attempt 1/i)
+
+      const fresh = recordCheck(store, {
+        runId: store.getTask(task1Id).runId,
+        taskId: task1Id,
+        attempt: 1,
+        name: 'a1-pass',
+      })
+      expect(applyTaskVerificationVerdict(store, task1Id)).toMatchObject({ state: 'completed', passed: true })
+    } finally {
+      store.close()
+    }
+  })
+
+  it('rejects evidence that mixes revisions or moved HEAD after a check', () => {
+    const first = createTestSetup()
+    try {
+      const runId = first.runId
+      for (const [name, revision] of [
+        ['one', 'a'.repeat(40)],
+        ['two', 'b'.repeat(40)],
+      ] as const) {
+        recordCheck(first.store, {
+          runId,
+          taskId: first.task1Id,
+          attempt: 0,
+          name,
+          revision,
+          fingerprint: 'f'.repeat(64),
+          postFingerprint: 'e'.repeat(64),
+        })
+      }
+      expect(() => applyTaskVerificationVerdict(first.store, first.task1Id)).toThrow(/different HEAD revisions/)
+    } finally {
+      first.store.close()
+    }
+
+    const second = createTestSetup()
+    try {
+      const runId = second.runId
+      recordCheck(second.store, {
+        runId,
+        taskId: second.task1Id,
+        attempt: 0,
+        name: 'moves-head',
+        revision: 'a'.repeat(40),
+        postRevision: 'b'.repeat(40),
+        fingerprint: 'f'.repeat(64),
+        postFingerprint: 'e'.repeat(64),
+      })
+      expect(() => applyTaskVerificationVerdict(second.store, second.task1Id)).toThrow(/moved HEAD/)
+    } finally {
+      second.store.close()
+    }
+  })
+
+  it('refuses a verdict when evidence rows belong to another run', () => {
+    const { store, task1Id } = createTestSetup()
+    try {
+      const other = store.createRun({
+        projectId: store.getRun(store.getTask(task1Id).runId).projectId,
+        goal: 'another run',
+        origin: 'cli',
+        requestedBy: 'test',
+        acceptanceCriteria: [],
+        managerMuseId: 'worker',
+        budget: {
+          maxConcurrentWorkers: 2,
+          maxTasks: 10,
+          maxDelegationDepth: 2,
+          maxRunMinutes: 10,
+          defaultTaskMinutes: 5,
+        },
+      })
+      recordCheck(store, { runId: other.id, taskId: task1Id, name: 'wrong-run' })
+      expect(() => applyTaskVerificationVerdict(store, task1Id)).toThrow(/bound to/)
+      expect(store.getTask(task1Id).state).toBe('verifying')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never closes a run green when current-attempt evidence failed or is missing', () => {
+    const failed = createTestSetup()
+    try {
+      // Attempt 0 passes, then a repair moves the task to attempt 1. The task
+      // reaches `completed` without a verdict for attempt 1, which has a failed
+      // check — exactly the stale-evidence shape a run must not close green on.
+      recordCheck(failed.store, {
+        runId: failed.runId,
+        taskId: failed.task1Id,
+        attempt: 0,
+        name: 'a0-pass',
+      })
+
+      failed.store.setTaskState(failed.task1Id, 'queued', { attempt: 1 })
+      failed.store.setTaskState(failed.task1Id, 'admitted')
+      failed.store.setTaskState(failed.task1Id, 'running')
+      failed.store.setTaskState(failed.task1Id, 'verifying')
+      recordCheck(failed.store, {
+        runId: failed.runId,
+        taskId: failed.task1Id,
+        attempt: 1,
+        name: 'a1-fail',
+        status: 'failed',
+      })
+      failed.store.setTaskState(failed.task1Id, 'completed')
+
+      // The dependent is completed too, so all tasks are terminal.
+      failed.store.setTaskState(failed.task2Id, 'admitted')
+      failed.store.setTaskState(failed.task2Id, 'running')
+      failed.store.setTaskState(failed.task2Id, 'completed')
+
+      const verdict = finalizeRunVerdict(failed.store, failed.runId)
+      expect(verdict).toMatchObject({ state: 'failed', outcome: 'failure' })
+      const row = failed.store.db
+        .prepare("SELECT payload_json FROM events WHERE run_id = ? AND type = 'run.finished'")
+        .get(failed.runId) as { payload_json: string } | undefined
+      expect(JSON.parse(row?.payload_json as string)).toMatchObject({
+        outcome: 'failure',
+        via: 'verification_evidence',
+      })
+    } finally {
+      failed.store.close()
+    }
+
+    const missing = createTestSetup()
+    try {
+      recordCheck(missing.store, {
+        runId: missing.runId,
+        taskId: missing.task1Id,
+        attempt: 0,
+        name: 'a0-pass',
+      })
+
+      missing.store.setTaskState(missing.task1Id, 'queued', { attempt: 1 })
+      missing.store.setTaskState(missing.task1Id, 'admitted')
+      missing.store.setTaskState(missing.task1Id, 'running')
+      missing.store.setTaskState(missing.task1Id, 'verifying')
+      missing.store.setTaskState(missing.task1Id, 'completed')
+      missing.store.setTaskState(missing.task2Id, 'admitted')
+      missing.store.setTaskState(missing.task2Id, 'running')
+      missing.store.setTaskState(missing.task2Id, 'completed')
+
+      const verdict = finalizeRunVerdict(missing.store, missing.runId)
+      expect(verdict).toMatchObject({ state: 'failed', outcome: 'failure' })
+      const row = missing.store.db
+        .prepare("SELECT payload_json FROM events WHERE run_id = ? AND type = 'run.finished'")
+        .get(missing.runId) as { payload_json: string } | undefined
+      expect(JSON.parse(row?.payload_json as string)).toMatchObject({
+        via: 'verification_evidence',
+      })
+    } finally {
+      missing.store.close()
     }
   })
 })

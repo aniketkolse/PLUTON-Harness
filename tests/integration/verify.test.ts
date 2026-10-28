@@ -8,6 +8,8 @@ import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { admitTask } from '../../src/orchestrator/task-graph.ts'
 import { applyTaskVerificationVerdict, runVerificationChecks } from '../../src/verify/runner.ts'
+import { createVerificationExecutor } from '../../src/verify/executor.ts'
+import { hostTestExecutor } from '../helpers/verification.ts'
 
 /**
  * Integration: the Phase-7 verification gate. Checks are configured argv
@@ -19,6 +21,10 @@ import { applyTaskVerificationVerdict, runVerificationChecks } from '../../src/v
 
 const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
 const NODE = JSON.stringify(process.execPath)
+// The real CLI cannot inject a test executor. On hosts without proven
+// verification confinement the gate must refuse, so the success-path CLI test
+// only runs where the production executor is actually available.
+const ISOLATION_AVAILABLE = createVerificationExecutor().availability?.available === true
 
 let projectDir: string
 let artifactsDir: string
@@ -127,7 +133,7 @@ function seedRunWithTask(taskState: 'running' | 'verifying', runVerifying = fals
 }
 
 describe('verification gate (pluton verify)', () => {
-  it('CLI: all configured checks pass → task completed, run completed, evidence durable', () => {
+  it.runIf(ISOLATION_AVAILABLE)('CLI: all configured checks pass → task completed, run completed, evidence durable', () => {
     const { runId, taskId } = seedRunWithTask('verifying', true)
     const res = runCli(['verify', '--run', runId, '--json'])
     expect(res.status).toBe(0)
@@ -168,6 +174,37 @@ describe('verification gate (pluton verify)', () => {
     }
   })
 
+  it.runIf(!ISOLATION_AVAILABLE)('CLI: fails closed instead of executing checks on an unconfinable host', () => {
+    const { runId, taskId } = seedRunWithTask('verifying', true)
+    const res = runCli(['verify', '--run', runId, '--json'])
+    expect(res.status).toBe(0)
+    const env = JSON.parse(res.stdout) as {
+      ok: boolean
+      data: { tasks: { verdict: string; checks: { status: string; exitCode: number | null; note: string | null }[] }[] }
+    }
+    expect(env.ok).toBe(true)
+    expect(env.data.tasks[0]?.verdict).toBe('failed')
+    expect(env.data.tasks[0]?.checks.every((c) => c.status === 'failed')).toBe(true)
+    expect(env.data.tasks[0]?.checks.every((c) => c.exitCode === null)).toBe(true)
+    expect(env.data.tasks[0]?.checks[0]?.note).toMatch(/verification isolation is unavailable/)
+
+    const reopened = bootstrapStore(loadConfig(projectDir))
+    try {
+      expect(reopened.store.getTask(taskId).state).toBe('failed')
+      expect(reopened.store.getTask(taskId).failure).toMatchObject({ code: 'verification_failed' })
+      expect(reopened.store.listVerificationChecksByTask(taskId).map((c) => c.status)).toEqual(['failed', 'failed'])
+      const rows = reopened.store.db
+        .prepare("SELECT payload_json AS payload FROM events WHERE run_id = ? AND type = 'verification.run'")
+        .all(runId) as { payload: string }[]
+      expect(rows).toHaveLength(2)
+      for (const row of rows) {
+        expect(JSON.parse(row.payload)).toMatchObject({ executor: expect.stringMatching(/^unavailable:/) })
+      }
+    } finally {
+      reopened.store.close()
+    }
+  })
+
   it('CLI: a task that is not verifying is refused with a typed error', () => {
     const { runId, taskId } = seedRunWithTask('running')
     const res = runCli(['verify', '--run', runId, '--task', taskId, '--json'])
@@ -203,6 +240,7 @@ describe('verification gate (pluton verify)', () => {
         cwd: projectDir,
         workspaceId: null,
         artifactsDir,
+        executor: hostTestExecutor(),
       })
       expect(report.allPassed).toBe(false)
       expect(report.results.map((r) => r.status)).toEqual(['passed', 'failed', 'passed'])
@@ -241,6 +279,80 @@ describe('verification gate (pluton verify)', () => {
       const verdict = applyTaskVerificationVerdict(store, taskId)
       expect(verdict.state).toBe('failed')
       expect(store.getTask(taskId).failure).toMatchObject({ code: 'verification_failed' })
+    } finally {
+      store.close()
+    }
+  })
+
+  it('refuses to complete a task on legacy rows that carry no evidence identity', () => {
+    const { runId, taskId } = seedRunWithTask('verifying')
+    const loaded = loadConfig(projectDir)
+    const { store, projectId } = bootstrapStore(loaded)
+    try {
+      // Shape written before evidence identity existed: passed, but no kind,
+      // revision, fingerprint, post state or executor.
+      const legacy = store.createVerificationCheck({
+        projectId,
+        runId,
+        taskId,
+        name: 'legacy',
+        command: [process.execPath, '-e', 'process.exit(0)'],
+        cwd: projectDir,
+        workspaceId: null,
+      })
+      store.setVerificationCheckResult(legacy.id, { status: 'passed', exitCode: 0 })
+      expect(() => applyTaskVerificationVerdict(store, taskId)).toThrow(/no recorded kind/)
+      // The task stays in verifying; no verdict was fabricated.
+      expect(store.getTask(taskId).state).toBe('verifying')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('supersedes an interrupted same-attempt run instead of requiring an attempt bump', async () => {
+    const { runId, taskId } = seedRunWithTask('verifying')
+    const loaded = loadConfig(projectDir)
+    const { store, projectId } = bootstrapStore(loaded)
+    try {
+      // A crash left a pending row behind for this attempt.
+      const interrupted = store.createVerificationCheck({
+        projectId,
+        runId,
+        taskId,
+        name: 'interrupted',
+        command: [process.execPath, '-e', 'process.exit(0)'],
+        cwd: projectDir,
+        workspaceId: null,
+      })
+      expect(interrupted.status).toBe('pending')
+
+      const report = await runVerificationChecks({
+        store,
+        projectId,
+        runId,
+        taskId,
+        checks: [{ name: 'fresh', command: [process.execPath, '-e', 'process.exit(0)'] }],
+        cwd: projectDir,
+        workspaceId: null,
+        artifactsDir,
+        executor: hostTestExecutor(),
+      })
+      expect(report.allPassed).toBe(true)
+      expect(report.evidence.kind).toBe('non-git')
+      expect(report.evidence.postKind).toBe('non-git')
+
+      const history = store.listVerificationChecksByTask(taskId)
+      expect(history).toHaveLength(2)
+      expect(history.find((c) => c.id === interrupted.id)?.supersededAt).not.toBeNull()
+      const current = store.listCurrentVerificationChecksByTaskAttempt(taskId, 0)
+      expect(current).toHaveLength(1)
+      expect(current[0]?.name).toBe('fresh')
+      expect(current[0]?.executor).toBe('test:host')
+
+      const verdict = applyTaskVerificationVerdict(store, taskId)
+      expect(verdict.state).toBe('completed')
+      // The retry did not bump the attempt.
+      expect(store.getTask(taskId).attempt).toBe(0)
     } finally {
       store.close()
     }
