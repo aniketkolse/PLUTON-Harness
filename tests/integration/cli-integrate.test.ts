@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { integrateRun, boundedOverlapFiles } from '../../src/cli/commands/integrate.ts'
@@ -12,6 +13,9 @@ import type { RunRecord, TaskRecord, WorkspaceRecord } from '../../src/domain/mo
 import type { DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
 import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
+import { captureRawSnapshot, diffWorktreePatch } from '../../src/workspace/trusted-git.ts'
+import { applyTaskVerificationVerdict, runVerificationChecks } from '../../src/verify/runner.ts'
+import { hostTestExecutor } from '../helpers/verification.ts'
 
 /**
  * Integration: `pluton integrate` against real git repositories and the real
@@ -25,6 +29,22 @@ import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []
+const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
+
+function runCli(cwd: string, args: string[]): { stdout: string; stderr: string; exitCode: number } {
+  try {
+    const stdout = execFileSync(process.execPath, [BIN, ...args], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 120_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { stdout, stderr: '', exitCode: 0 }
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string; status?: number }
+    return { stdout: err.stdout ?? '', stderr: err.stderr ?? '', exitCode: err.status ?? 1 }
+  }
+}
 
 afterEach(() => {
   for (const db of openDbs.splice(0)) {
@@ -123,6 +143,13 @@ function makeProject(): Fixture {
   }
 }
 
+function runIntegrate(
+  fx: Fixture,
+  opts: Parameters<typeof integrateRun>[1],
+): ReturnType<typeof integrateRun> {
+  return integrateRun(fx.ctx, opts, { verificationExecutor: hostTestExecutor() })
+}
+
 function gitOut(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 })
 }
@@ -173,6 +200,40 @@ async function seedTaskWithCheckout(fx: Fixture, title: string): Promise<SeededT
   return { task, workspace, checkoutPath: info.path, branch: info.branch }
 }
 
+/**
+ * Seed the complete, current-attempt evidence a real verification run would
+ * leave behind. Integration now refuses to merge a Git-backed task without it,
+ * so fixtures that predate the rule must produce the same durable rows.
+ */
+async function seedPassedEvidence(fx: Fixture, seeded: SeededTask): Promise<void> {
+  const snapshot = await captureRawSnapshot(seeded.checkoutPath)
+  const check = fx.store.createVerificationCheck({
+    projectId: fx.projectId,
+    runId: fx.run.id,
+    taskId: seeded.task.id,
+    attempt: seeded.task.attempt,
+    name: 'fixture checks',
+    command: ['true'],
+    cwd: seeded.checkoutPath,
+    workspaceId: seeded.workspace.id,
+    evidenceKind: 'git',
+    revision: snapshot.identity.head,
+    worktreeDirty: snapshot.dirty,
+    worktreeFingerprint: snapshot.fingerprint,
+  })
+  fx.store.setVerificationCheckResult(check.id, {
+    status: 'passed',
+    exitCode: 0,
+    executor: 'test:fixture',
+  })
+  fx.store.setVerificationCheckPostEvidence(check.id, {
+    postEvidenceKind: 'git',
+    postRevision: snapshot.identity.head,
+    postWorktreeDirty: snapshot.dirty,
+    postWorktreeFingerprint: snapshot.fingerprint,
+  })
+}
+
 /** Completed task (created → … → completed) with a Pluton-managed checkout carrying one commit. */
 async function seedCompletedTask(
   fx: Fixture,
@@ -182,6 +243,7 @@ async function seedCompletedTask(
   const seeded = await seedTaskWithCheckout(fx, title)
   mutate(seeded.checkoutPath)
   await fx.manager.commitAll(seeded.checkoutPath, `pluton task: ${title}`)
+  await seedPassedEvidence(fx, seeded)
   return { ...seeded, task: fx.store.setTaskState(seeded.task.id, 'completed') }
 }
 
@@ -197,6 +259,7 @@ async function seedCompletedTaskDirty(
 ): Promise<SeededTask> {
   const seeded = await seedTaskWithCheckout(fx, title)
   mutate(seeded.checkoutPath)
+  await seedPassedEvidence(fx, seeded)
   return { ...seeded, task: fx.store.setTaskState(seeded.task.id, 'completed') }
 }
 
@@ -237,7 +300,7 @@ describe('integrateRun — happy path (real git, real store)', () => {
     const t1 = await seedCompletedTask(fx, 'one', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
     const t2 = await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(report.runId).toBe(fx.run.id)
     expect(report.checkout.branch).toBe(`pluton/integration/${fx.run.id}`)
@@ -268,13 +331,16 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(ws.state).toBe('active')
     expect(ws.headCommit).toBe(gitOut(report.checkout.path, ['rev-parse', 'HEAD']).trim())
 
-    // Checks: real exit codes, executed inside the integration checkout.
+    // Checks: real exit codes, executed inside a disposable snapshot rather
+    // than the integration checkout itself.
     expect(report.checks.map((c) => [c.name, c.status, c.exitCode])).toEqual([
       ['check-pass', 'passed', 0],
       ['check-fail', 'failed', 3],
     ])
     const passTail = report.checks[0]?.outputTail ?? ''
-    expect(passTail.toLowerCase()).toContain(`inside:${report.checkout.path}`.toLowerCase())
+    expect(passTail).toMatch(/inside:.*pluton-verify-snapshot-/i)
+    expect(report.checks[0]?.executor).toBe('test:host')
+    expect(report.checks[1]?.note).toBe('exit code 3')
     expect(report.checks[1]?.outputTail).toBeNull()
 
     // Events recorded.
@@ -303,11 +369,11 @@ describe('integrateRun — happy path (real git, real store)', () => {
     await seedCompletedTask(fx, 'one', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
     await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
 
-    const first = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const first = await runIntegrate(fx, { runRef: fx.run.id })
     expect(first.integrated.every((i) => i.status === 'merged')).toBe(true)
     const countBefore = gitOut(first.checkout.path, ['rev-list', '--count', 'HEAD']).trim()
 
-    const second = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const second = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(second.checkout.id).toBe(first.checkout.id) // the checkout row is reused
     expect(second.integrated).toHaveLength(2)
@@ -317,6 +383,183 @@ describe('integrateRun — happy path (real git, real store)', () => {
     expect(second.conflicts).toEqual([])
     expect(second.failed).toEqual([])
     expect(gitOut(second.checkout.path, ['rev-list', '--count', 'HEAD']).trim()).toBe(countBefore)
+  })
+})
+
+describe('integrateRun — verification drift guard', () => {
+  it('merges a verified dirty checkout when its post-check fingerprint still matches', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'verified dirty')
+    write(seeded.checkoutPath, 'src/verified.ts', 'export const verified = 1\n')
+    fx.store.setTaskState(seeded.task.id, 'verifying', { result: { outcome: 'success', summary: 'mock' } })
+    const report = await runVerificationChecks({
+      store: fx.store,
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: seeded.task.id,
+      checks: [{ name: 'ok', command: [process.execPath, '-e', 'process.exit(0)'] }],
+      cwd: seeded.checkoutPath,
+      workspaceId: seeded.workspace.id,
+      artifactsDir: join(stateDir(fx.dir), 'artifacts'),
+      executor: hostTestExecutor(),
+    })
+    expect(report.evidence.available).toBe(true)
+    expect(report.evidence.postWorktreeFingerprint).toMatch(/^[0-9a-f]{64}$/)
+    expect(applyTaskVerificationVerdict(fx.store, seeded.task.id).state).toBe('completed')
+
+    const integrated = await runIntegrate(fx, { runRef: fx.run.id })
+    expect(integrated.blockedDrift).toEqual([])
+    expect(integrated.integrated).toHaveLength(1)
+    expect(integrated.committed).toHaveLength(1)
+    expect(gitOut(integrated.checkout.path, ['ls-tree', '-r', '--name-only', 'HEAD'])).toContain('src/verified.ts')
+  })
+
+  it('refuses to commit or merge a checkout that changed after verification', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'drifted')
+    write(seeded.checkoutPath, 'src/verified.ts', 'export const verified = 1\n')
+    fx.store.setTaskState(seeded.task.id, 'verifying', { result: { outcome: 'success', summary: 'mock' } })
+    const report = await runVerificationChecks({
+      store: fx.store,
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: seeded.task.id,
+      checks: [{ name: 'ok', command: [process.execPath, '-e', 'process.exit(0)'] }],
+      cwd: seeded.checkoutPath,
+      workspaceId: seeded.workspace.id,
+      artifactsDir: join(stateDir(fx.dir), 'artifacts'),
+      executor: hostTestExecutor(),
+    })
+    expect(applyTaskVerificationVerdict(fx.store, seeded.task.id).state).toBe('completed')
+    const expected = report.evidence.postWorktreeFingerprint
+
+    // Work added AFTER the check passed: the checkout no longer matches the
+    // state the verifier attested.
+    write(seeded.checkoutPath, 'src/after-verification.ts', 'export const sneaky = 1\n')
+
+    const integrated = await runIntegrate(fx, { runRef: fx.run.id })
+    expect(integrated.integrated).toEqual([])
+    expect(integrated.committed).toEqual([])
+    expect(integrated.blockedDrift).toHaveLength(1)
+    expect(integrated.blockedDrift[0]).toMatchObject({
+      taskId: seeded.task.id,
+      expectedRevision: report.evidence.postRevision,
+      expectedFingerprint: expected,
+    })
+    expect(integrated.blockedDrift[0]?.actualFingerprint).not.toBe(expected)
+    const driftEvents = fx.store.listEvents(fx.run.id, { type: 'integration.drift_detected' })
+    expect(driftEvents).toHaveLength(1)
+    expect(driftEvents[0]?.taskId).toBe(seeded.task.id)
+    // The unverified file never reaches the integration branch.
+    const headFiles = gitOut(integrated.checkout.path, ['ls-tree', '-r', '--name-only', 'HEAD'])
+    expect(headFiles).not.toContain('src/after-verification.ts')
+  })
+  it('refuses to integrate a task whose evidence belongs to a stale attempt', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'stale attempt')
+    write(seeded.checkoutPath, 'src/attempt0.ts', 'export const attempt0 = 1\n')
+    fx.store.setTaskState(seeded.task.id, 'verifying', { result: { outcome: 'success', summary: 'mock' } })
+    await runVerificationChecks({
+      store: fx.store,
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: seeded.task.id,
+      checks: [{ name: 'ok', command: [process.execPath, '-e', 'process.exit(0)'] }],
+      cwd: seeded.checkoutPath,
+      workspaceId: seeded.workspace.id,
+      artifactsDir: join(stateDir(fx.dir), 'artifacts'),
+      executor: hostTestExecutor(),
+    })
+
+    // A repair moves the task to attempt 1; it is completed without new
+    // evidence, so attempt 0's passing check must not authorize integration.
+    fx.store.setTaskState(seeded.task.id, 'queued', { attempt: 1 })
+    fx.store.setTaskState(seeded.task.id, 'admitted')
+    fx.store.setTaskState(seeded.task.id, 'running')
+    fx.store.setTaskState(seeded.task.id, 'verifying')
+    fx.store.setTaskState(seeded.task.id, 'completed')
+
+    const integrated = await runIntegrate(fx, { runRef: fx.run.id })
+    expect(integrated.integrated).toEqual([])
+    expect(integrated.blockedDrift).toHaveLength(1)
+    expect(integrated.blockedDrift[0]?.reason).toContain('no verification evidence for attempt 1')
+  })
+
+  it('refuses to integrate a completed task that has no verification evidence at all', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'unverified')
+    write(seeded.checkoutPath, 'src/unverified.ts', 'export const unverified = 1\n')
+    await fx.manager.commitAll(seeded.checkoutPath, 'pluton task: unverified')
+    fx.store.setTaskState(seeded.task.id, 'completed')
+
+    const integrated = await runIntegrate(fx, { runRef: fx.run.id })
+    expect(integrated.integrated).toEqual([])
+    expect(integrated.committed).toEqual([])
+    expect(integrated.blockedDrift).toHaveLength(1)
+    expect(integrated.blockedDrift[0]?.reason).toContain('no verification evidence for attempt 0')
+  })
+
+  it('refuses explicit non-Git evidence for a Git-backed task', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'non-git evidence')
+    write(seeded.checkoutPath, 'src/non-git.ts', 'export const nonGit = 1\n')
+    await fx.manager.commitAll(seeded.checkoutPath, 'pluton task: non-git evidence')
+    const check = fx.store.createVerificationCheck({
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: seeded.task.id,
+      attempt: seeded.task.attempt,
+      name: 'claims non-git',
+      command: ['true'],
+      cwd: seeded.checkoutPath,
+      workspaceId: seeded.workspace.id,
+      evidenceKind: 'non-git',
+    })
+    fx.store.setVerificationCheckResult(check.id, { status: 'passed', exitCode: 0, executor: 'test:fixture' })
+    fx.store.setVerificationCheckPostEvidence(check.id, {
+      postEvidenceKind: 'non-git',
+      postRevision: null,
+      postWorktreeDirty: null,
+      postWorktreeFingerprint: null,
+    })
+    fx.store.setTaskState(seeded.task.id, 'completed')
+
+    const integrated = await runIntegrate(fx, { runRef: fx.run.id })
+    expect(integrated.integrated).toEqual([])
+    expect(integrated.blockedDrift).toHaveLength(1)
+    expect(integrated.blockedDrift[0]?.reason).toContain('non-Git verification evidence')
+  })
+
+  it('rejects a green verdict when an UNCOMMITTED edit focuses a test', async () => {
+    const fx = makeProject()
+    const seeded = await seedTaskWithCheckout(fx, 'uncommitted tamper')
+    // The weakening exists only in the live worktree; the branch still points
+    // at the base commit, so a commit-only diff would see nothing.
+    write(seeded.checkoutPath, 'tests/example.test.ts', "it.only('works', () => { expect(1).toBe(1) })\n")
+    fx.store.setTaskState(seeded.task.id, 'verifying', { result: { outcome: 'success', summary: 'mock' } })
+    const report = await runVerificationChecks({
+      store: fx.store,
+      projectId: fx.projectId,
+      runId: fx.run.id,
+      taskId: seeded.task.id,
+      checks: [{ name: 'ok', command: [process.execPath, '-e', 'process.exit(0)'] }],
+      cwd: seeded.checkoutPath,
+      workspaceId: seeded.workspace.id,
+      artifactsDir: join(stateDir(fx.dir), 'artifacts'),
+      executor: hostTestExecutor(),
+    })
+    expect(report.allPassed).toBe(true)
+
+    const live = await diffWorktreePatch(seeded.checkoutPath, seeded.workspace.baseCommit)
+    expect(live.files).toContain('tests/example.test.ts')
+    expect(live.diff).toContain('it.only')
+
+    const verdict = applyTaskVerificationVerdict(fx.store, seeded.task.id, {
+      diffText: live.diff,
+      changedFiles: live.files,
+    })
+    expect(verdict.state).toBe('failed')
+    expect(fx.store.getTask(seeded.task.id).failure).toMatchObject({ code: 'tamper_detected' })
   })
 })
 
@@ -332,7 +575,7 @@ describe('integrateRun — dirty task checkouts are committed before merging (AD
     expect(gitOut(t1.checkoutPath, ['status', '--porcelain']).trim()).toBe('M README.md')
     expect(fx.store.getWorkspace(t1.workspace.id).headCommit).toBeNull()
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     // The dirty state was committed first, and recorded in the report, the
     // task workspace row and the event log.
@@ -351,20 +594,18 @@ describe('integrateRun — dirty task checkouts are committed before merging (AD
     expect(commitEvents[0]?.taskId).toBe(t1.task.id)
     expect(commitEvents[0]?.payload).toMatchObject({ taskId: t1.task.id, commit })
 
-    // The merge landed the committed change and the checks ran in the checkout.
+    // The merge landed the committed change; checks ran in a snapshot.
     expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
     expect(gitOut(report.checkout.path, ['log', '--name-only', '--format='])).toContain('README.md')
     expect(report.checks.map((c) => [c.name, c.status])).toEqual([
       ['check-pass', 'passed'],
       ['check-fail', 'failed'],
     ])
-    expect((report.checks[0]?.outputTail ?? '').toLowerCase()).toContain(
-      `inside:${report.checkout.path}`.toLowerCase(),
-    )
+    expect(report.checks[0]?.outputTail ?? '').toMatch(/inside:.*pluton-verify-snapshot-/i)
 
     // Rerun: the checkout is clean now — no new commit, no new event, and the
     // merge is honestly already integrated.
-    const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const rerun = await runIntegrate(fx, { runRef: fx.run.id })
     expect(rerun.committed).toEqual([])
     expect(rerun.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'already_integrated']])
     expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })).toHaveLength(1)
@@ -375,7 +616,7 @@ describe('integrateRun — dirty task checkouts are committed before merging (AD
     const t1 = await seedCompletedTask(fx, 'clean one', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
     const headBefore = gitOut(t1.checkoutPath, ['rev-parse', 'HEAD']).trim()
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(report.committed).toEqual([])
     expect(fx.store.listEvents(fx.run.id, { type: 'integration.task_committed' })).toHaveLength(0)
@@ -389,12 +630,32 @@ describe('integrateRun — dirty task checkouts are committed before merging (AD
     rmSync(join(broken.checkoutPath, '.git', 'pluton-workspace.json'))
     const t2 = await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [broken.task.id, t2.task.id] })
+    const report = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [broken.task.id, t2.task.id] })
 
     expect(report.committed).toEqual([])
     const failure = report.failed.find((f) => f.taskId === broken.task.id)
     expect(failure?.detail).toContain('not a Pluton-managed checkout')
     expect(report.integrated.map((i) => i.taskId)).toEqual([t2.task.id])
+  })
+})
+
+describe('integrateRun — CLI exit status', () => {
+  it('exits nonzero when the post-integration checks do not pass', async () => {
+    const fx = makeProject()
+    await seedCompletedTask(fx, 'cli gating', (p) => write(p, 'src/gate.ts', 'export const gate = 1\n'))
+
+    const res = runCli(fx.dir, ['integrate', '--run', fx.run.id, '--json'])
+
+    // The report is still emitted (automation can inspect why), but the process
+    // must not claim success: a red acceptance check is a failed integration.
+    expect(res.exitCode).toBe(1)
+    const envelope = JSON.parse(res.stdout) as {
+      ok: boolean
+      data: { checks: { name: string; status: string }[] }
+    }
+    expect(envelope.ok).toBe(true)
+    expect(envelope.data.checks).toHaveLength(2)
+    expect(envelope.data.checks.some((c) => c.status === 'failed')).toBe(true)
   })
 })
 
@@ -409,10 +670,10 @@ describe('integrateRun — conflicts stop the loop and are preserved', () => {
     const t2 = await seedCompletedTask(fx, 'beta', (p) => write(p, 'src/app.ts', 'export const value = "beta"\n'))
     const t3 = await seedCompletedTask(fx, 'gamma', (p) => write(p, 'src/g.ts', 'export const g = 1\n'))
 
-    const first = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [t1.task.id] })
+    const first = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [t1.task.id] })
     expect(first.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
 
-    const report = await integrateRun(fx.ctx, {
+    const report = await runIntegrate(fx, {
       runRef: fx.run.id,
       taskRefs: [t2.task.id, t3.task.id],
     })
@@ -434,7 +695,7 @@ describe('integrateRun — conflicts stop the loop and are preserved', () => {
     // Rerun: the unresolved merge is refused before anything is fetched or
     // merged. t1+t2 are the overlap pair now, so the batch reports them blocked
     // and the refusal lands on the one task still reaching the merge primitive.
-    const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const rerun = await runIntegrate(fx, { runRef: fx.run.id })
     expect(rerun.blockedOverlap.map((o) => o.taskId)).toEqual([t1.task.id, t2.task.id])
     const t3Failure = rerun.failed.find((f) => f.taskId === t3.task.id)
     expect(t3Failure?.detail).toContain('unresolved merge in progress')
@@ -454,7 +715,7 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
     const t1 = await seedCompletedTask(fx, 'alpha', (p) => write(p, 'src/shared.ts', 'export const value = "alpha"\n'))
     const t2 = await seedCompletedTask(fx, 'beta', (p) => write(p, 'src/shared.ts', 'export const value = "beta"\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     // ALL members of the group are blocked — never first-come-first-served.
     expect(report.blockedOverlap).toEqual([
@@ -490,7 +751,7 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
       for (const file of sharedFiles) write(p, file, 'export const value = "b"\n')
     })
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     // The report keeps every shared file…
     expect(report.blockedOverlap).toEqual([
@@ -512,7 +773,7 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
     const b = await seedCompletedTask(fx, 'share two', (p) => write(p, 'src/shared.ts', 'export const value = "b"\n'))
     const c = await seedCompletedTask(fx, 'disjoint', (p) => write(p, 'src/c.ts', 'export const c = 3\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(report.blockedOverlap.map((o) => o.taskId)).toEqual([a.task.id, b.task.id])
     expect(report.integrated.map((i) => [i.taskId, i.status])).toEqual([[c.task.id, 'merged']])
@@ -529,7 +790,7 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
     })
     const b = await seedCompletedTask(fx, 'shared only', (p) => write(p, 'src/shared.ts', 'export const value = "b"\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const report = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(report.blockedOverlap).toEqual([
       { taskId: a.task.id, files: ['src/shared.ts'] },
@@ -560,15 +821,15 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
     const a = await seedCompletedTask(fx, 'edit first line', (p) => write(p, 'src/shared.ts', withEdit(0, 'alpha')))
     const b = await seedCompletedTask(fx, 'edit last line', (p) => write(p, 'src/shared.ts', withEdit(11, 'beta')))
 
-    const full = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const full = await runIntegrate(fx, { runRef: fx.run.id })
     expect(full.blockedOverlap.map((o) => o.taskId)).toEqual([a.task.id, b.task.id])
     expect(full.integrated).toEqual([])
 
-    const onlyA = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [a.task.id] })
+    const onlyA = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [a.task.id] })
     expect(onlyA.blockedOverlap).toEqual([])
     expect(onlyA.integrated.map((i) => [i.taskId, i.status])).toEqual([[a.task.id, 'merged']])
 
-    const onlyB = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [b.task.id] })
+    const onlyB = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [b.task.id] })
     expect(onlyB.blockedOverlap).toEqual([])
     expect(onlyB.conflicts).toEqual([])
     expect(onlyB.integrated.map((i) => [i.taskId, i.status])).toEqual([[b.task.id, 'merged']])
@@ -578,7 +839,7 @@ describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
     const fx = makeProject()
     const a = await seedCompletedTask(fx, 'duplicated ref', (p) => write(p, 'src/a.ts', 'export const a = 1\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [a.task.id, a.task.id] })
+    const report = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [a.task.id, a.task.id] })
 
     // The file→Set<taskId> map keeps one task id per file: no self-overlap.
     expect(report.blockedOverlap).toEqual([])
@@ -654,7 +915,7 @@ describe('integrateRun — protected paths gate', () => {
     const fx = makeProject()
     const t1 = await seedCompletedTask(fx, 'touch secrets', (p) => write(p, 'secrets/prod.env', 'KEY=value\n'))
 
-    const blocked = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const blocked = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(blocked.integrated).toEqual([])
     expect(blocked.blockedProtected).toHaveLength(1)
@@ -684,7 +945,7 @@ describe('integrateRun — protected paths gate', () => {
 
     // Approve, rerun: now the same task merges through the gate.
     fx.store.setApprovalStatus(approvalId, 'approved', { decidedBy: 'operator' })
-    const merged = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const merged = await runIntegrate(fx, { runRef: fx.run.id })
 
     expect(merged.blockedProtected).toEqual([])
     expect(merged.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
@@ -698,7 +959,7 @@ describe('integrateRun — protected paths gate', () => {
       write(p, 'secrets/ämter.txt', 'KEY=value\n'),
     )
 
-    const blocked = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const blocked = await runIntegrate(fx, { runRef: fx.run.id })
 
     // A C-quoted '"secrets/\303\244mter.txt"' never matches the `secrets`
     // pattern, so the gate used to be skipped entirely for such names.
@@ -714,7 +975,7 @@ describe('integrateRun — protected paths gate', () => {
     const fx = makeProject()
     const t1 = await seedCompletedTask(fx, 'touch secrets', (p) => write(p, 'secrets/prod.env', 'KEY=value\n'))
 
-    const blocked = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const blocked = await runIntegrate(fx, { runRef: fx.run.id })
     expect(blocked.blockedProtected).toHaveLength(1)
     const legitApprovalId = blocked.blockedProtected[0]?.approvalId as string
 
@@ -733,7 +994,7 @@ describe('integrateRun — protected paths gate', () => {
     })
     fx.store.setApprovalStatus(forged.id, 'approved', { decidedBy: 'operator' })
 
-    const rerun = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const rerun = await runIntegrate(fx, { runRef: fx.run.id })
     expect(rerun.integrated).toEqual([])
     expect(rerun.blockedProtected).toHaveLength(1)
 
@@ -751,7 +1012,7 @@ describe('integrateRun — protected paths gate', () => {
     })
     fx.store.setApprovalStatus(forgedShape.id, 'approved', { decidedBy: 'operator' })
 
-    const rerun2 = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const rerun2 = await runIntegrate(fx, { runRef: fx.run.id })
     expect(rerun2.integrated).toEqual([])
     expect(rerun2.blockedProtected).toHaveLength(1)
 
@@ -769,13 +1030,13 @@ describe('integrateRun — protected paths gate', () => {
     })
     fx.store.setApprovalStatus(stale.id, 'approved', { decidedBy: 'operator' })
 
-    const rerun3 = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const rerun3 = await runIntegrate(fx, { runRef: fx.run.id })
     expect(rerun3.integrated).toEqual([])
     expect(rerun3.blockedProtected).toHaveLength(1)
 
     // The real gate-authored row still unblocks once the operator approves it.
     fx.store.setApprovalStatus(legitApprovalId, 'approved', { decidedBy: 'operator' })
-    const merged = await integrateRun(fx.ctx, { runRef: fx.run.id })
+    const merged = await runIntegrate(fx, { runRef: fx.run.id })
     expect(merged.blockedProtected).toEqual([])
     expect(merged.integrated.map((i) => [i.taskId, i.status])).toEqual([[t1.task.id, 'merged']])
   })
@@ -788,7 +1049,7 @@ describe('integrateRun — task selection and pre-flight refusals', () => {
     const t2 = await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
     await seedCompletedTask(fx, 'three', (p) => write(p, 'src/c.ts', 'export const c = 3\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [t2.task.id] })
+    const report = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [t2.task.id] })
 
     expect(report.integrated.map((i) => i.taskId)).toEqual([t2.task.id])
     const logFiles = gitOut(report.checkout.path, ['log', '--name-only', '--format='])
@@ -802,10 +1063,10 @@ describe('integrateRun — task selection and pre-flight refusals', () => {
     const verifying = seedVerifyingTask(fx, 'still verifying')
 
     await expect(
-      integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [verifying.id] }),
+      runIntegrate(fx, { runRef: fx.run.id, taskRefs: [verifying.id] }),
     ).rejects.toThrowError(ValidationError)
     await expect(
-      integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [verifying.id] }),
+      runIntegrate(fx, { runRef: fx.run.id, taskRefs: [verifying.id] }),
     ).rejects.toThrowError(/only completed/)
   })
 
@@ -813,7 +1074,7 @@ describe('integrateRun — task selection and pre-flight refusals', () => {
     const fx = makeProject()
     seedVerifyingTask(fx, 'not done yet')
 
-    await expect(integrateRun(fx.ctx, { runRef: fx.run.id })).rejects.toThrowError(/no completed/)
+    await expect(runIntegrate(fx, { runRef: fx.run.id })).rejects.toThrowError(/no completed/)
   })
 
   it('reports a completed task without an active checkout as failed and integrates the rest', async () => {
@@ -821,7 +1082,7 @@ describe('integrateRun — task selection and pre-flight refusals', () => {
     const orphan = seedCompletedTaskWithoutCheckout(fx, 'orphan')
     const t2 = await seedCompletedTask(fx, 'two', (p) => write(p, 'src/b.ts', 'export const b = 2\n'))
 
-    const report = await integrateRun(fx.ctx, { runRef: fx.run.id, taskRefs: [orphan.id, t2.task.id] })
+    const report = await runIntegrate(fx, { runRef: fx.run.id, taskRefs: [orphan.id, t2.task.id] })
 
     expect(report.failed).toHaveLength(1)
     expect(report.failed[0]?.taskId).toBe(orphan.id)

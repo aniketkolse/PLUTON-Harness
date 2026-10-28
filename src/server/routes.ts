@@ -739,6 +739,25 @@ export class ApiRouter {
           this.sendJson(res, 400, { ok: false, error: 'no candidate tasks in verifying state available for verification' })
           return true
         }
+        // Bind the request to this run before any evidence is written: a task
+        // id from another run (or a task that is not in `verifying`) must never
+        // be verified under this run's identity.
+        for (const task of candidates) {
+          if (task.runId !== run.id) {
+            this.sendJson(res, 400, {
+              ok: false,
+              error: `task '${task.id}' belongs to run '${task.runId}', not '${run.id}'`,
+            })
+            return true
+          }
+          if (task.state !== 'verifying') {
+            this.sendJson(res, 400, {
+              ok: false,
+              error: `task '${task.id}' is '${task.state}'; only a task in 'verifying' can be verified`,
+            })
+            return true
+          }
+        }
         const taskReports = []
         for (const task of candidates) {
           const ws = this.ctx.store.getWorkspaceByTask(task.id)
@@ -755,17 +774,21 @@ export class ApiRouter {
           let diffText = ''
           let changedFiles: string[] = []
           if (ws !== null) {
-            const diffRes = await execRun(['git', '-C', ws.path, 'diff', `${ws.baseCommit}...HEAD`], {
-              timeoutMs: 15_000,
-              maxOutputBytes: 100_000,
-            }).catch(() => null)
-            if (diffRes && diffRes.exitCode === 0) diffText = diffRes.stdout
-            const nameRes = await execRun(['git', '-C', ws.path, 'diff', '--name-only', `${ws.baseCommit}...HEAD`], {
-              timeoutMs: 10_000,
-              maxOutputBytes: 50_000,
-            }).catch(() => null)
-            if (nameRes && nameRes.exitCode === 0) {
-              changedFiles = nameRes.stdout.split('\n').map((s: string) => s.trim()).filter(Boolean)
+            // Render the verified diff through trusted Git plumbing: the
+            // worker's `.git` metadata (external diff, textconv, filters) is
+            // never allowed to execute while evidence is being captured.
+            try {
+              const diff = await diffWorktreePatch(ws.path, ws.baseCommit)
+              diffText = diff.diff
+              changedFiles = diff.files
+            } catch (error) {
+              this.sendJson(res, 400, {
+                ok: false,
+                error: `could not capture the verified diff for task '${task.id}' through trusted Git plumbing: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              })
+              return true
             }
           }
           const verdict = applyTaskVerificationVerdict(this.ctx.store, task.id, { diffText, changedFiles })

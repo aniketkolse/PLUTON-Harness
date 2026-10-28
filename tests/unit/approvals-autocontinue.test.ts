@@ -133,10 +133,11 @@ describe('PR-4 Step 3: Auto-continue Path for Approvals', () => {
         conflicts: [],
         blockedProtected: [],
         blockedOverlap: [],
+        blockedDrift: [],
         failed: [],
         notAttempted: [],
         stoppedAfterConflict: false,
-        checks: [{ name: 'test', status: 'passed', exitCode: 0, outputTail: 'ok' }],
+        checks: [{ name: 'test', status: 'passed', exitCode: 0, outputTail: 'ok', note: null, executor: 'test:host' }],
         artifactPath: null,
       } as IntegrateReport)
 

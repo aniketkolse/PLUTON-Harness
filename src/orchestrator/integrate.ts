@@ -1,11 +1,17 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapStore } from '../bootstrap.ts'
 import { stateDir, workspaceDir } from '../config/load.ts'
 import { ValidationError } from '../domain/errors.ts'
 import type { JsonValue, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
-import { run } from '../util/exec.ts'
+import { captureWorkspaceEvidence } from '../verify/evidence.ts'
+import {
+  createVerificationExecutor,
+  createVerificationSnapshot,
+  type VerificationExecutor,
+} from '../verify/executor.ts'
+import { deniedCommandReason, verificationEvidenceProblem } from '../verify/runner.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { matchProtectedPath } from '../workspace/protected-paths.ts'
 import type { ProjectContext } from './service.ts'
@@ -20,6 +26,8 @@ export interface IntegrateCommandOptions {
 export interface IntegrateDeps {
   /** Test seam: replaces the GitWorkspaceManager built from the project root. */
   workspaceManager?: GitWorkspaceManager
+  /** Test seam: replaces the platform verification executor. */
+  verificationExecutor?: VerificationExecutor
 }
 
 export interface IntegrateReport {
@@ -40,12 +48,25 @@ export interface IntegrateReport {
   failed: { taskId: string; detail: string }[]
   /** Completed tasks the loop never reached because an earlier merge conflicted. */
   notAttempted: { taskId: string }[]
+  /** Tasks whose checkout no longer matches the state verification attested. */
+  blockedDrift: {
+    taskId: string
+    reason: string
+    expectedRevision: string | null
+    expectedFingerprint: string | null
+    actualRevision: string | null
+    actualFingerprint: string | null
+  }[]
   stoppedAfterConflict: boolean
   checks: {
     name: string
     status: 'passed' | 'failed'
     exitCode: number | null
     outputTail: string | null
+    /** Why the check did not pass (isolation refusal, denial, timeout, exit). */
+    note: string | null
+    /** Confinement mechanism that actually ran (or refused) the check. */
+    executor: string
   }[]
   artifactPath: string | null
 }
@@ -140,6 +161,125 @@ async function ensureIntegrationCheckout(
   })
 }
 
+function hasIntegrationCommit(store: Store, runId: string, taskId: string): boolean {
+  const row = store.db
+    .prepare("SELECT 1 AS present FROM events WHERE run_id = ? AND task_id = ? AND type = 'integration.task_committed' LIMIT 1")
+    .get(runId, taskId) as { present: number } | undefined
+  return row !== undefined
+}
+
+/**
+ * True only when every post-integration check actually passed. Consumers must
+ * use this for exit status/report outcome: running checks and printing their
+ * statuses without gating on the result is not verification.
+ */
+export function integrationChecksPassed(checks: IntegrateReport['checks']): boolean {
+  return checks.every((c) => c.status === 'passed')
+}
+
+interface DriftAssessment {
+  problem: IntegrateReport['blockedDrift'][number] | null
+  /**
+   * Set only when the checkout still matches the verified post-check
+   * fingerprint exactly. The commit is then bound to that fingerprint, so a
+   * mutation between the drift check and the commit is refused.
+   */
+  expectedFingerprintForCommit: string | null
+}
+
+/**
+ * Refuse to commit/merge work that no longer matches the state verification
+ * attested. The post-check fingerprint is the authority: HEAD movement,
+ * further edits, or untracked files after the check are all drift. A checkout
+ * committed by an earlier integration run is already covered by that commit,
+ * so its idempotent re-run is allowed.
+ *
+ * A Git-backed task with no current-attempt evidence is blocked; "verification
+ * was never configured" is not a license to integrate untested work.
+ */
+async function verificationDrift(
+  store: Store,
+  runId: string,
+  task: TaskRecord,
+  ws: WorkspaceRecord,
+): Promise<DriftAssessment> {
+  const blocked = (
+    reason: string,
+    expectedRevision: string | null,
+    expectedFingerprint: string | null,
+    actualRevision: string | null = null,
+    actualFingerprint: string | null = null,
+  ): DriftAssessment => ({
+    problem: {
+      taskId: task.id,
+      reason,
+      expectedRevision,
+      expectedFingerprint,
+      actualRevision,
+      actualFingerprint,
+    },
+    expectedFingerprintForCommit: null,
+  })
+
+  const checks = store.listCurrentVerificationChecksByTaskAttempt(task.id, task.attempt)
+  if (checks.length === 0) {
+    return blocked(`no verification evidence for attempt ${String(task.attempt)}`, null, null)
+  }
+  const evidenceProblem = verificationEvidenceProblem(checks, { requireGit: true })
+  const latest = checks[checks.length - 1] as (typeof checks)[number]
+  const expectedRevision = latest.postRevision
+  const expectedFingerprint = latest.postWorktreeFingerprint
+  if (evidenceProblem !== null) {
+    return blocked(
+      `verification evidence is incomplete or inconsistent: ${evidenceProblem}`,
+      expectedRevision,
+      expectedFingerprint,
+    )
+  }
+  if (expectedRevision === null || expectedFingerprint === null) {
+    return blocked('verified revision has no post-check worktree fingerprint', expectedRevision, expectedFingerprint)
+  }
+
+  const current = await captureWorkspaceEvidence(ws.path)
+  if (current.kind !== 'git' || !current.available) {
+    return blocked(
+      current.kind === 'capture-failed'
+        ? `current workspace evidence could not be captured: ${current.reason ?? 'unknown capture failure'}`
+        : 'current workspace is not a Git checkout; integration requires Git evidence',
+      expectedRevision,
+      expectedFingerprint,
+      current.revision,
+      current.worktreeFingerprint,
+    )
+  }
+  if (
+    hasIntegrationCommit(store, runId, task.id) &&
+    current.revision === ws.headCommit &&
+    current.worktreeDirty === false
+  ) {
+    return { problem: null, expectedFingerprintForCommit: null }
+  }
+  if (current.revision !== expectedRevision) {
+    return blocked(
+      'task checkout HEAD changed after verification',
+      expectedRevision,
+      expectedFingerprint,
+      current.revision,
+      current.worktreeFingerprint,
+    )
+  }
+  if (current.worktreeFingerprint !== expectedFingerprint) {
+    return blocked(
+      'task checkout changed after verification',
+      expectedRevision,
+      expectedFingerprint,
+      current.revision,
+      current.worktreeFingerprint,
+    )
+  }
+  return { problem: null, expectedFingerprintForCommit: expectedFingerprint }
+}
+
 export async function integrateRun(
   ctx: ProjectContext,
   opts: IntegrateCommandOptions,
@@ -159,6 +299,7 @@ export async function integrateRun(
     const conflicts: IntegrateReport['conflicts'] = []
     const blockedProtected: IntegrateReport['blockedProtected'] = []
     const blockedOverlap: IntegrateReport['blockedOverlap'] = []
+    const blockedDrift: IntegrateReport['blockedDrift'] = []
     const failed: IntegrateReport['failed'] = []
     const notAttempted: IntegrateReport['notAttempted'] = []
     let stoppedAfterConflict = false
@@ -183,9 +324,33 @@ export async function integrateRun(
       }
 
       try {
+        const driftAssessment = await verificationDrift(store, runRecord.id, task, ws)
+        const drift = driftAssessment.problem
+        if (drift !== null) {
+          blockedDrift.push(drift)
+          store.appendEvent({
+            projectId,
+            runId: runRecord.id,
+            taskId: task.id,
+            type: 'integration.drift_detected',
+            payload: {
+              taskId: task.id,
+              reason: drift.reason,
+              expectedRevision: drift.expectedRevision,
+              expectedFingerprint: drift.expectedFingerprint,
+              actualRevision: drift.actualRevision,
+              actualFingerprint: drift.actualFingerprint,
+            },
+          })
+          prepFailed.add(task.id)
+          continue
+        }
         const { commit } = await manager.commitAll(
           ws.path,
           `pluton: task ${task.id} — ${task.title} (committed at integration)`,
+          driftAssessment.expectedFingerprintForCommit !== null
+            ? { expectedFingerprint: driftAssessment.expectedFingerprintForCommit }
+            : {},
         )
         if (commit !== null) {
           store.updateWorkspace(ws.id, { headCommit: commit })
@@ -325,19 +490,68 @@ export async function integrateRun(
       const status = await manager.status(checkout.path)
       store.updateWorkspace(checkout.id, { headCommit: status.headCommit })
 
-      for (const check of ctx.loaded.config.project.verification) {
-        const res = await run(check.command, {
-          cwd: checkout.path,
-          timeoutMs: CHECK_TIMEOUT_MS,
-          maxOutputBytes: CHECK_MAX_OUTPUT_BYTES,
-        })
-        const combined = res.stderr.length > 0 ? `${res.stdout}\n${res.stderr}` : res.stdout
-        checks.push({
-          name: check.name,
-          status: res.exitCode === 0 ? 'passed' : 'failed',
-          exitCode: res.exitCode,
-          outputTail: combined.length > 0 ? combined.slice(-OUTPUT_TAIL_CHARS) : null,
-        })
+      // Integration checks run over merged worker content, so they use the
+      // same disposable-snapshot + confinement boundary as task verification.
+      // A host without proven confinement refuses every check; it never runs
+      // project code directly on the host.
+      const executor = deps.verificationExecutor ?? createVerificationExecutor()
+      const availability = executor.availability ?? { available: true, reason: null }
+      let snapshot: string | null = null
+      let refusal: string | null = availability.available
+        ? null
+        : availability.reason ?? 'verification isolation is unavailable'
+      if (availability.available) {
+        try {
+          snapshot = createVerificationSnapshot(checkout.path)
+        } catch (error) {
+          refusal = `verification snapshot failed: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+      try {
+        for (const check of ctx.loaded.config.project.verification) {
+          const denied = deniedCommandReason(check.command)
+          let exitCode: number | null = null
+          let combined = ''
+          let note: string | null = null
+          let executorId = executor.id
+          if (denied !== null) {
+            note = denied
+            combined = denied
+          } else if (snapshot === null) {
+            note = `verification isolation is unavailable: ${refusal ?? 'no disposable snapshot'}`
+            combined = note
+          } else {
+            try {
+              const res = await executor.run({
+                command: check.command,
+                cwd: snapshot,
+                workspaceRoot: snapshot,
+                env: {},
+                timeoutMs: CHECK_TIMEOUT_MS,
+                maxOutputBytes: CHECK_MAX_OUTPUT_BYTES,
+                network: 'none',
+              })
+              executorId = res.executor
+              exitCode = res.exitCode
+              combined = res.stderr.length > 0 ? `${res.stdout}\n${res.stderr}` : res.stdout
+              if (res.timedOut) note = `check timed out after ${String(CHECK_TIMEOUT_MS)}ms`
+              else if (res.exitCode !== 0) note = `exit code ${String(res.exitCode)}`
+            } catch (error) {
+              note = `verification isolation is unavailable: ${error instanceof Error ? error.message : String(error)}`
+              combined = note
+            }
+          }
+          checks.push({
+            name: check.name,
+            status: exitCode === 0 && note === null ? 'passed' : 'failed',
+            exitCode,
+            outputTail: combined.length > 0 ? combined.slice(-OUTPUT_TAIL_CHARS) : null,
+            note,
+            executor: executorId,
+          })
+        }
+      } finally {
+        if (snapshot !== null) rmSync(snapshot, { recursive: true, force: true })
       }
       store.appendEvent({
         projectId,
@@ -346,7 +560,13 @@ export async function integrateRun(
         payload: {
           checkoutId: checkout.id,
           branch: checkout.branch,
-          checks: checks.map((c) => ({ name: c.name, status: c.status, exitCode: c.exitCode })),
+          checks: checks.map((c) => ({
+            name: c.name,
+            status: c.status,
+            exitCode: c.exitCode,
+            note: c.note,
+            executor: c.executor,
+          })),
         },
       })
 
@@ -363,6 +583,7 @@ export async function integrateRun(
       conflicts,
       blockedProtected,
       blockedOverlap,
+      blockedDrift,
       failed,
       notAttempted,
       stoppedAfterConflict,

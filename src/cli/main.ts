@@ -28,7 +28,7 @@ import { attachShip } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
 import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
-import { integrateRun } from './commands/integrate.ts'
+import { integrateRun, integrationChecksPassed } from './commands/integrate.ts'
 import { collectLogType, formatLogsHuman, logsView } from './commands/logs.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
@@ -1157,6 +1157,10 @@ program
         `review the branch at ${report.checkout.path}; main is never touched (git log ${report.checkout.branch})`,
       )
       emitOk(io, json, lines.join('\n'), report)
+      // Post-integration checks are acceptance evidence, not decoration: a
+      // failed check must make the command fail so automation cannot treat a
+      // red integration as a green one.
+      return integrationChecksPassed(report.checks) ? 0 : 1
     })
   })
 
@@ -1283,7 +1287,7 @@ function decideHuman(report: Awaited<ReturnType<typeof decideApproval>>): string
     }
   }
   if (report.integrationReport !== null) {
-    const passed = report.integrationReport.checks.every((c) => c.status === 'passed')
+    const passed = integrationChecksPassed(report.integrationReport.checks)
     const status =
       report.integrationReport.conflicts.length > 0
         ? 'conflicts'
@@ -1318,6 +1322,12 @@ approvalsCmd
         ...(opts.continue !== undefined ? { autoContinue: opts.continue } : {}),
       })
       emitOk(io, json, decideHuman(report), report)
+      // An approval-triggered integration is only successful when its checks
+      // actually passed. Exiting 0 on a red check would let a wrapper treat
+      // the continuation as accepted.
+      if (report.integrationReport !== null && !integrationChecksPassed(report.integrationReport.checks)) {
+        return 1
+      }
     })
   })
 
