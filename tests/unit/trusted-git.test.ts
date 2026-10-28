@@ -1,11 +1,19 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { captureWorkspaceEvidence } from '../../src/verify/evidence.ts'
 import { GitWorkspaceManager } from '../../src/workspace/manager.ts'
-import { diffCommitPatch, diffTreeStat, diffWorktreePatch, diffWorktreeStat, logOneline } from '../../src/workspace/trusted-git.ts'
+import {
+  captureRawSnapshot,
+  commitRaw,
+  diffCommitPatch,
+  diffTreeStat,
+  diffWorktreePatch,
+  diffWorktreeStat,
+  logOneline,
+} from '../../src/workspace/trusted-git.ts'
 
 /**
  * The host Git trust boundary. Every test below builds a disposable repository
@@ -239,5 +247,42 @@ describe('host Git trust boundary', () => {
     expect(brokenEvidence.kind).toBe('capture-failed')
     expect(brokenEvidence.available).toBe(false)
     expect(brokenEvidence.reason).toMatch(/git/i)
+  })
+
+  it.skipIf(process.platform === 'win32')('hashes symlink targets instead of reading through them', async () => {
+    const repo = seedRepo()
+    const outside = tmp('pluton-trusted-outside-')
+    const outsideFile = join(outside, 'secret.txt')
+    writeFileSync(outsideFile, 'OUTSIDE_SECRET\n')
+    symlinkSync('app.txt', join(repo, 'inside-link'))
+    symlinkSync(outsideFile, join(repo, 'outside-link'))
+
+    const hash = (content: string): string =>
+      execFileSync('git', ['hash-object', '--no-filters', '--stdin'], {
+        cwd: repo,
+        input: content,
+        encoding: 'utf8',
+      }).trim()
+
+    const snapshot = await captureRawSnapshot(repo)
+    const inside = snapshot.files.find((file) => file.path === 'inside-link')
+    const outsideLink = snapshot.files.find((file) => file.path === 'outside-link')
+    expect(inside?.mode).toBe('120000')
+    expect(outsideLink?.mode).toBe('120000')
+    expect(inside?.blob).toBe(hash('app.txt'))
+    expect(inside?.blob).not.toBe(hash('seed\n'))
+    expect(outsideLink?.blob).toBe(hash(outsideFile))
+    expect(outsideLink?.blob).not.toBe(hash('OUTSIDE_SECRET\n'))
+
+    // Changing the target file's content must not change the link blob or the
+    // worktree fingerprint: the link target is the evidence, not the file.
+    writeFileSync(outsideFile, 'CHANGED_SECRET\n')
+    const after = await captureRawSnapshot(repo)
+    expect(after.files.find((file) => file.path === 'outside-link')?.blob).toBe(outsideLink?.blob)
+    expect(after.fingerprint).toBe(snapshot.fingerprint)
+
+    const committed = await commitRaw(repo, 'symlinks')
+    expect(committed.commit).not.toBeNull()
+    expect(git(repo, ['cat-file', 'blob', `${committed.commit as string}:outside-link`])).toBe(outsideFile)
   })
 })
