@@ -71,6 +71,25 @@ function record(id, label, status, detail) {
   }
 }
 
+/**
+ * Print the confinement-gate summary and exit non-zero if any mandatory
+ * invariant failed. Must be reached by every code path so a failed or
+ * unavailable invariant can never be reported as a successful run.
+ */
+function finish() {
+  const failed = results.filter((r) => r.status === STATUS.FAIL)
+  console.log(
+    `\n────────────────────────────────────────────────────────────────────────\nconfinement gate: ${results.length} checks | passed: ${results.length - failed.length} | failed: ${failed.length}`,
+  )
+  if (failed.length > 0) {
+    console.error('\nFAILURE: One or more mandatory confinement invariants failed:')
+    for (const f of failed) {
+      console.error(`  - ${f.label}: ${f.detail}`)
+    }
+    process.exit(1)
+  }
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
@@ -154,6 +173,8 @@ async function runRootRefusal() {
       return { refused: threw.message }
     },
   )
+
+  finish()
 }
 
 async function runUnprivilegedInvariants() {
@@ -161,6 +182,7 @@ async function runUnprivilegedInvariants() {
   if (isRoot) {
     console.log('Running as root: executing root refusal invariant...')
     await runRootRefusal()
+    finish()
     return
   }
 
@@ -169,6 +191,7 @@ async function runUnprivilegedInvariants() {
 
   if (!caps.helper.available) {
     record('helper-precheck', 'Native confinement helper availability', STATUS.FAIL, caps.helper.detail)
+    finish()
     return
   }
 
@@ -655,16 +678,7 @@ async function runUnprivilegedInvariants() {
 
   // Summary
   safeRm(SCRATCH_BASE)
-  const failed = results.filter((r) => r.status === STATUS.FAIL)
-  console.log('\n────────────────────────────────────────────────────────────────────────')
-  console.log(`confinement gate: ${results.length} checks | passed: ${results.length - failed.length} | failed: ${failed.length}`)
-  if (failed.length > 0) {
-    console.error('\nFAILURE: One or more mandatory confinement invariants failed:')
-    for (const f of failed) {
-      console.error(`  - ${f.label}: ${f.detail}`)
-    }
-    process.exit(1)
-  }
+  finish()
 }
 
 async function main() {

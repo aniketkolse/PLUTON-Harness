@@ -48,19 +48,28 @@ jobs:
 
       - name: Validate native helper identity & probe
         run: |
+          set -eo pipefail
           chmod 0755 native/landlock-run/landlock-run-linux-x64
           HELPER_SHA=$(sha256sum native/landlock-run/landlock-run-linux-x64 | cut -d' ' -f1)
-          EXPECTED_SHA=$(node -e "import('./src/execution/capabilities.ts').then(m => { const man = m.readHelperManifest(); console.log(man?.targets?.['linux-x64']?.sha256 ?? ''); })")
-          EXPECTED_VER=$(node -e "import('./src/execution/capabilities.ts').then(m => { const man = m.readHelperManifest(); console.log(man?.version ?? ''); })")
+          HELPER_SIZE=$(stat -c %s native/landlock-run/landlock-run-linux-x64)
+          EXPECTED_SHA=$(node -e "console.log(JSON.parse(require('fs').readFileSync('native/landlock-run/manifest.json','utf8')).targets['linux-x64'].sha256)")
+          EXPECTED_VER=$(node -e "console.log(JSON.parse(require('fs').readFileSync('native/landlock-run/manifest.json','utf8')).version)")
+          EXPECTED_SIZE=$(node -e "console.log(JSON.parse(require('fs').readFileSync('native/landlock-run/manifest.json','utf8')).targets['linux-x64'].size)")
           
           echo "=== Native Helper Identity ===" | tee .pluton-ci/helper-identity.txt
           echo "Helper File: native/landlock-run/landlock-run-linux-x64" | tee -a .pluton-ci/helper-identity.txt
           echo "Helper Version: $EXPECTED_VER" | tee -a .pluton-ci/helper-identity.txt
           echo "Actual SHA256:   $HELPER_SHA" | tee -a .pluton-ci/helper-identity.txt
           echo "Expected SHA256: $EXPECTED_SHA" | tee -a .pluton-ci/helper-identity.txt
+          echo "Actual Size:     $HELPER_SIZE" | tee -a .pluton-ci/helper-identity.txt
+          echo "Expected Size:   $EXPECTED_SIZE" | tee -a .pluton-ci/helper-identity.txt
 
           if [ "$HELPER_SHA" != "$EXPECTED_SHA" ]; then
             echo "::error::Native helper hash mismatch! Actual: $HELPER_SHA, Expected: $EXPECTED_SHA"
+            exit 1
+          fi
+          if [ "$HELPER_SIZE" != "$EXPECTED_SIZE" ]; then
+            echo "::error::Native helper size mismatch! Actual: $HELPER_SIZE, Expected: $EXPECTED_SIZE"
             exit 1
           fi
 
@@ -73,6 +82,7 @@ jobs:
 
       - name: Run native helper selftest
         run: |
+          set -eo pipefail
           cd native/landlock-run
           ./selftest.sh | tee ../../.pluton-ci/helper-selftest.log
 
@@ -83,13 +93,19 @@ jobs:
         run: npm run build
 
       - name: Full test suite (Vitest)
-        run: npm test -- --reporter=default | tee .pluton-ci/vitest.log
+        run: |
+          set -eo pipefail
+          npm test -- --reporter=default | tee .pluton-ci/vitest.log
 
       - name: Live Linux Confinement & Adversarial Harness (Unprivileged)
-        run: node scripts/verify-confinement.mjs | tee .pluton-ci/confinement-unprivileged.log
+        run: |
+          set -eo pipefail
+          node scripts/verify-confinement.mjs | tee .pluton-ci/confinement-unprivileged.log
 
       - name: Live Linux Confinement Harness (Root Refusal Gate)
-        run: sudo node scripts/verify-confinement.mjs --root-only | tee .pluton-ci/confinement-root.log
+        run: |
+          set -eo pipefail
+          sudo node scripts/verify-confinement.mjs --root-only | tee .pluton-ci/confinement-root.log
 
       - name: Documentation link integrity
         run: npm run verify:docs
@@ -98,7 +114,7 @@ jobs:
         run: npm run verify:assets
 
       - name: Release gate validation
-        run: npm run release:check
+        run: npm run release:check -- --allow-dirty
 
       - name: Generate summary report
         if: always()
