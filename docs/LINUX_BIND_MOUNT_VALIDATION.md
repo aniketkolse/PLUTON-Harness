@@ -1,5 +1,11 @@
 # Linux bind-mount ownership validation (SECURITY.md §8.9)
 
+> **Historical Docker procedure (superseded).** Docker and container execution were removed;
+> `sandbox.kind: docker` is rejected and `tests/e2e/linux-bind-mount.e2e.test.ts` no longer
+> exists. This document is retained only as a record of the pre-native validation plan. Current
+> Linux confinement is documented in [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and
+> [`SECURITY.md`](SECURITY.md).
+
 **Status: NOT RUN.** No native Linux Docker host was available on 2026-10-20.
 This document is the reproducible procedure and the evidence record. A skipped
 run, a Docker Desktop run, or a Windows run is **NOT TESTED** — never a pass.

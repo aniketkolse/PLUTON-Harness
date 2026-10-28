@@ -1,5 +1,11 @@
 # PLUTON Implementation Roadmap — Phase 1 audit output
 
+> **Historical planning snapshot (2026-10-18).** Docker/container execution was removed after
+> this plan was written; `sandbox.kind: docker` and `local-process` are rejected and native
+> execution is the only substrate. Docker-specific commands and claims below are historical,
+> not current guidance. See [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and
+> [`SECURITY.md`](SECURITY.md) for current behavior and validation.
+
 **Date:** 2026-10-18 · **Baseline:** `main` @ `506fa72` — typecheck/build/unit/E2E green (`docs/PLUTON_BASELINE_REPORT.md`)
 **Inputs:** `docs/PLUTON_FEATURE_PARITY.md` (gap analysis), `docs/PLUTON_ARCHITECTURE.md` (as-built), the four reference volumes, and the conversation requirements R1–R5.
 

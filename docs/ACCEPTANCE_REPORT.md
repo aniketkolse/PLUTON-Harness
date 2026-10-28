@@ -1,8 +1,13 @@
 # Docker-Free Pluton Acceptance Report
 
 **Date:** October 2026\
-**Status:** ACCEPTED WITH LIMITATIONS\
+**Status:** ACCEPTED WITH LIMITATIONS (historical)\
 **Scope:** Elimination of mandatory Docker dependency across installation, onboarding, diagnostics, task execution, terminal attachment, verification, and multi-agent orchestration on the tested Windows host.
+
+> **Historical report (Docker-free migration).** Docker was later removed entirely as a
+> substrate. Statements below that describe Docker mode as an available opt-in, or that
+> require acknowledgement keys, are superseded. Native execution is the only supported
+> runtime; see [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and [`SECURITY.md`](SECURITY.md).
 
 > **Independent audit note (2026-10-22):** A separate Docker-absent acceptance audit re-ran these
 > workflows and records **ACCEPTED WITH LIMITATIONS** because a true Docker-uninstalled host,

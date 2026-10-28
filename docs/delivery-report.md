@@ -4,6 +4,10 @@
 > removed in the OpenCode-only migration. Qwen work described below is retained as delivery history
 > and is not current support or setup guidance. Current engine scope: OpenCode only; `mock` is
 > tests/dev only. See [`MIGRATION.md`](MIGRATION.md) §8.
+>
+> **Docker note:** the container mode described below was later removed. Docker and
+> `local-process` configs are now rejected; native execution is the only substrate. See
+> [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md).
 
 Status date: 2026-10-17 · host: Windows 11 + Docker Desktop (WSL2) · Node v24.22.0 · git `main`,
 unpushed. This report states exactly what was built, what was executed and observed, and what was

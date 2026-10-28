@@ -71,6 +71,9 @@ runs without credentials. Checks and their failure classes:
 | 14 | `owner decision: private flag` | `private` absent from `package.json` | owner | PASS (resolved) / BLOCKED |
 | 15 | `owner decision: license` | an outbound license (`Apache-2.0`) and `LICENSE` file applied | owner | PASS (resolved) / BLOCKED |
 
+Check 6 is printed as two lines (README/NOTICES and the full docs tree), so a
+run reports 16 lines for the 15 rows above.
+
 `npm pack --dry-run` runs the `prepack` build but never uploads anything; use
 it to inspect the exact tarball before publishing.
 
@@ -79,19 +82,21 @@ it to inspect the exact tarball before publishing.
 `npm run test:coverage` runs the full suite under Vitest's v8 provider and
 fails on a drop below the committed floors:
 
-| Metric | Floor | Measured baseline (2026-10-26, Windows 11 / Node 24.20, 1,253 tests) |
+| Metric | Floor | Measured baseline (2026-10-28, Windows 11 / Node 24.20, 1,232 tests) |
 |---|---|---|
-| Statements | 77 | 77.96 |
-| Branches | 68 | 69.35 |
-| Functions | 79 | 80.22 |
-| Lines | 78 | 79.65 |
+| Statements | 77 | 77.31 |
+| Branches | 68 | 68.52 |
+| Functions | 79 | 79.95 |
+| Lines | 78 | 78.91 |
 
-The baseline is the lowest observed value for each metric across four repeated
+The baseline is the lowest observed value for each metric across two repeated
 full runs. Repeat measurements move by a few statements because a handful of
 tests exercise timing-dependent paths; timing-sensitive chat tests poll
 observable state instead of sleeping fixed intervals, so the result does not
-depend on worker scheduling. All four consecutive runs passed. The floors keep
-roughly one point of headroom, so that jitter cannot flip the gate.
+depend on worker scheduling. Both runs passed. The floors are unchanged: the
+native-only migration removed the container modules and their Docker suites,
+and targeted tests for native policy/capabilities, CLI output, session commands
+and workspace resolution restored the gate instead of lowering a floor.
 
 `coverage.include` is `src/**/*.ts` with **no exclusions**, so moving a module
 out of the gate is not a way to raise the number. The floors sit roughly one
@@ -131,10 +136,11 @@ publication.
 
 Verified project configuration: Node.js **>= 24** (`engines.node`), npm with
 the committed `package-lock.json` (v3), first-class Windows 11 development
-hosts, and a documented Linux daemon/worker story through Docker (ADR-0004,
-ADR-0015). macOS support is code-complete (`sameDirPath`, launcher app-mode
-paths, tool discovery via explicit platform parameters) but **has not been
-executed on a native macOS machine** in this project's history.
+hosts, and native execution as documented in
+[`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md). macOS support is code-complete
+(`sameDirPath`, launcher app-mode paths, tool discovery via explicit platform
+parameters) but **has not been executed on a native macOS machine** in this
+project's history.
 
 | Subsystem | Windows | Linux | macOS |
 |---|---|---|---|
@@ -144,8 +150,9 @@ executed on a native macOS machine** in this project's history.
 | SQLite persistence (`node:sqlite`) | validated locally | CI job | CI job |
 | SSE and auth/host validation | validated locally | CI job | CI job |
 | File permissions (0600 token/instance) | NOT TESTED — mode bits unenforced; gate says so | gate check 13 | gate check 13 |
-| Docker worker containers + tmux | executed via Docker Desktop (Linux containers on a Windows host — *not* a native Linux host) | CI `e2e-docker` job | not covered (Docker Desktop only; native engines unverified) |
-| `restricted` network egress denial | unit + wiring tests pass; real-container adversarial E2E **NOT RUN** (Docker daemon unavailable) | CI `e2e-docker` job — authoritative result | NOT TESTED; Docker Desktop's internal-network gateway path is unverified |
+| Native execution (`unconfined` + `open`) | validated locally | CI job | CI job |
+| Linux confined modes (`read-only`/`workspace-write`, `restricted`/`none`) | not applicable — Windows supports only `unconfined` | policy/capability tests pass; real Landlock and namespace execution **NOT TESTED** (no native Linux host in this checkout) | not applicable — macOS supports only `unconfined` |
+| Host tmux terminals (`pluton attach`) | lifecycle unit-tested; live attach not manually verified here | CI job | CI job |
 | Browser app-mode launcher | validated locally (Edge/Chrome) | PATH-probing logic unit-tested; native launch NOT TESTED | bundle paths unit-tested; native launch NOT TESTED |
 | Signals and process cleanup | validated locally (Node emulation) | CI job | CI job |
 | Package install from tarball | validated locally (`npm run smoke:package`, path with a space) | CI job | CI job |
@@ -170,22 +177,14 @@ npm pack --dry-run --json    # inspect exactly what would be published
 npm audit --omit=dev         # production dependency audit (needs registry)
 
 # opt-in suites (excluded from `npm run check`; read their headers first):
-npx vitest run --config vitest.e2e.config.ts   # Docker + tmux E2E — set PLUTON_E2E_DOCKER=1,
-                                               # requires a worker image: docker build -t pluton-worker:local docker/worker
-                                               # includes tests/e2e/restricted-network.e2e.test.ts: proves from inside a
-                                               # real container that `restricted` denies direct, DNS-resolved and
-                                               # child-process egress (internal network + runtime probe)
-PLUTON_E2E_DOCKER=1 npx vitest run --config vitest.e2e.config.ts \
-  tests/e2e/linux-bind-mount.e2e.test.ts       # native Linux only — bind-mount ownership/uid assertions;
-                                               # procedure: docs/LINUX_BIND_MOUNT_VALIDATION.md
-npx vitest run --config vitest.live.config.ts  # live engine tests — requires an installed engine
+npm run test:e2e                # orchestration + workspace E2E (deterministic mock engine)
+npm run test:live               # live engine tests — requires an installed engine
 ```
 
-Docker-dependent tests check Docker explicitly (`probe()`); without the flag
-Vitest reports the suite as **skipped**. Treat skipped as NOT TESTED here —
-never as passing.
 Live-engine tests require a real engine CLI or free models; they are opt-in
-and NOT TESTED in CI.
+and NOT TESTED in CI. The E2E suite uses the mock engine and does not prove
+Linux confinement; a skipped or mock-only run is not evidence for Landlock or
+namespace enforcement.
 
 ## CI workflow
 
@@ -198,10 +197,10 @@ dispatch, with `permissions: contents: read`, no secrets, and
   (ubuntu only) → `npm run smoke:package`. This is where check 12
   (registry-backed audit), check 13 (POSIX permissions) and the coverage gate
   get their real results, and where the cross-platform runs above become real.
-- **e2e-docker** (`ubuntu-latest`): builds `pluton-worker:local` from
-  `docker/worker/Dockerfile`, then runs the opt-in Docker/tmux E2E with
-  `PLUTON_E2E_DOCKER=1`, including the restricted-network egress-denial
-  assertions (`tests/e2e/restricted-network.e2e.test.ts`).
+- **e2e** (`ubuntu-latest`): runs `npm run test:e2e` (orchestration and
+  workspace flows with the deterministic mock engine). It is not a Linux
+  confinement test; Landlock and namespace behavior still requires a native
+  Linux host and is **NOT TESTED** until that run is recorded.
 
 No failure artifacts are uploaded (test and gate output already lands in the
 job log; nothing in the build contains secrets — check 11 enforces that).
@@ -258,9 +257,9 @@ window, unpublishing.
 
 - Executable `pluton` → `bin/pluton.js` (prefers `dist/`, falls back to `src/`
   for Node >= 24 source runs in the repo only).
-- Shipped files (whitelist in `package.json#files`): `bin/`, `dist/`,
-  `docker/worker/Dockerfile` (containerized worker image), `templates/`
-  (`pluton init` team/role files), `README.md`, `THIRD_PARTY_NOTICES.md`,
+- Shipped files (whitelist in `package.json#files`): `bin/`, `dist/`, `native/`
+  (the verified `landlock-run` helper and manifest), `templates/` (`pluton init`
+  team/role files), `README.md`, `THIRD_PARTY_NOTICES.md`, `LICENSE` and
   `package.json`. Gate checks 9–11 verify presence, exclusions and content.
 - Runtime dependencies: commander, yaml, zod. Gate check 12 audits the
   production tree; re-run `npm audit --omit=dev` as part of any release review.
@@ -272,22 +271,19 @@ window, unpublishing.
 - Native Linux and native macOS runs have not happened in this repository's
   history; the CI jobs above are the mechanism, and they are NOT TESTED until
   the jobs execute for the release commit and their results are read.
-- Docker-based validation on this project so far used Docker Desktop (Linux
-  containers on a Windows host): useful for the container/tmux layer, **not**
-  evidence of native Linux host behavior. The native-Linux ownership check is
-  `tests/e2e/linux-bind-mount.e2e.test.ts` (procedure:
-  `docs/LINUX_BIND_MOUNT_VALIDATION.md`); it is **NOT RUN** until executed on a
-  genuine Linux host — a skipped or Docker Desktop run is not evidence.
+- Linux confined modes (`read-only`/`workspace-write`, `restricted`/`none`) are
+  implemented and covered by policy/capability tests, but real Landlock and
+  namespace behavior has not been executed on a native Linux host in this
+  checkout. A Windows or mock-only run is **not** evidence. Until a native
+  Linux run is recorded, those modes are **NOT TESTED**.
 - `--browser` mode exposes the session token in the address bar; mitigated by
   `Referrer-Policy: no-referrer` and loopback binding — see `docs/SECURITY.md`.
-- `restricted` network policy denies internet egress, but the internal network's
-  gateway is the Docker host, so the Pluton tool bridge stays reachable. A
-  compromised engine can still attempt host services bound to that gateway;
-  `restricted` denies the internet, not the host. Whether
-  `host.docker.internal` is reachable through an internal network on Docker
-  Desktop is unverified — if it is not, restricted container sessions fail to
-  reach the tool bridge and do not fall back to `open` (see `docs/SECURITY.md`
-  §8.5). Engines that need model-provider access cannot run under `restricted`;
-  set an explicit per-Ship `network_policy: open` for those.
+- `restricted`/`none` network policy depends on unprivileged user and network
+  namespaces; without them Pluton fails closed. Network policy is not an egress
+  allowlist: a confined session still reaches the Pluton tool bridge through
+  its loopback proxy, and an `open` session uses the host network unfiltered.
+  Engines that need model-provider access cannot run under `restricted`; set an
+  explicit per-Ship `network_policy: open` for those (see `docs/SECURITY.md`
+  §8.5).
 - Cancellation of an actively streaming turn via the HTTP API is not fully
   proven (documented race, see `docs/ROADMAP.md`).

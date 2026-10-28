@@ -24,9 +24,9 @@ not-yet-published package. There is no team-plan, seat-based, or multi-tenant us
 PLUTON is a CLI-first, local-first orchestration control plane for a team of persistent AI agent
 identities called **Ships**. Each Ship has its own model, role instructions, permissions,
 workspace policy, resource limits, and terminal. Pluton is not a coding model: OpenCode does
-inference, containers provide process isolation, tmux provides terminal persistence, Git tracks
-changes, and a durable local runtime (SQLite) records what was requested, accepted, dispatched,
-completed, failed, or left uncertain.
+inference, the native provider enforces filesystem/network policy where the host supports it, tmux
+provides terminal persistence, Git tracks changes, and a durable local runtime (SQLite) records what
+was requested, accepted, dispatched, completed, failed, or left uncertain.
 
 Success means a supervised run delegates real work, the delegated tasks complete, the configured
 verification checks pass, and the verified branches integrate into a branch the operator chose —
@@ -43,9 +43,10 @@ global model switch.
 
 ## Operating Context
 
-- **First supported setup**: Windows 11 + WSL2 + Docker Desktop (Linux containers). Linux is fully
-  supported as the daemon host. macOS is untested. Worker terminals live inside Linux containers
-  because native PowerShell has no tmux.
+- **First supported setup**: Windows 11 (native, explicitly `unconfined`) and Linux (confined
+  `read-only`/`workspace-write` with the verified Landlock helper). macOS is policy-supported in
+  `unconfined` mode through the same provider but is not live-verified here. `pluton attach` needs
+  host `tmux`; runs and chat work without it.
 - **Runtime**: Node.js >= 24 (built-in `node:sqlite`), Git >= 2.40 for checkout isolation and diff
   capture, OpenCode v2 over the ACP stdio protocol with model auth configured in each Ship's
   private engine home. The deterministic `mock` adapter is for tests/dev only.
@@ -78,8 +79,8 @@ global model switch.
   through it: the browser workspace reads the same values in its CSS `:root`, and the terminal
   interface maps its own role vocabulary onto the same roles and degrades through one shared
   256- and 16-colour table. There is no second, drifting token set.
-- **Local-first and offline.** The control plane talks to the local OpenCode engine, local containers,
-  and a local database. Nothing about the interface depends on a hosted service.
+- **Local-first and offline.** The control plane talks to the local OpenCode engine, the native
+  execution helper, and a local database. Nothing about the interface depends on a hosted service.
 - **The terminal is always sufficient.** Every capability reachable in the graphical workspace is
   reachable from the CLI, and every suitable command emits JSON for automation.
 - **Same experience, two shells.** Desktop app window and browser must show the same screens,

@@ -5,9 +5,10 @@
 Pluton-Harness is a **CLI-first, local-first orchestration control plane** for a team of persistent
 AI coding agent identities — *Ships*. Each Ship has its own model, role instructions, permissions,
 workspace policy, resource limits and a persistent tmux terminal.
-Pluton is not a coding model: OpenCode does inference, native process policies (or optional containers)
-provide execution isolation, tmux provides terminal persistence, Git tracks changes, and a durable local
-runtime (SQLite) records what was requested, accepted, dispatched, completed, failed or left uncertain.
+Pluton is not a coding model: OpenCode does inference, Pluton's native process policy confines
+execution where the host can prove it, tmux provides terminal persistence, Git tracks changes, and a
+durable local runtime (SQLite) records what was requested, accepted, dispatched, completed, failed or
+left uncertain.
 
 > Status: **early implementation** — see [`docs/ROADMAP.md`](docs/ROADMAP.md) for delivered vs
 > planned features and [`docs/`](docs/) for architecture, security and operational documents.
@@ -26,9 +27,11 @@ provides the missing control plane for local multi-agent development:
   choices are validated against OpenCode's real capabilities. There is no global model switch.
 - **Durable task truth** — SQLite-backed runs, tasks, dependency edges, receipts, events and
   approvals; request idempotency; explicit `unknown_outcome` instead of blind replay.
-- **Native-first execution** — first-class host execution (`sandbox.kind: native`, see
-  [`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md)) runs directly without Docker. Linux containers
-  (`sandbox.kind: docker`) remain available as an opt-in legacy substrate for containerized boundaries.
+- **Native-only execution** — host execution is the only substrate (`sandbox.kind: native`, see
+  [`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md)). Linux can enforce filesystem and network
+  policy through the verified Landlock helper; macOS and Windows run only in the explicitly
+  acknowledged `unconfined` mode. Docker and `local-process` configs are rejected with migration
+  guidance, never silently downgraded.
 - **Verification, not vibes** — acceptance criteria and configured checks gate run completion.
 
 ## Prerequisites
@@ -38,18 +41,17 @@ provides the missing control plane for local multi-agent development:
 | Node.js ≥ 24 | local daemon + CLI; uses the built-in `node:sqlite` |
 | Git ≥ 2.40 | checkout isolation and diff capture |
 | An engine CLI | OpenCode v2 (`opencode acp` protocol); model auth configured in the Ship's engine home |
-| Docker Desktop *(optional for native)* | required only when using container mode (`sandbox.kind: docker`) |
-| Windows 11 with WSL2 / Linux | tested on Windows 11 and Linux hosts |
+| Linux for confined modes | kernel with Landlock ABI ≥ 3 (Linux ≥ 6.2) plus the bundled `native/landlock-run` helper; `restricted`/`none` networks also need unprivileged user and network namespaces |
+| Host platform | Linux supports confined `read-only`/`workspace-write`; Windows 11 and macOS support only acknowledged `unconfined`. Windows 11 is validated locally; native Linux confinement and macOS are CI-gated, not live-verified in this checkout. |
 
 > **Engine support:** OpenCode is the only supported real inference engine (`engine: opencode`).
 > The deterministic `mock` adapter exists for tests and development only; it is not a substitute
 > for a real run. Qwen Code support was removed in the OpenCode-only migration.
 
-Native host execution (`sandbox.kind: native`) runs without Docker Desktop or containers. See
-[`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md) for native configuration and security details. For
-container mode, worker terminals live inside Linux containers. See
-[`docs/PLUTON_ARCHITECTURE.md`](docs/PLUTON_ARCHITECTURE.md) and the WSL2 notes in
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+Native execution needs no Docker daemon, container image or WSL2 virtual machine. See
+[`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md) for modes, the capability matrix and exact
+config keys, and [`docs/MIGRATION.md`](docs/MIGRATION.md) for moving an old `sandbox.kind: docker`
+config to native.
 
 ## Quick start (intended flow)
 
@@ -86,12 +88,12 @@ pluton --tui                       # launches interactive terminal chat TUI inst
 ### Command-line Operations
 
 ```bash
-pluton doctor                      # checks OS/runtime, Git, tmux, engines, config (Docker optional)
+pluton doctor                      # checks OS/runtime, Git, tmux, engines, native policy and config
 pluton init                        # write pluton.yaml + .pluton/roles in the current project (native default)
 pluton chat [ship]                 # chat with an operator Ship (default: supervisor) or `pluton ship chat <ship>`
-pluton run --goal "Implement auth" # supervised run: the manager Ship plans and delegates (Docker-free)
+pluton run --goal "Implement auth" # supervised run: the manager Ship plans and delegates on the host
 pluton verify --run <id>           # run the project's verification checks, apply the verdict
-pluton attach <ship>               # live tmux session on host (or container in docker mode)
+pluton attach <ship>               # live host tmux session (tmux is visibility, not a security boundary)
 pluton integrate --run <id>        # merge verified task branches into the integration checkout (never main)
 pluton approvals list              # operator inbox: list/approve/deny pending approvals
 pluton status                      # shows recent runs and task counts from durable state
@@ -158,19 +160,27 @@ deprecated alias) · `chat` · `run` ·
 ## Repository layout
 
 ```
+src/chat/           operator chat sessions and turn orchestration
 src/cli/            CLI entry & command handlers
-src/domain/         IDs, state machines, contracts (no I/O)
-src/runtime/        durable scheduler & lifecycle supervision
-src/persistence/    SQLite schema + migrations (node:sqlite)
-src/engines/        engine contract + OpenCode adapter + deterministic mock
-src/orchestration/  Manager tool bridge, task graph, budgets, approvals
-src/execution/      native execution provider & process-policy enforcement
-src/sandbox/        Docker container lifecycle policy (legacy opt-in substrate)
-src/terminal/       host & container tmux session lifecycle & safe attach
-src/workspace/      checkout isolation, diffs, integration
-src/verification/   acceptance checks & run verdicts
 src/config/         pluton.yaml schema + loaders
+src/desktop/        app-mode window launcher
+src/domain/         IDs, state machines, contracts (no I/O)
+src/engines/        engine contract + OpenCode adapter + deterministic mock
+src/execution/      native execution provider, policy matrix, Landlock helper integration
+src/orchestrator/   manager bridge, task graph, scheduler, approvals, integration
+src/plan/           durable plan records and plan-to-run handoff
+src/server/         local REST/SSE application server
+src/store/          SQLite schema, migrations, durable stores
+src/terminal/       host tmux lifecycle & safe attach
+src/tools/          tool bridge catalog, handlers and MCP transports
+src/tui/            interactive chat TUI
+src/ui/             graphical workspace frontend
+src/util/           shared exec, redaction and sanitization helpers
+src/verify/         acceptance checks & run verdicts
+src/workspace/      checkout isolation, diffs, integration
+native/landlock-run/  verified Linux Landlock/namespace helper (Rust)
 templates/          team templates & role prompts
+scripts/            build, release, demo and documentation gates
 tests/              unit · integration · e2e (opt-in)
 docs/               product, architecture, security, ADRs, reverse-engineering
 ```

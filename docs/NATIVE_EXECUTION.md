@@ -1,54 +1,123 @@
 # Native Execution in Pluton-Harness
 
-This document describes Pluton's first-class **native execution provider** (`sandbox.kind: native`), introduced to run engine processes directly on the host machine without Docker while preserving Pluton's multi-agent orchestration, Git checkout isolation, and durable state semantics.
+Pluton runs engine processes directly on the host. **Native execution is the only
+supported substrate** (`sandbox.kind: native`); configs that still select
+`sandbox.kind: docker` or `sandbox.kind: local-process` fail with migration
+guidance instead of silently falling back to a weaker runtime
+(`src/execution/factory.ts`).
+
+This document describes what the native provider enforces, what it does not,
+and the exact configuration that selects each mode.
 
 ---
 
-## 1. Executive Summary
+## 1. Execution model
 
-Pluton historically ran AI coding engines inside Docker containers (`sandbox.kind: docker`). While Docker provides Linux container isolation, many developer workstations either lack Docker Desktop, run in environments where nested virtualization is restricted, or prefer direct host execution.
-
-The native execution provider enables Pluton to orchestrate supervisors and workers directly on the host operating system:
-
-- **Host engine execution**: Spawns the OpenCode engine process directly on the host via ACP (Agent Client Protocol) over stdio.
-- **Git checkout isolation**: Preserves isolated task checkouts via local Git clones under `.pluton/workspaces/`. A coordinator runs at the project root while workers operate in private checkouts.
-- **Fail-closed configuration gates**: Refuses to run unless the operator explicitly acknowledges the partial enforcement and host network exposure.
-- **Durable event stream**: Records lifecycle events (`execution.session_prepared`, `execution.session_started`, `execution.session_exited`, `execution.session_closed`) into SQLite.
-- **Process tree termination**: Cleans up entire process trees upon task completion, timeout, or cancellation (`taskkill /t /f` on Windows, process-group signals on POSIX).
+- **Host engine execution**: the OpenCode engine is spawned directly on the host
+  via ACP over stdio.
+- **Git checkout isolation**: workers run in local `git clone` checkouts under
+  `.pluton/workspaces/`; the manager runs at the project root.
+- **Fail-closed policy selection**: the requested mode and network policy are
+  checked against host capabilities before any process, run row or task row is
+  created. A missing helper, old kernel or unavailable namespace support is an
+  error, never a downgrade.
+- **Durable event stream**: lifecycle facts (`execution.session_prepared`,
+  `execution.session_started`, `execution.session_exited`,
+  `execution.session_closed`) are recorded in SQLite.
+- **Process-tree termination**: the whole process tree is terminated on exit,
+  timeout or cancellation (`taskkill /t /f` on Windows, process groups on POSIX).
 
 ---
 
-## 2. Security & Enforcement Model
+## 2. Security and enforcement model
 
-Pluton adheres to a strict **honesty constraint**: native execution does not claim OS-level sandboxing.
+Pluton reports the enforcement it can prove for the current host. The provider
+never labels an unconfined session as isolated.
 
-### What IS enforced by Pluton
-1. **Working directory boundary**: Every spawned process must specify a working directory within allowed host roots:
-   - `<project-root>`
-   - `<project-root>/.pluton/workspaces`
-   - `<project-root>/.pluton/engine-homes`
-   Attempts to spawn a process outside these roots are rejected fail-closed with `PolicyDeniedError`.
-2. **Environment variable filtering**:
-   - Only standard runtime variables (e.g., `PATH`, `HOME`, `USERPROFILE`, `XDG_*`, `CI`, `COLORTERM`) and explicit keys defined in `sandbox.native.env_allowlist` are passed to child processes.
-   - Host secrets, API tokens, and unlisted environment variables are stripped.
-3. **Session timeouts, dispatch deadlines & process-tree termination**:
-   - `sandbox.native.session_timeout_minutes` optionally caps one engine session; the default `0` disables this provider-level cap.
-   - `runtime.max_run_minutes` and `runtime.default_task_minutes` still bound how long a run and its tasks may proceed.
-   - When a session ends or times out, Pluton kills the entire process tree, not just the parent process.
-4. **Output bounds**:
-   - `exec` output streams are capped by `sandbox.native.max_output_bytes` (default: 1 MB) to prevent denial of service via memory exhaustion.
+### 2.1 Filesystem policy (Linux confined modes)
 
-### What is NOT enforced (Limitations)
-1. **Filesystem confinement**: Host processes run under the operating system account of the current user. They can read or write any file accessible to that user account.
-2. **Network confinement**: Host processes share the host network stack. Pluton cannot isolate network egress without containerization or kernel sandboxing.
-3. **Resource limits**: CPU and memory limits defined in configuration are recorded for planning and diagnostic budgets, but are **not** cgroup-enforced.
-4. **Terminal attach**: Supported via host native `tmux` (`pluton attach <ship>`); requires `tmux` installed on the host OS.
+Confined modes use the verified `native/landlock-run` helper:
+
+| Mode | Read | Write |
+|---|---|---|
+| `read-only` | project root, workspace roots, engine home, system runtime roots | session temporary directory only |
+| `workspace-write` | same as `read-only` | task checkout/work directory, engine home and session temporary directory |
+
+- Landlock applies path-beneath rules (ABI ≥ 3) inside the helper process.
+- System locations such as `/usr`, `/bin`, `/lib` and `/etc` are read/execute
+  roots, never write roots.
+- A verified helper is mandatory: the TypeScript capability check validates the
+  helper ABI, SHA-256, size and target manifest before use
+  (`src/execution/capabilities.ts`).
+- On Linux, `read-only`/`workspace-write` require Landlock ABI ≥ 3 (Linux kernel
+  ≥ 6.2 with Landlock enabled) and the matching helper binary.
+
+### 2.2 Network policy
+
+Network isolation comes from namespaces, not Landlock. Landlock does not mediate
+sockets.
+
+| Policy | What the session gets |
+|---|---|
+| `open` | Host network stack; no network filtering |
+| `restricted` | Private network namespace with loopback only; the Pluton tool bridge is reachable through the helper's loopback proxy |
+| `none` | No network at all, including the tool bridge and loopback |
+
+- `restricted` and `none` require unprivileged user and network namespaces; if
+  they are unavailable the session fails closed.
+- `pluton run`, `pluton chat` and the application server reject
+  `network_policy: none` because orchestrated sessions need the tool bridge.
+- Per-Ship `network_policy` overrides `runtime.network_policy`.
+
+### 2.3 Namespaces and process hygiene
+
+When the host supports them, the helper creates a private user namespace, mount
+namespace, private `/tmp`, fresh `/proc` and a PID namespace; the engine runs as
+PID 1 inside the namespace. These are reported per session in the enforcement
+report rather than assumed.
+
+The provider also enforces:
+
+- **Working-directory boundary**: every spawned process must run inside an
+  allowed root (`<project-root>`, `<project-root>/.pluton/workspaces` or
+  `<project-root>/.pluton/engine-homes`). A path outside those roots fails with
+  `PolicyDeniedError`.
+- **Environment filtering**: only a standard runtime allowlist plus explicit
+  `sandbox.native.env_allowlist` names reach the child. Unlisted host secrets are
+  stripped, and confined helpers receive exactly the request's environment map.
+- **Timeouts and output bounds**: `session_timeout_minutes` optionally caps one
+  engine session (`0` disables this provider-level cap); `runtime` run/task
+  deadlines still apply. `max_output_bytes` caps a single `exec` stream.
+- **Process-tree kill**: termination targets the entire tree, not only the
+  parent process.
+
+### 2.4 What is not enforced
+
+1. **Unconfined filesystem access**: `unconfined` sessions run as the host user
+   and can read or write anything that user can. This is the only supported mode
+   on macOS and Windows.
+2. **Unconfined network access**: `unconfined` sessions use the host network with
+   no filtering. `unconfined` is valid only with `network_policy: open`.
+3. **Resource limits**: CPU, memory and PID values are recorded for planning and
+   diagnostics but are **not cgroup-enforced**.
+4. **Host services**: even a confined session can reach services the host
+   exposes through the session bridge or an `open` network. Isolation is not a
+   substitute for host hardening.
+5. **Processes that escape the helper tree** can outlive graceful termination.
+   This is a documented residual risk of the process-tree mechanism.
+6. **Terminal attach**: `pluton attach` uses host `tmux`; tmux is a visibility
+   and interruption tool, not a security boundary.
+
+### 2.5 Deprecated configuration fields
+
+`acknowledge_partial_enforcement` and `acknowledge_host_network` are still
+accepted so older configs load, but they no longer grant or gate any capability.
+Use `sandbox.native.mode` (or `mode_by_platform`), `acknowledge_unconfined`, and
+`runtime.network_policy` / per-Ship `network_policy` instead.
 
 ---
 
 ## 3. Configuration
-
-To use native execution, configure `sandbox.kind: native` in `pluton.yaml`:
 
 ```yaml
 version: 1
@@ -61,23 +130,25 @@ project:
 sandbox:
   kind: native
   native:
-    # Mandatory: acknowledge that host processes are not OS-sandboxed
-    acknowledge_partial_enforcement: true
-    # Mandatory: acknowledge that host processes share the host network
-    acknowledge_host_network: true
-    # Mode: 'read-only' or 'workspace-write' (default)
+    # Filesystem policy on Linux. macOS/Windows must override to unconfined.
     mode: workspace-write
-    # Extra host environment variables to pass through
+    mode_by_platform:
+      linux: workspace-write
+      darwin: unconfined
+      win32: unconfined
+    # Required before an effective unconfined mode can run anywhere.
+    acknowledge_unconfined: true
+    # Extra host environment variables to pass through (names only).
     env_allowlist:
       - OPENAI_API_BASE
       - CUSTOM_TOOL_PATH
-    # Timeout and output bounds
+    # Timeout and output bounds.
     terminate_grace_seconds: 2
     session_timeout_minutes: 30
     max_output_bytes: 1048576
 
 runtime:
-  # Must be 'open' when sandbox.kind is 'native'
+  # open = host network; restricted = loopback bridge only; none = no network.
   network_policy: open
   max_concurrent_workers: 2
 
@@ -113,51 +184,70 @@ ships:
       - diff.inspect
 ```
 
-### Fail-Closed Validation Gates
-If any of the following conditions are violated, Pluton refuses to start:
-- `sandbox.native.acknowledge_partial_enforcement` is `false`: fails with `SandboxUnavailableError`.
-- `sandbox.native.acknowledge_host_network` is `false`: fails with `SandboxUnavailableError`.
-- `runtime.network_policy` (or any Ship's `network_policy`) is `restricted` or `none`: fails with `SandboxUnavailableError` (host processes cannot enforce network boundaries).
+The `muses:` key is still accepted as an alias for `ships:` for backward
+compatibility.
+
+### 3.1 Fail-closed validation gates
+
+Pluton refuses to start when any of these checks fail:
+
+- effective mode is `unconfined` without
+  `sandbox.native.acknowledge_unconfined: true`;
+- effective mode is `read-only` or `workspace-write` without a verified helper
+  and Landlock ABI ≥ 3;
+- effective network is `restricted` or `none` without unprivileged user and
+  network namespaces;
+- platform is macOS or Windows and the effective policy is not
+  `unconfined` + `open`;
+- `unconfined` is combined with `restricted` or `none`;
+- `sandbox.kind` is `docker` or `local-process`;
+- `network_policy: none` is used with an orchestrated command that needs the
+  tool bridge.
+
+The errors name the failed capability and the exact config fix. There is no
+fallback path.
 
 ---
 
-## 4. CLI Command Behavior Under Native Mode
+## 4. CLI behavior in native mode
 
-| Command | Behavior in Native Mode |
+| Command | Behavior |
 |---|---|
-| `pluton run` | Runs multi-agent runs on the host; supervisor at project root, workers in `.pluton/workspaces/`. Tool bridge binds loopback `127.0.0.1`. |
-| `pluton chat` | Starts interactive chat session on host with read-only workspace policy; tool bridge binds loopback `127.0.0.1`. |
-| `pluton doctor` | Checks host native execution provider probe and reports `enforcement: partial`. Does not check Docker or worker images. |
-| `pluton sandbox probe` | Probes native provider capabilities: reports `provider: native`, `backend: process-policy`, `enforcement: partial`. |
-| `pluton sandbox build-image` | Rejects with `ValidationError`: native execution runs host engine processes and does not use container images. |
-| `pluton attach` | Attaches to host native tmux session (`=pluton_<proj>_<ship>`); fails closed with `TerminalUnavailableError` if host tmux is not installed. |
+| `pluton run` | Runs multi-agent work on the host; manager at the project root, workers in `.pluton/workspaces/`. The tool bridge binds loopback `127.0.0.1`. |
+| `pluton chat` | Starts an interactive host chat session; the tool bridge binds loopback `127.0.0.1`. |
+| `pluton doctor` | Reports host runtime, Git, tmux, engines, native provider capability and the effective enforcement report. It does not require Docker. |
+| `pluton sandbox probe` | Probes the native provider and prints its backend, capabilities and warnings. |
+| `pluton attach` | Attaches to the host tmux session (`=pluton_<proj>_<ship>`); fails closed with `TerminalUnavailableError` when host tmux is missing. |
 
 ---
 
-## 5. Durable Event Schema
+## 5. Durable event schema
 
 All native execution actions log auditable facts to SQLite:
 
-- `execution.session_prepared`: Emitted when an execution session is configured with its mode and network policy.
-- `execution.session_started`: Emitted when an engine child process spawns, capturing the OS process PID.
-- `execution.session_exited`: Emitted when an engine child process exits, capturing the exit code and signal.
-- `execution.session_closed`: Emitted when the session is closed and all process trees are terminated.
-- `execution.env_filtered`: Emitted when environment variables not in the safe set or allowlist are dropped.
-- `execution.session_timeout`: Emitted if a process exceeds its wall-clock session timeout.
-- `execution.denied`: Emitted if an engine process attempts to run in a directory outside the allowed roots.
-- `execution.session_error`: Emitted if process spawning or tree termination fails.
+- `execution.session_prepared`: session configured with its mode and network
+  policy.
+- `execution.session_started`: engine child process spawned, with host PID.
+- `execution.session_exited`: engine child exited, with exit code and signal.
+- `execution.session_closed`: session closed and process trees terminated.
+- `execution.env_filtered`: environment variables outside the safe set and
+  allowlist were dropped.
+- `execution.session_timeout`: a session exceeded its wall-clock timeout.
+- `execution.denied`: a process attempted to run outside the allowed roots.
+- `execution.session_error`: process spawn or tree termination failed.
 
 ---
 
-## 6. Comparison: Docker vs Native vs Local-Process
+## 6. Mode comparison
 
-| Feature | Docker (`sandbox.kind: docker`) | Native (`sandbox.kind: native`) | Local Process (`sandbox.kind: local-process`) |
+| Feature | Linux `read-only` / `workspace-write` | `unconfined` (Linux/macOS/Windows) | Legacy `docker` / `local-process` |
 |---|---|---|---|
-| **Substrate** | Linux container via Docker Desktop / daemon | Host OS processes | Host OS processes (unwrapped) |
-| **Enforcement** | Strong (container boundary, network namespacing) | Partial (cwd check, env filtering, tree kill) | None (unconfined) |
-| **Network Isolation** | Configurable (`none`, `restricted`, `open`) | Host network (`open` only) | Host network (`open` only) |
-| **Process Tree Kill** | Handled by Docker daemon | Handled by Pluton (`taskkill` / process groups) | Node default `child.kill()` |
-| **Terminal Attach** | Supported (`docker exec` / tmux) | Supported (host `tmux`) | Disabled |
-| **Dependencies** | Docker daemon, worker container image | Node.js, Git, local engine CLI | Node.js, Git, local engine CLI |
-| **Audited Facts** | Container create/start/stop records | Durable `execution.*` event stream | Minimal |
-| **Intended Use** | Production / hardened local evaluation | First-class host development & CI | Legacy dev-only degraded mode |
+| **Substrate** | Host process inside the verified helper | Host process | Rejected at config validation |
+| **Filesystem** | Landlock path rules | Host user's full access | No runtime |
+| **Network** | `open` = host; `restricted` = private netns with loopback bridge; `none` = no network | Host network, `open` only | No runtime |
+| **Namespaces** | User/mount/PID/network where the host supports them | None | No runtime |
+| **CPU/memory/PID limits** | Recorded, not cgroup-enforced | Recorded, not enforced | No runtime |
+| **Process-tree kill** | Yes | Yes | No runtime |
+| **Environment filtering** | Yes | Yes | No runtime |
+| **Dependencies** | Node.js, Git, engine CLI, verified Linux helper | Node.js, Git, engine CLI | — |
+| **Intended use** | Hardened local execution and CI on Linux | Desktop development on macOS/Windows or explicit opt-out on Linux | Removed |

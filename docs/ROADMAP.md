@@ -3,6 +3,11 @@
 **Motto:** Plan → Delegate → Execute → Verify → Deliver.
 Status legend: `[x]` done · `[~]` in progress · `[ ]` not started · `[!]` blocked by environment
 
+> **Historical roadmap, not current setup guidance.** Docker/container execution was removed
+> after this checklist was written; native execution is now the only substrate. Current
+> configuration and security behavior live in [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md)
+> and [`SECURITY.md`](SECURITY.md). Historical checkboxes are retained as a delivery record.
+
 > **Legacy history (2026-10-22):** Qwen Code support was removed in the OpenCode-only migration.
 > Qwen entries below record what was delivered at the time and are **not** current support or setup
 > instructions. Current engine support is OpenCode only; `mock` is tests/dev only. See

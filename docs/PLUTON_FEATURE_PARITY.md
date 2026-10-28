@@ -1,5 +1,11 @@
 # PLUTON Feature Parity — reference capability matrix (Phase 1 audit)
 
+> **Historical audit — execution model superseded.** Docker/container sandboxing was removed after
+> this audit; `sandbox.kind: docker` and `local-process` are rejected, and native execution is the
+> only substrate. Sandboxing rows (including §17) describe the pre-native implementation and are not
+> current capability statements. See [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and
+> [`SECURITY.md`](SECURITY.md).
+
 > **Historical audit (2026-10-18; engine note 2026-10-22):** Qwen Code support was removed after
 > this audit. Qwen capability claims below are historical evidence, not current support. OpenCode
 > is the only supported real engine; `mock` is tests/dev only.

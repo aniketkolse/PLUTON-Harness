@@ -1,85 +1,68 @@
-# Migrating from Docker to Native Execution in Pluton
+# Migrating to Native Execution in Pluton
 
-This guide explains how to migrate existing Pluton projects from Docker container execution (`sandbox.kind: docker`) to native host execution (`sandbox.kind: native`).
-
----
-
-## 1. Executive Summary
-
-Historically, Pluton ran AI coding engines inside dedicated Linux containers via Docker Desktop or the Docker engine. Pluton now provides **first-class native execution** as its default runtime substrate, with OpenCode as its only supported real engine:
-
-- **Zero Docker dependency**: Run `pluton init`, `pluton doctor`, `pluton run`, `pluton chat`, `pluton attach`, and `pluton verify` without Docker Desktop, Linux containers, or WSL2 virtual machine overhead.
-- **Lower latency and resource consumption**: Eliminates VM boot times, container creation overhead, and bind-mount translation latency.
-- **Durable multi-agent safety**: Preserves Git checkout isolation (`.pluton/workspaces/`), working directory confinement, environment variable allowlisting, process tree cleanup, and durable SQLite event tracking.
-- **Seamless state preservation**: Existing runs, tasks, approvals, receipts, and workspace checkouts remain intact with zero database migration required.
+Pluton runs engines natively. Docker and `local-process` are no longer execution
+substrates: configs that still select them fail closed with migration guidance
+(`sandbox.kind 'docker' is no longer supported: native execution is the only
+substrate`). This guide moves an existing project and its data to
+`sandbox.kind: native`.
 
 ---
 
-## 2. Configuration Changes
+## 1. What changes
 
-Migrating an existing project requires updating `pluton.yaml` to specify `sandbox.kind: native`, setting `runtime.network_policy: open`, and adding the required native safety acknowledgements.
+- **No Docker dependency.** `pluton init`, `doctor`, `run`, `chat`, `attach` and
+  `verify` do not contact a Docker daemon or use a worker image.
+- **Explicit policy.** Linux can use `read-only` or `workspace-write` with
+  Landlock/namespaces. macOS and Windows run only `unconfined` and must
+  acknowledge it.
+- **Durable state is preserved.** Existing runs, tasks, approvals, receipts,
+  events, checkouts and engine homes stay in `.pluton/`; no schema conversion or
+  data migration is required.
+- **OpenCode is the only real engine.** The `mock` adapter remains for tests and
+  development.
 
-### Required YAML Modifications
+---
 
-In `pluton.yaml`:
+## 2. Configuration changes
 
-1. Change `sandbox.kind` from `docker` to `native`.
-2. Add the `native` configuration block with explicit acknowledgements:
-   - `acknowledge_partial_enforcement: true`
-   - `acknowledge_host_network: true`
-3. Change `runtime.network_policy` to `open` (and remove any per-Ship `network_policy: restricted` or `none` overrides).
+1. Set `sandbox.kind: native`.
+2. Remove legacy container keys (`sandbox.image`, `sandbox.docker`,
+   `sandbox.local_process_acknowledged` if present).
+3. Choose `sandbox.native.mode`:
+   - Linux: `read-only` or `workspace-write`.
+   - macOS/Windows: `unconfined`, with `acknowledge_unconfined: true`.
+   - A single config can use `mode_by_platform` so Linux stays confined while a
+     developer desktop is explicitly unconfined.
+4. Set `runtime.network_policy`:
+   - `open` — host network (required with `unconfined`).
+   - `restricted` — private network namespace with loopback bridge only.
+   - `none` — no network, including the bridge; rejected for `run`, `chat` and
+     the server.
+5. Remove obsolete Ship `network_policy` values only if they are no longer
+   intended. `restricted` and `none` are supported on Linux confined modes when
+   user and network namespaces are available.
 
-### Why `runtime.network_policy: open` is Required
+The deprecated `acknowledge_partial_enforcement` and
+`acknowledge_host_network` keys still parse, but they no longer grant or gate
+anything. Remove them to avoid implying a control that no longer exists.
 
-In container mode, Pluton leveraged Docker virtual bridge networks (`--network none` or isolated bridge networks) to restrict container egress. Because native host processes execute under the host operating system and share the host network stack, Pluton cannot enforce network isolation without kernel-level containerization.
-
-Pluton adheres to a strict **honesty and fail-closed guarantee**: it will refuse to start if configured with `network_policy: restricted` or `network_policy: none` in native mode, rather than making unverified security claims. Setting `runtime.network_policy: open` and acknowledging `acknowledge_host_network: true` confirms operator awareness.
-
-### YAML Transformation Example
-
-#### Before: Docker-Based Configuration (`sandbox.kind: docker`)
+### Before (legacy, now rejected)
 
 ```yaml
-version: 1
-
-project:
-  name: my-app
-  repository: .
-  default_branch: main
-  verification:
-    - name: unit-tests
-      command: ["npm", "test"]
-
-runtime:
-  max_concurrent_workers: 3
-  max_team_size: 8
-  network_policy: restricted # Uses Docker network egress filtering
-
 sandbox:
-  kind: docker # Runs engines inside Linux containers
+  kind: docker
   docker:
     worker_image: pluton-worker:local
     memory_mb: 4096
     cpus: 2
-
-ships:
-  manager:
-    role: supervisor
-    engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
-    workspace_policy: coordinator-read-only
-  worker-a:
-    role: coder
-    engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
-    workspace_policy: isolated-task-checkout
+runtime:
+  network_policy: restricted
 ```
 
-#### After: Native Configuration (`sandbox.kind: native`)
+### After (native)
 
 ```yaml
 version: 1
-
 project:
   name: my-app
   repository: .
@@ -91,22 +74,19 @@ project:
 runtime:
   max_concurrent_workers: 3
   max_team_size: 8
-  network_policy: open # Native processes share the host network
+  network_policy: open
 
 sandbox:
   kind: native
   native:
-    # Required: acknowledges that host processes are not OS-sandboxed
-    acknowledge_partial_enforcement: true
-    # Required: acknowledges that host processes use the host network
-    acknowledge_host_network: true
-    # Execution mode: 'workspace-write' (default) or 'read-only'
     mode: workspace-write
-    # Extra host environment variables to allow through to child processes
+    mode_by_platform:
+      linux: workspace-write
+      darwin: unconfined
+      win32: unconfined
+    acknowledge_unconfined: true
     env_allowlist:
       - OPENAI_API_BASE
-      - ANTHROPIC_API_KEY
-    # Wall-clock timeout bounds
     session_timeout_minutes: 30
     terminate_grace_seconds: 2
     max_output_bytes: 1048576
@@ -124,192 +104,162 @@ ships:
     workspace_policy: isolated-task-checkout
 ```
 
-### Configuration Parameter Reference
+### Configuration reference
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `sandbox.kind` | `string` | `'native'` | Substrate choice: `'native'`, `'docker'`, or `'local-process'` |
-| `sandbox.native.acknowledge_partial_enforcement` | `boolean` | `true` (templates) | Mandatory acknowledgement of process-policy boundaries |
-| `sandbox.native.acknowledge_host_network` | `boolean` | `true` (templates) | Mandatory acknowledgement of host network sharing |
-| `sandbox.native.mode` | `'workspace-write' \| 'read-only'` | `'workspace-write'` | Allowed filesystem write scope for native sessions |
-| `sandbox.native.env_allowlist` | `string[]` | `[]` | Explicit host environment variables to pass to engines |
-| `sandbox.native.session_timeout_minutes` | `number` | `0` | Optional wall-clock cap for one engine session; `0` disables it. Run and task deadlines still bound dispatch. |
-| `sandbox.native.terminate_grace_seconds` | `number` | `2` | Grace period before sending SIGKILL / `taskkill /f` |
-| `sandbox.native.max_output_bytes` | `number` | `1048576` (1MB) | Maximum stdout/stderr bytes captured before truncation |
+| `sandbox.kind` | `'native'` | `'native'` | Only supported value. `docker`/`local-process` are rejected with guidance. |
+| `sandbox.native.mode` | `'read-only' \| 'workspace-write' \| 'unconfined'` | `'workspace-write'` | Filesystem policy on Linux; macOS/Windows must be `unconfined`. |
+| `sandbox.native.mode_by_platform` | per-platform modes | unset | Overrides `mode` for `linux`, `darwin` or `win32`. |
+| `sandbox.native.acknowledge_unconfined` | `boolean` | unset | Required before an effective `unconfined` mode can run. |
+| `sandbox.native.env_allowlist` | `string[]` | `[]` | Additional host environment variable names to pass to engines. |
+| `sandbox.native.session_timeout_minutes` | `number` | `0` | Optional wall-clock cap for one engine session; `0` disables it. Run/task deadlines still apply. |
+| `sandbox.native.terminate_grace_seconds` | `number` | `2` | Grace period before forced process-tree termination. |
+| `sandbox.native.max_output_bytes` | `number` | `1048576` (1 MiB) | Maximum bytes captured from one output stream. |
 
 ---
 
-## 3. State Preservation & Compatibility
+## 3. State preservation and compatibility
 
-Migrating to native execution does **not** invalidate or discard any existing project data:
+- **SQLite** (`.pluton/state/pluton.sqlite`): past runs, tasks, edges,
+  approvals, receipts and events remain valid. New sessions append native
+  `execution.*` events; no schema migration is needed.
+- **Workspaces** (`.pluton/workspaces/`): existing checkouts remain on disk and
+  are reused or inspected with the workspace commands. New checkouts are plain
+  host directories.
+- **Engine homes** (`.pluton/engine-homes/<ship>`): reused directly by native
+  engine processes. If an old home contains credentials for a removed engine,
+  re-authenticate OpenCode in that Ship's home.
+- **History is immutable.** Old events and run rows keep their recorded values;
+  only new sessions use the native provider.
 
-### Durable SQLite State (`.pluton/state/`)
-- All past runs, tasks, dependency edges, approvals, receipts, and event logs in `.pluton/state/pluton.db` remain 100% valid and readable.
-- No schema migrations or data conversions are necessary.
-- Subsequent runs will append native execution events (`execution.session_prepared`, `execution.session_started`, `execution.session_exited`, `execution.session_closed`) to the existing event log.
+### JSONL session/run export and import
 
-### Workspace Checkouts (`.pluton/workspaces/`)
-- Worker tasks continue to use isolated `git clone --local` checkouts under `.pluton/workspaces/task_<id>`.
-- Existing workspaces created under Docker mode remain on disk and can be inspected via `pluton workspace list` or cleaned with `pluton workspace clean`.
-- In native mode, checkouts are created directly on the host filesystem without Docker volume mounts.
+`pluton session export <id>` and `pluton session export-run <id>` write every
+message/event, in chronological order, to JSONL. The corresponding `import` and
+`import-run` commands are deliberately fail-closed:
 
-### Engine Homes (`.pluton/engine-homes/`)
-- Cached engine states, authentication tokens, and configuration files under `.pluton/engine-homes/<ship>` are reused directly by native engine processes.
-
----
-
-## 4. Terminal Handling & Attach
-
-Pluton supports interactive terminal inspection via `pluton attach <ship>` in both Docker and native modes. However, the transport mechanism differs:
-
-### Docker Mode vs Native Mode Attach
-
-| Aspect | Docker (`sandbox.kind: docker`) | Native (`sandbox.kind: native`) |
-|---|---|---|
-| **Tmux Host** | Runs inside the worker Linux container | Runs on the host OS |
-| **Command Spawned** | `docker exec -it <container> tmux attach-session -t =<session>` | `tmux attach-session -t =<session>` |
-| **Container Dependency** | Requires Docker daemon and running Ship container | None; attaches directly to host tmux |
-| **Missing Tmux Handling** | Fails if container is stopped or missing | Fails with `TerminalUnavailableError` and install instructions |
-| **Disconnection Safety** | Detaching (`Ctrl-B d`) leaves worker running | Detaching (`Ctrl-B d`) leaves worker running |
-
-### Host Tmux Installation
-
-To use `pluton attach` in native mode, `tmux` must be present on the host `PATH`:
-
-- **Debian / Ubuntu / WSL2**: `sudo apt install tmux`
-- **macOS**: `brew install tmux`
-- **Windows (Native)**: Install via Chocolatey (`choco install tmux`), Scoop (`scoop install tmux`), or use Git Bash / MSYS2 tmux.
-
-If `tmux` is not installed on the host, task execution and multi-agent runs proceed without issue. If the operator attempts to run `pluton attach`, Pluton provides an actionable diagnostic error:
-
-```
-TerminalUnavailableError: could not attach to host tmux session: spawn tmux ENOENT
-Fix: install tmux (e.g. apt install tmux, brew install tmux, or choco install tmux)
-```
+- An import never overwrites or merges existing rows. If any session, run, task,
+  event, or message id already exists in the target database, the whole import
+  is refused and nothing is written. To re-import, first delete the existing
+  session/run through the app (or restore into a fresh project/database), then
+  retry. There is no `--replace` escape hatch.
+- Imported `workspaceRoot` values are absolute host paths. They are accepted
+  only when they resolve to a readable directory on this host. For a restore
+  from another machine, pass `--workspace-root <local-dir>` to both import
+  commands; otherwise the import fails with the foreign path in the message.
+- Dependency edges and parent chains are validated for cycles, and `depth` /
+  `rootTaskId` must match the parent chain. Malformed or inconsistent exports
+  are rejected before the transaction starts.
 
 ---
 
-## 5. CLI Command Behaviors
+## 4. Terminal handling
 
-After switching to `sandbox.kind: native`, CLI commands adapt to native execution:
+`pluton attach <ship>` always uses host `tmux`; there is no container transport.
+tmux is a visibility/interruption tool, not a security boundary.
 
-| Command | Docker Mode | Native Mode |
-|---|---|---|
-| `pluton doctor` | Requires Docker CLI and running Docker daemon (`fail` if absent) | Does not spawn Docker; reports it as optional `info` |
-| `pluton sandbox probe` | Probes Docker daemon version, ping, and worker image | Probes host native process-policy provider; reports `enforcement: partial` |
-| `pluton sandbox build-image` | Builds `docker/worker/Dockerfile` with pinned toolchain | Rejects with `ValidationError` (container images are not used in native mode) |
-| `pluton run` | Spawns worker containers, bridges network via `0.0.0.0` | Spawns host child processes, bridges tool server via `127.0.0.1` |
-| `pluton chat` | Connects to containerized engine via `docker exec` | Connects directly to host engine process via stdio ACP |
-| `pluton attach` | Spawns `docker exec -it` into container tmux | Spawns `tmux attach-session` into host tmux |
-| `pluton approvals` | Provisions specialist container if `ship.create` approved | Configures native session dynamically with zero container calls |
+- **Debian/Ubuntu:** `sudo apt install tmux`
+- **macOS:** `brew install tmux`
+- **Windows:** install tmux through Chocolatey, Scoop, Git Bash or MSYS2.
+
+Runs and chat proceed without tmux. Only `pluton attach` fails, with
+`TerminalUnavailableError` and an install hint.
 
 ---
 
-## 6. Migration Step-by-Step Procedure
+## 5. CLI behavior
 
-Follow these steps to migrate an existing project:
+| Command | Native behavior |
+|---|---|
+| `pluton doctor` | Checks host runtime, Git, tmux, engines, native capabilities and the effective policy. Never spawns Docker. |
+| `pluton sandbox probe` | Reports `kind: native`, availability, detail and warnings. No image build and no container runtime. |
+| `pluton run` | Spawns host engine processes; workers use `.pluton/workspaces/`; tool bridge binds `127.0.0.1`. |
+| `pluton chat` | Spawns the host engine via stdio ACP; bridge binds `127.0.0.1`. |
+| `pluton attach` | `tmux attach-session` on the host. |
+| `pluton approvals` | Configures native sessions; no container provisioning. |
 
-### Step 1: Update `pluton.yaml`
-Edit `pluton.yaml` in your project root as shown in the YAML transformation section above:
-- Set `sandbox.kind: native`
-- Add `native.acknowledge_partial_enforcement: true` and `native.acknowledge_host_network: true`
-- Set `runtime.network_policy: open`
-
-### Step 2: Validate Environment with `pluton doctor`
-Run doctor to verify your project configuration, engines, and host prerequisites:
-```bash
-pluton doctor
-```
-Expected output:
-- `docker-cli`: marked `optional (not required for native host execution)` (or pass if installed).
-- `sandbox`: reports `pass` with `provider: native`.
-- Overall exit code `0`.
-
-### Step 3: Verify Substrate Probe
-Probe the sandbox substrate:
-```bash
-pluton sandbox probe
-```
-Expected output:
-- `Kind: native`
-- `Available: true`
-- `Image: null`
-- Informational notice regarding host partial enforcement boundaries.
-
-### Step 4: Run a Test Task
-Execute a test run with a simple verification check:
-```bash
-pluton run --goal "Verify native execution migration"
-```
-Observe that:
-- Runs execute without invoking Docker.
-- Tasks execute in `.pluton/workspaces/`.
-- `execution.*` lifecycle events are logged to SQLite.
-- Run completes with `state: completed`.
+There is no `pluton sandbox build-image` command and no worker image to rebuild.
 
 ---
 
-## 7. Rollback Procedure
+## 6. Step-by-step migration
 
-If your team requires strict OS-level container isolation or containerized network egress filtering, you can roll back to Docker mode at any time:
-
-1. In `pluton.yaml`, set:
-   ```yaml
-   sandbox:
-     kind: docker
-   runtime:
-     network_policy: restricted # or 'none' / 'open'
-   ```
-2. Ensure Docker Desktop or the Docker daemon is running.
-3. Re-build the worker image if necessary:
+1. Update `pluton.yaml` as shown above.
+2. Run `pluton doctor` and `pluton sandbox probe`. Resolve any missing helper,
+   Landlock ABI, namespace or engine-auth finding before dispatch.
+3. Run a small task:
    ```bash
-   pluton sandbox build-image
+   pluton run --goal "Verify native execution migration"
    ```
-4. Verify with `pluton doctor`.
+4. Confirm tasks run in `.pluton/workspaces/`, `execution.*` events are logged,
+   and the run closes from durable verification facts.
+
+On Linux, install the matching `native/landlock-run` helper if the probe reports
+it unavailable. On macOS/Windows, expect `unconfined` and read
+[`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) before acknowledging it.
 
 ---
 
-## 8. Engine Migration: Qwen Code Support Removed
+## 7. No Docker rollback
 
-**Status: current (2026-10-22).** Qwen Code is no longer a supported engine and no longer ships
-in Pluton's worker image, registry, approval policy, templates or tests. OpenCode is the only
-supported real engine; the deterministic `mock` adapter remains for tests/development.
+There is no supported rollback to `sandbox.kind: docker` or `local-process`.
+A config that selects either value exits before creating a run row. If Linux
+confinement is unavailable, either install the verified helper/namespace support
+or explicitly choose `unconfined` and accept the documented loss of filesystem
+and network confinement.
 
-### What changed
+---
 
-- `engine: qwen` is no longer accepted by the engine registry. Every Ship must use
-  `engine: opencode` (or `engine: mock` in an explicitly dev/test configuration).
-- Qwen-specific session modes, `allow_once` approval grants, model-value conversion and
-  `QWEN_DIR` state redirection were removed. OpenCode sessions use the same fail-closed policy
-  table as every supported real engine: `autonomous-bounded` → `deny`, ask-* → interactive.
-- `PLUTON_QWEN_BIN`, `QWEN_DIR` and Qwen auth hints are no longer read.
-- The `engines` worker-image profile installs only `@opencode/cli`; an existing image containing
-  Qwen must be rebuilt to match the current profile.
-- Qwen ACP fixtures/helpers and Qwen-only adapter tests were deleted. Deterministic engine tests
-  now use the fake OpenCode CLI or the mock engine.
+## 8. Engine migration: Qwen Code removed
 
-### Migration steps
+OpenCode is the only supported real engine. The deterministic `mock` adapter
+remains for tests/development.
 
-1. In `pluton.yaml`, change every `engine: qwen` to `engine: opencode`.
-2. Replace each Qwen model id with an OpenCode model id. Discover the ids available to a Ship:
+1. Change every `engine: qwen` to `engine: opencode`.
+2. Replace Qwen model ids with OpenCode ids:
    ```bash
    pluton ship model list <ship>
    # or query the engine directly:
    opencode models --standalone
    ```
-   Template examples use `opencode/deepseek-v4.1-flash-free`.
-3. Re-authenticate OpenCode in each Ship's private engine home if the old home only contained
-   Qwen credentials. Credentials are never copied between engines.
-4. Remove `PLUTON_QWEN_BIN` from shell profiles/CI and remove Qwen-only `OPENAI_*` /
-   `DASHSCOPE_*` variables unless your OpenCode provider actually needs them.
-5. If using container mode, rebuild and reprovision the worker image:
-   ```bash
-   pluton sandbox build-image --engines
-   ```
-   The current image proves only the OpenCode binary at build time.
-6. Run `pluton doctor` and then a small native run. Approval requests under
-   `autonomous-bounded` are intentionally denied; use `ask-for-sensitive-actions` or
-   `ask-always` when operator approval prompts are desired.
+3. Re-authenticate OpenCode in each Ship's private engine home if it only
+   contained Qwen credentials. Credentials are never copied between engines.
+4. Remove `PLUTON_QWEN_BIN`, `QWEN_DIR` and Qwen-only variables from shell
+   profiles/CI unless the OpenCode provider needs them.
+5. Rebuild container profiles: not applicable. There is no worker image.
+6. Run `pluton doctor`, then a small native run. Under `autonomous-bounded`,
+   approval requests are intentionally denied; use `ask-for-sensitive-actions`
+   or `ask-always` when operator prompts are desired.
 
-No SQLite schema migration is required. Historical runs retain their recorded engine values and
-events as immutable history; only new sessions use the OpenCode-only configuration.
+No SQLite schema migration is required for the engine rename. Historical engine
+values remain as immutable history.
+
+---
+
+## 9. Schema v13: verification attempt evidence
+
+Version 13 is additive and automatic. `migrateWithBackup` takes a verified
+pre-migration snapshot before applying it; no operator action is required.
+
+- `verification_checks` gains `attempt`, `revision`, `worktree_dirty`,
+  `worktree_fingerprint`, `post_revision` and `post_worktree_fingerprint`, plus
+  an `(task_id, attempt)` index.
+- Existing rows are preserved as history and default to `attempt = 0` with
+  null revision/fingerprint evidence. They are never rewritten.
+- New checks are bound to the task attempt that produced them. A verdict reads
+  only the current attempt, rejects mixed revisions or a check that moved HEAD,
+  and a run cannot close `completed` while a completed task's current-attempt
+  evidence has a non-passed check.
+- On a git checkout the fingerprint covers HEAD plus tracked and untracked
+  content (using a throwaway git index; the real index/worktree is untouched).
+  Non-git workspaces record `available: false` / null evidence.
+- `pluton integrate` refuses to commit or merge a completed task whose checkout
+  no longer matches the verified post-check fingerprint. The report gains a
+  `blockedDrift` array and the run records `integration.drift_detected`.
+  Integration checkouts committed by an earlier invocation are allowed to be
+  re-integrated idempotently.
+
+Downgrading is not supported: a v13 database is refused by older builds
+("database schema version 13 is newer than this build supports"). Restore the
+pre-migration backup if you must run an older build.

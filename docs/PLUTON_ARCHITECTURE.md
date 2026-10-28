@@ -1,5 +1,12 @@
 # PLUTON Architecture — as-built reference (Phase 1 audit)
 
+> **Historical snapshot (2026-10-18).** This audit describes the repository before the
+> native-only execution migration. Any Docker/container execution model below is obsolete:
+> `sandbox.kind: docker` and `local-process` are now rejected, and native is the only
+> substrate. For current behavior see [`NATIVE_EXECUTION.md`](NATIVE_EXECUTION.md) and
+> [`SECURITY.md`](SECURITY.md). Architecture that is not execution-related may still be
+> useful history, but verify paths against the current tree.
+
 **Date:** 2026-10-18
 **Repository state:** `main` at `506fa72` ("feat(tui): align chat layout to single-column card design and remediate visual defects"). Untracked additions present: `.pluton/`, `pluton.yaml`, `PLUTON_TUI_REFINEMENT_PROMPT.md`.
 **Method:** read-only inspection of the repository plus executed commands recorded in `docs/PLUTON_BASELINE_REPORT.md`. Every architectural statement below cites a repository path; statements that could not be verified are marked **not verified**.
