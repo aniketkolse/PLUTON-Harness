@@ -4,6 +4,18 @@ import { join, resolve, sep } from 'node:path'
 import { ValidationError, WorkspaceError } from '../domain/errors.ts'
 import { slugify } from '../domain/ids.ts'
 import { firstLine, run, type RunOptions, type RunResult } from '../util/exec.ts'
+import {
+  captureRawDiff,
+  captureRawSnapshot,
+  commitRaw,
+  copyObjectsAsData,
+  diffTrees,
+  mergeCommitTrusted,
+  readBranchTip,
+  readCheckoutIdentity,
+  unmergedPaths,
+  verifyCommitAvailable,
+} from './trusted-git.ts'
 
 /**
  * Per-task checkouts (ADR-0005).
@@ -251,112 +263,116 @@ export class GitWorkspaceManager {
     }
   }
 
-  /** Branch, HEAD and porcelain status of a managed checkout. */
+  /** Branch, HEAD and raw change list of a managed checkout (no repository hooks/filters). */
   async status(checkoutPath: string): Promise<CheckoutStatus> {
     const abs = resolve(checkoutPath)
     this.assertInsideRoot(abs, 'status')
     if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
-    const head = await this.git(['rev-parse', 'HEAD'], abs)
-    if (head.exitCode !== 0) throw new WorkspaceError(`git rev-parse failed in ${abs}: ${firstLine(head.stderr, 300)}`)
-    const branchRes = await this.git(['symbolic-ref', '--short', 'HEAD'], abs)
-    const porcelain = await this.git(['status', '--porcelain'], abs)
-    if (porcelain.exitCode !== 0) {
-      throw new WorkspaceError(`git status failed in ${abs}: ${firstLine(porcelain.stderr, 300)}`)
-    }
-    const changes = porcelain.stdout
-      .split(/\r?\n/)
-      .filter((l) => l.trim() !== '')
-    return {
-      branch: branchRes.exitCode === 0 ? branchRes.stdout.trim() : '(detached)',
-      headCommit: head.stdout.trim(),
-      changes,
+    try {
+      const snapshot = await captureRawSnapshot(abs)
+      const conflicts = await unmergedPaths(abs)
+      const conflictPaths = new Set(conflicts)
+      const changes = [
+        ...conflicts.map((path) => `UU ${path}`),
+        ...snapshot.changes.filter((line) => !conflictPaths.has(line.slice(3))),
+      ]
+      const headRef = snapshot.identity.headRef
+      return {
+        branch: headRef !== null && headRef.startsWith('refs/heads/') ? headRef.slice('refs/heads/'.length) : '(detached)',
+        headCommit: snapshot.identity.head,
+        changes,
+      }
+    } catch (error) {
+      throw new WorkspaceError(`git status failed in ${abs}: ${firstLine(error instanceof Error ? error.message : String(error), 300)}`, {
+        details: { path: abs },
+        cause: error,
+      })
     }
   }
 
-  /** Diff of the whole checkout against its own HEAD, plus untracked files. */
+  /** Raw diff of the whole checkout against its own HEAD, plus untracked files. */
   async captureDiff(checkoutPath: string): Promise<CheckoutDiff> {
     const abs = resolve(checkoutPath)
     this.assertInsideRoot(abs, 'diff')
     if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
-    const diff = await this.git(['diff', 'HEAD'], abs)
-    if (diff.exitCode !== 0) throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(diff.stderr, 300)}`)
-    const porcelain = await this.git(['status', '--porcelain'], abs)
-    if (porcelain.exitCode !== 0) {
-      throw new WorkspaceError(`git status failed in ${abs}: ${firstLine(porcelain.stderr, 300)}`, {
-        details: { path: abs, stderr: porcelain.stderr.slice(0, 2_000) },
+    try {
+      return await captureRawDiff(abs)
+    } catch (error) {
+      throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(error instanceof Error ? error.message : String(error), 300)}`, {
+        details: { path: abs },
+        cause: error,
       })
     }
-    const untracked = porcelain.stdout
-      .split(/\r?\n/)
-      .filter((l) => l.startsWith('??'))
-      .map((l) => l.slice(3).trim())
-      .filter((l) => l !== '')
-    return { diff: diff.stdout, untracked, truncated: diff.truncated }
   }
 
   /**
-   * Stage everything and commit inside the checkout. Returns the new commit, or
-   * null when there was nothing to commit (not an error for task flows).
+   * Commit the raw worktree through plumbing inside a managed checkout. Returns
+   * the new commit, or null when the raw tree equals HEAD. Repository hooks,
+   * clean filters and merge drivers never run: the checkout's `.git` metadata
+   * is worker-controlled and is treated as data.
    */
-  async commitAll(checkoutPath: string, message: string): Promise<{ commit: string | null }> {
+  async commitAll(
+    checkoutPath: string,
+    message: string,
+    opts: { expectedFingerprint?: string } = {},
+  ): Promise<{ commit: string | null }> {
     const abs = resolve(checkoutPath)
     this.assertInsideRoot(abs, 'commit')
     if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
     if (message.trim() === '') throw new ValidationError('commit message must be non-empty')
-    const add = await this.git(['add', '-A'], abs)
-    if (add.exitCode !== 0) throw new WorkspaceError(`git add failed: ${firstLine(add.stderr, 300)}`)
-    const commit = await this.git([...COMMIT_OPTS, 'commit', '-m', message], abs)
-    if (commit.exitCode === 0) {
-      const rev = await this.git(['rev-parse', 'HEAD'], abs)
-      return { commit: rev.stdout.trim() }
+    try {
+      const result = await commitRaw(abs, message, opts)
+      return { commit: result.commit }
+    } catch (error) {
+      throw new WorkspaceError(`git commit failed in ${abs}: ${firstLine(error instanceof Error ? error.message : String(error), 300)}`, {
+        details: { path: abs },
+        cause: error,
+      })
     }
-    if (/nothing to commit|no changes added/i.test(commit.stdout + commit.stderr)) return { commit: null }
-    throw new WorkspaceError(`git commit failed (exit ${String(commit.exitCode)}): ${firstLine(commit.stderr, 300)}`, {
-      details: { stdout: commit.stdout.slice(0, 2_000), stderr: commit.stderr.slice(0, 2_000) },
-    })
   }
 
   /**
-   * `git diff --name-status -z -M <from>..<to>` inside a Pluton-managed
-   * checkout. `-z` keeps path names verbatim (NUL-terminated, never C-quoted):
-   * the integration gate matches these names against protected-path patterns,
-   * so git's quoted `"\303\244…"` form must never reach the matcher. Rename
-   * detection stays on and BOTH sides of an `R`/`C` entry (old and new path)
-   * are returned: `--name-only` would report only the destination, letting a
-   * protected path be renamed past the ADR-0009 approval gate.
+   * `git diff-tree --name-status -z -M <from>..<to>` with plumbing only, inside
+   * a Pluton-managed checkout. `-z` keeps path names verbatim (NUL-terminated,
+   * never C-quoted): the integration gate matches these names against
+   * protected-path patterns, so git's quoted `"\303\244…"` form must never
+   * reach the matcher. Rename detection stays on and BOTH sides of an `R`/`C`
+   * entry (old and new path) are returned: `--name-only` would report only the
+   * destination, letting a protected path be renamed past the ADR-0009
+   * approval gate.
    */
   async changedFiles(checkoutPath: string, from: string, to = 'HEAD'): Promise<string[]> {
     const abs = resolve(checkoutPath)
     this.assertInsideRoot(abs, 'changed files')
     if (!this.readMarker(abs)) throw new WorkspaceError(`not a Pluton-managed checkout: ${abs}`)
-    const diff = await this.git(['diff', '--name-status', '-z', '-M', `${from}..${to}`], abs)
-    if (diff.exitCode !== 0) {
-      throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(diff.stderr, 300)}`)
-    }
-    const tokens = diff.stdout.split('\0').filter((token) => token !== '')
-    const files: string[] = []
-    for (let i = 0; i < tokens.length; i += 1) {
-      const status = tokens[i] as string
-      // `-z` shape is `<status>\0<path>\0` per file, and
-      // `<status>\0<old>\0<new>\0` for renames/copies (`R100`/`C75`).
-      if (status.startsWith('R') || status.startsWith('C')) {
-        files.push(tokens[i + 1] as string, tokens[i + 2] as string)
-        i += 2
-      } else {
-        files.push(tokens[i + 1] as string)
-        i += 1
+    for (const [label, ref] of [
+      ['from', from],
+      ['to', to],
+    ] as const) {
+      if (ref !== 'HEAD' && !/^[0-9a-f]{40,64}$/.test(ref)) {
+        throw new ValidationError(`changedFiles ${label} must be HEAD or a full commit id (got '${ref}')`)
       }
     }
-    return files
+    try {
+      const result = await diffTrees(abs, from, to)
+      return result.files
+    } catch (error) {
+      throw new WorkspaceError(`git diff failed in ${abs}: ${firstLine(error instanceof Error ? error.message : String(error), 300)}`, {
+        details: { path: abs },
+        cause: error,
+      })
+    }
   }
 
   /**
-   * Merge a task branch into an integration checkout: `git fetch` by source
-   * path + branch into FETCH_HEAD (no refs written), then `git merge --no-ff`.
-   * Conflicts stop the merge and are PRESERVED: Pluton never runs
-   * `merge --abort`, `reset` or `clean`, so the operator can resolve the
-   * mid-merge state or recreate the checkout. An existing unresolved merge is
-   * reported as `failed` before anything is fetched.
+   * Merge a task branch into an integration checkout. The source branch tip is
+   * read as a ref file, its objects are copied as data, and the merge runs
+   * under a temporary trusted repository config so worker-defined hooks,
+   * filters and merge drivers cannot execute. Conflicts stop the merge and are
+   * PRESERVED: Pluton never runs `merge --abort`, `reset` or `clean`, so the
+   * operator can resolve the mid-merge state or recreate the checkout. An
+   * existing unresolved merge is reported as `failed` before anything is
+   * copied.
    */
   async integrateBranch(opts: IntegrateBranchOptions): Promise<IntegrateBranchResult> {
     const checkout = resolve(opts.checkoutPath)
@@ -376,49 +392,41 @@ export class GitWorkspaceManager {
       }
     }
 
-    const fetch = await this.git(['fetch', source, opts.sourceBranch], checkout)
-    if (fetch.exitCode !== 0 || fetch.timedOut) {
+    let sourceCommit: string
+    try {
+      sourceCommit = readBranchTip(source, opts.sourceBranch)
+    } catch (error) {
       return {
         status: 'failed',
         commit: null,
         conflicts: [],
-        detail: fetch.timedOut
-          ? `git fetch timed out after ${this.timeoutMs}ms`
-          : firstLine(fetch.stderr, 300),
+        detail: firstLine(error instanceof Error ? error.message : String(error), 300),
       }
     }
 
-    const ancestor = await this.git(['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], checkout)
-    if (ancestor.exitCode === 0) {
-      const rev = await this.git(['rev-parse', 'FETCH_HEAD'], checkout)
+    try {
+      // Object files are copied as data (no upload-pack, no fetch, no hooks).
+      copyObjectsAsData(source, checkout)
+      await verifyCommitAvailable(checkout, sourceCommit)
+    } catch (error) {
       return {
-        status: 'already_integrated',
-        commit: rev.exitCode === 0 ? rev.stdout.trim() : null,
+        status: 'failed',
+        commit: null,
         conflicts: [],
-        detail: null,
+        detail: firstLine(error instanceof Error ? error.message : String(error), 300),
       }
     }
 
-    const merge = await this.git([...COMMIT_OPTS, 'merge', '--no-ff', '-m', opts.message, 'FETCH_HEAD'], checkout)
-    if (merge.exitCode === 0) {
-      const rev = await this.git(['rev-parse', 'HEAD'], checkout)
-      return { status: 'merged', commit: rev.exitCode === 0 ? rev.stdout.trim() : null, conflicts: [], detail: null }
+    try {
+      return await mergeCommitTrusted(checkout, sourceCommit, opts.message)
+    } catch (error) {
+      return {
+        status: 'failed',
+        commit: null,
+        conflicts: [],
+        detail: firstLine(error instanceof Error ? error.message : String(error), 300),
+      }
     }
-
-    const unmerged = await this.git(['diff', '--name-only', '--diff-filter=U'], checkout)
-    const conflicts =
-      unmerged.exitCode === 0
-        ? unmerged.stdout
-            .split(/\r?\n/)
-            .filter((line) => line.trim() !== '')
-        : []
-    if (conflicts.length > 0) {
-      return { status: 'conflict', commit: null, conflicts, detail: null }
-    }
-    const detail = merge.timedOut
-      ? `git merge timed out after ${this.timeoutMs}ms`
-      : firstLine(merge.stderr, 300) || `git merge failed (exit ${String(merge.exitCode)})`
-    return { status: 'failed', commit: null, conflicts: [], detail }
   }
 
   /**

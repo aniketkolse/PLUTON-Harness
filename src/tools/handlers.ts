@@ -6,12 +6,13 @@ import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/s
 import { admitTask } from '../orchestrator/task-graph.ts'
 import { wakeupChannelFor, type WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { Store } from '../store/store.ts'
-import { firstLine, run } from '../util/exec.ts'
+import { firstLine } from '../util/exec.ts'
 import { stripControlChars } from '../util/sanitize.ts'
 import { TOOL_SCHEMAS, type PlutonToolName } from './catalog.ts'
 import type { ToolBridgeLimits } from './bridge.ts'
 import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
 import type { GitWorkspaceManager } from '../workspace/manager.ts'
+import { diffWorktreeStat, logOneline } from '../workspace/trusted-git.ts'
 
 /**
  * Tool implementations. Every handler receives the validated server-side
@@ -772,27 +773,35 @@ export const TOOL_HANDLERS: ToolHandlers = {
       throw new ValidationError(`workspace ${ws.id} has a malformed base commit; refusing to pass it to git`)
     }
     const maxBytes = a.maxBytes ?? 20_000
-    const opts = { timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: maxBytes }
-    const [status, diff, log] = await Promise.all([
-      run(['git', '-C', ws.path, 'status', '--porcelain=v1', '-b'], opts),
-      run(['git', '-C', ws.path, 'diff', '--stat', '--end-of-options', ws.baseCommit], opts),
-      run(['git', '-C', ws.path, 'log', '--oneline', '--no-decorate', '--end-of-options', `${ws.baseCommit}..HEAD`], opts),
-    ])
-    if (status.exitCode !== 0) {
-      throw new ExternalToolError('git status', firstLine(status.stderr, 300) || `exit ${String(status.exitCode)}`, {
-        workspaceId: ws.id,
+    // Every datum comes from trusted plumbing against raw trees. `git status`,
+    // `git diff` and `git log` are deliberately not used: a worker-controlled
+    // `.git` (clean filters, fsmonitor, external diff, textconv) must never
+    // execute just because an agent asked to inspect its own diff.
+    let state: Awaited<ReturnType<typeof diffWorktreeStat>>
+    let recent: Awaited<ReturnType<typeof logOneline>>
+    try {
+      state = await diffWorktreeStat(ws.path, ws.baseCommit, {
+        timeoutMs: GIT_TIMEOUT_MS,
+        maxOutputBytes: maxBytes,
       })
+      recent = await logOneline(ws.path, ws.baseCommit, state.head)
+    } catch (error) {
+      throw new ExternalToolError(
+        'git inspect',
+        firstLine(error instanceof Error ? error.message : String(error), 300),
+        { workspaceId: ws.id },
+      )
     }
     return {
       taskId: task.id,
       workspaceId: ws.id,
       branch: ws.branch,
       baseCommit: ws.baseCommit,
-      headCommit: ws.headCommit,
-      status: status.stdout,
-      diffStat: diff.exitCode === 0 ? diff.stdout : null,
-      recentCommits: log.exitCode === 0 ? log.stdout : null,
-      truncated: { status: status.truncated, diffStat: diff.truncated, recentCommits: log.truncated },
+      headCommit: state.head,
+      status: [`## ${ws.branch}`, ...state.changes].join('\n'),
+      diffStat: state.stat,
+      recentCommits: recent.log,
+      truncated: { status: false, diffStat: state.truncated, recentCommits: recent.truncated },
     }
   },
 

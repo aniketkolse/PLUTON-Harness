@@ -217,37 +217,20 @@ describe('GitWorkspaceManager (real git)', () => {
     expect(nothing.commit).toBeNull()
   })
 
-  it('throws a typed error when git status fails during diff capture instead of dropping untracked files', async () => {
+  it('does not trust the checkout index for diff evidence and keeps corrupt-index content visible', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
-    const manager = new GitWorkspaceManager({
-      workspacesRoot: root,
-      runFn: async (argv, options) => {
-        if (argv[1] === 'status') {
-          return {
-            argv,
-            exitCode: 128,
-            timedOut: false,
-            stdout: '',
-            stderr: 'fatal: index file corrupt',
-            truncated: false,
-            durationMs: 1,
-          }
-        }
-        return run(argv, options)
-      },
-    })
+    const manager = makeManager(root)
     const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'status fail' })
     writeFileSync(join(info.path, 'untracked.txt'), 'new\n')
+    // The index is worker-controlled data. A corrupt one must not make
+    // evidence disappear, and it must not be needed to see untracked content.
+    writeFileSync(join(info.path, '.git', 'index'), 'garbage bytes, not a git index')
 
-    const error = await manager.captureDiff(info.path).then(
-      () => null,
-      (e: unknown) => e,
-    )
-    expect(error).toBeInstanceOf(WorkspaceError)
-    const workspaceError = error as WorkspaceError
-    expect(workspaceError.message).toMatch(/git status failed/)
-    expect(workspaceError.details).toMatchObject({ path: info.path })
+    const diff = await manager.captureDiff(info.path)
+    expect(diff.untracked).toContain('untracked.txt')
+    const status = await manager.status(info.path)
+    expect(status.changes).toContain('?? untracked.txt')
   })
 
   // Real-world wording varies: git says "failed to copy"/"hardlink" when the
@@ -326,22 +309,19 @@ describe('GitWorkspaceManager (real git)', () => {
     await expect(clash).rejects.toThrowError(/unique destName/)
   })
 
-  it('rejects with a typed error when the checkout index is corrupt (real git failure)', async () => {
+  it('rejects with a typed error when checkout Git metadata cannot be trusted (corrupt HEAD)', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
     const manager = makeManager(root)
-    const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'corrupt index' })
-    writeFileSync(join(info.path, '.git', 'index'), 'garbage bytes, not a git index')
+    const info = await manager.createCheckout({ repoPath: repo, kind: 'task-checkout', runId: 'run_abc123ff', slug: 'corrupt head' })
+    writeFileSync(join(info.path, '.git', 'HEAD'), 'not a ref and not a commit id\n')
 
     const error = await manager.captureDiff(info.path).then(
       () => null,
       (e: unknown) => e,
     )
     expect(error).toBeInstanceOf(WorkspaceError)
-    // On this host git fails the corrupt index for `git diff HEAD` first
-    // (captureDiff runs diff before status), so this pins the typed rejection;
-    // the status-only branch is pinned by the injected-failure test above.
-    expect((error as Error).message).toMatch(/git (diff|status) failed/)
+    expect((error as Error).message).toMatch(/git diff failed/)
   })
 })
 
@@ -611,7 +591,7 @@ describe('GitWorkspaceManager integration primitives (real git)', () => {
     ).rejects.toThrowError(/not a Pluton-managed checkout/)
   })
 
-  it('fetches by source path + branch into FETCH_HEAD without refspecs or destructive git', async () => {
+  it('integrates through the trusted Git layer without fetch, merge or destructive host commands', async () => {
     const repo = await makeRepo()
     const root = tempDir('pluton-ws-root-')
     const creator = makeManager(root)
@@ -635,23 +615,16 @@ describe('GitWorkspaceManager integration primitives (real git)', () => {
       message,
     })
     expect(result.status).toBe('merged')
-    expect(argvLog).toContainEqual(['git', 'fetch', task.path, task.branch])
-    expect(argvLog).toContainEqual([
-      'git',
-      '-c',
-      'user.name=Pluton',
-      '-c',
-      'user.email=pluton@localhost',
-      'merge',
-      '--no-ff',
-      '-m',
-      message,
-      'FETCH_HEAD',
-    ])
+    // Integration copies objects as data and merges under a trusted config;
+    // it never routes Git through the manager's shell, so no fetch/merge or
+    // destructive command can be observed at this seam.
+    expect(argvLog).toEqual([])
     await spying.changedFiles(task.path, task.baseCommit)
-    expect(argvLog).toContainEqual(['git', 'diff', '--name-status', '-z', '-M', `${task.baseCommit}..HEAD`])
+    expect(argvLog).toEqual([])
 
     const flat = argvLog.flat()
+    expect(flat).not.toContain('fetch')
+    expect(flat).not.toContain('merge')
     expect(flat).not.toContain('--abort')
     expect(flat).not.toContain('reset')
     expect(flat).not.toContain('clean')
