@@ -287,7 +287,13 @@ function buildHelperRequest(
     write_roots: [snapshotRoot, tmp],
     exec_roots: execRoots,
     tmp_dir: tmp,
-    private_tmp: true,
+    // The snapshot must survive the helper's mount namespace. It normally
+    // lives under the host temp dir (/tmp on Linux), so mounting a fresh
+    // tmpfs over /tmp would hide the workspace before the check execs and the
+    // helper would fail closed with no readable snapshot. Verification still
+    // confines /tmp through Landlock (it is not a read or write root); only
+    // the snapshot's own tmp directory is mounted private.
+    private_tmp: false,
     session_id: sessionId,
   }
 }
