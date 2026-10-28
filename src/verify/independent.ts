@@ -63,9 +63,11 @@ export function detectTestTampering(diff: string, changedFiles: string[]): { tam
     }
   }
 
-  // 2. Scan added lines in diff for disabled or weakened test assertions
+  // 2. Scan added/removed lines in diff for disabled, focused or weakened tests
   const lines = diff.split('\n')
-  let currentFile = testFiles.length === 1 ? testFiles[0]! : ''
+  const singleFile = changedFiles.length === 1 ? changedFiles[0]! : ''
+  let currentFile = testFiles.length === 1 ? testFiles[0]! : singleFile
+  const packageScript = { removed: [] as string[], added: [] as string[], file: '' }
 
   for (const line of lines) {
     if (line.startsWith('diff --git a/')) {
@@ -74,25 +76,72 @@ export function detectTestTampering(diff: string, changedFiles: string[]): { tam
       continue
     }
 
-    if (!line.startsWith('+') || line.startsWith('+++')) continue
-    const addedContent = line.slice(1).trim()
-
+    const isPackageJson = currentFile.split('/').pop() === 'package.json'
+    if (isPackageJson) packageScript.file = currentFile
     const isTestFile = currentFile ? /test|spec/i.test(currentFile) : testFiles.length > 0
-    if (isTestFile) {
-      if (/\b(it|test|describe)\.skip\b/.test(addedContent)) {
-        reasons.push(`Disabled/skipped test added in '${currentFile || 'test file'}': ${addedContent}`)
-      } else if (/\b(xit|xtest|xdescribe)\b/.test(addedContent)) {
-        reasons.push(`Disabled test (xit/xtest) added in '${currentFile || 'test file'}': ${addedContent}`)
-      } else if (/^\/\/\s*expect\(/.test(addedContent) || /^\/\*\s*expect\(/.test(addedContent)) {
-        reasons.push(`Commented out test assertion in '${currentFile || 'test file'}': ${addedContent}`)
+
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      const addedContent = line.slice(1).trim()
+
+      if (isPackageJson && /^"test"\s*:/.test(addedContent)) {
+        packageScript.added.push(addedContent)
+        continue
       }
+
+      if (isTestFile) {
+        if (/\b(it|test|describe|context|suite)\.only\b/.test(addedContent) || /\b(fit|fdescribe)\s*\(/.test(addedContent)) {
+          reasons.push(`Focused test added in '${currentFile || 'test file'}': ${addedContent}`)
+        } else if (/\b(it|test|describe)\.skip\b/.test(addedContent)) {
+          reasons.push(`Disabled/skipped test added in '${currentFile || 'test file'}': ${addedContent}`)
+        } else if (/\b(xit|xtest|xdescribe)\b/.test(addedContent)) {
+          reasons.push(`Disabled test (xit/xtest) added in '${currentFile || 'test file'}': ${addedContent}`)
+        } else if (/^\/\/\s*expect\(/.test(addedContent) || /^\/\*\s*expect\(/.test(addedContent)) {
+          reasons.push(`Commented out test assertion in '${currentFile || 'test file'}': ${addedContent}`)
+        }
+      }
+      continue
     }
+
+    if (!line.startsWith('-') || line.startsWith('---')) continue
+    const removedContent = line.slice(1).trim()
+
+    if (isPackageJson && /^"test"\s*:/.test(removedContent)) {
+      packageScript.removed.push(removedContent)
+      continue
+    }
+
+    // Removing an assertion is a weakening even when the replacement test
+    // still passes: a green run over fewer assertions proves less. This is
+    // deliberately conservative for test files only.
+    if (isTestFile && looksLikeAssertion(removedContent)) {
+      reasons.push(`Removed test assertion in '${currentFile || 'test file'}': ${removedContent}`)
+    }
+  }
+
+  // 3. A swapped package test script can turn `npm test` into a no-op without
+  // touching any test file. Any rewrite/removal of the exact `"test"` script is
+  // treated as tampering; an unchanged or newly added script is not.
+  if (
+    packageScript.removed.length > 0 &&
+    packageScript.removed.join('\n') !== packageScript.added.join('\n')
+  ) {
+    reasons.push(`Changed package test script in '${packageScript.file || 'package.json'}'`)
   }
 
   return {
     tampered: reasons.length > 0,
     reasons,
   }
+}
+
+/** Assertion shapes we recognize when a removed line must not be allowed to pass silently. */
+function looksLikeAssertion(line: string): boolean {
+  return (
+    /^(expect|assert)\s*\(/.test(line) ||
+    /^(expect|assert)\./.test(line) ||
+    /^t\.(is|deepEqual|strictEqual|notEqual|true|false|throws|rejects|ok|equal|notOk)\s*\(/.test(line) ||
+    /\.should\b/.test(line)
+  )
 }
 
 export class IndependentVerifier {

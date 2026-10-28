@@ -183,20 +183,24 @@ diff --git a/tests/auth.test.ts b/tests/auth.test.ts
     store.setTaskState(task.id, 'running')
     store.setTaskState(task.id, 'verifying')
 
-    // Record a failed check
-    const check = store.createVerificationCheck({
-      projectId,
-      runId: run.id,
-      taskId: task.id,
-      name: 'npm test',
-      command: ['npm', 'test'],
-      cwd: dir,
-      workspaceId: null,
-    })
-    store.setVerificationCheckResult(check.id, {
-      status: 'failed',
-      exitCode: 1,
-    })
+    // Record a failed check for the current attempt
+    const recordFailedCheck = (): void => {
+      const check = store.createVerificationCheck({
+        projectId,
+        runId: run.id,
+        taskId: task.id,
+        attempt: store.getTask(task.id).attempt,
+        name: 'npm test',
+        command: ['npm', 'test'],
+        cwd: dir,
+        workspaceId: null,
+      })
+      store.setVerificationCheckResult(check.id, {
+        status: 'failed',
+        exitCode: 1,
+      })
+    }
+    recordFailedCheck()
 
     // Attempt 0 < maxRepairAttempts (2) -> schedules repair and queues task
     const v1 = applyTaskVerificationVerdict(store, task.id, { maxRepairAttempts: 2 })
@@ -211,6 +215,7 @@ diff --git a/tests/auth.test.ts b/tests/auth.test.ts
     store.setTaskState(task.id, 'admitted')
     store.setTaskState(task.id, 'running')
     store.setTaskState(task.id, 'verifying')
+    recordFailedCheck()
     const v2 = applyTaskVerificationVerdict(store, task.id, { maxRepairAttempts: 2 })
     expect(v2.passed).toBe(false)
     expect(v2.summary).toContain('repair attempt 2 of 2 scheduled')
@@ -219,6 +224,7 @@ diff --git a/tests/auth.test.ts b/tests/auth.test.ts
     store.setTaskState(task.id, 'admitted')
     store.setTaskState(task.id, 'running')
     store.setTaskState(task.id, 'verifying')
+    recordFailedCheck()
     const v3 = applyTaskVerificationVerdict(store, task.id, { maxRepairAttempts: 2 })
     expect(v3.passed).toBe(false)
     const tFinal = store.getTask(task.id)

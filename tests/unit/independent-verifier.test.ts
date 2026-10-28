@@ -61,6 +61,76 @@ diff --git a/tests/payment.test.ts b/tests/payment.test.ts
     expect(tampering.reasons.some((r) => r.includes('Commented out test assertion'))).toBe(true)
   })
 
+  it('detects focused tests added with .only', () => {
+    const diff = `
+diff --git a/tests/payment.test.ts b/tests/payment.test.ts
+--- a/tests/payment.test.ts
++++ b/tests/payment.test.ts
+@@ -10,3 +10,3 @@
+-  it('processes payment', async () => {
++  it.only('processes payment', async () => {
+`
+    const tampering = detectTestTampering(diff, ['tests/payment.test.ts'])
+    expect(tampering.tampered).toBe(true)
+    expect(tampering.reasons[0]).toContain("Focused test added in 'tests/payment.test.ts'")
+  })
+
+  it('detects removed assertions even when the remaining test still passes', () => {
+    const diff = `
+diff --git a/tests/total.test.ts b/tests/total.test.ts
+--- a/tests/total.test.ts
++++ b/tests/total.test.ts
+@@ -20,4 +20,3 @@
+   const total = sum(1, 2)
+-  expect(total).toBe(3)
+   expect(total).toBeGreaterThan(0)
+`
+    const tampering = detectTestTampering(diff, ['tests/total.test.ts'])
+    expect(tampering.tampered).toBe(true)
+    expect(tampering.reasons.some((r) => r.includes('Removed test assertion'))).toBe(true)
+  })
+
+  it('does not treat assertion-like lines outside test files as tampering', () => {
+    const diff = `
+diff --git a/src/logger.ts b/src/logger.ts
+--- a/src/logger.ts
++++ b/src/logger.ts
+@@ -1,2 +1,1 @@
+-const assertion = expect(logger).toBeDefined()
+`
+    const tampering = detectTestTampering(diff, ['src/logger.ts'])
+    expect(tampering.tampered).toBe(false)
+  })
+
+  it('detects a package test-script swap that would make the suite a no-op', () => {
+    const diff = `
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -7,3 +7,3 @@
+   "scripts": {
+-    "test": "vitest run",
++    "test": "node -e \\"process.exit(0)\\"",
+   }
+`
+    const tampering = detectTestTampering(diff, ['package.json'])
+    expect(tampering.tampered).toBe(true)
+    expect(tampering.reasons.some((r) => r.includes('Changed package test script'))).toBe(true)
+  })
+
+  it('does not flag an unchanged or newly added package test script', () => {
+    const added = `
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -7,2 +7,3 @@
+   "scripts": {
++    "test": "vitest run",
+   }
+`
+    expect(detectTestTampering(added, ['package.json']).tampered).toBe(false)
+  })
+
   it('passes on legitimate new tests and unmodified assertions', () => {
     const diff = `
 +test('new feature works', () => {
