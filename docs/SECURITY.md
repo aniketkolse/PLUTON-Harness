@@ -133,7 +133,10 @@ stdio (`pluton mcp serve`) or the loopback HTTP transport.
   executables from the workspace `PATH`. On platforms where Landlock and
   namespaces cannot be proven, the executor reports unavailable and every check
   fails closed — there is no silent host fallback. The same boundary runs
-  post-integration acceptance checks.
+  post-integration acceptance checks. On Linux the helper also installs a
+  seccomp filter for `restricted`/`none` that denies `socket(AF_UNIX)` and
+  `io_uring_setup`; a network namespace isolates IP sockets but not the host's
+  AF_UNIX namespace.
 
 ## 5. Isolation and the sandbox
 
@@ -151,12 +154,16 @@ unwrapped-process fallback.
   directory and engine home. System runtime roots are read/execute only.
   A missing helper, helper hash/size mismatch, or Landlock ABI < 3 is an error
   before dispatch.
-- **Network policy is namespace-based.** `open` uses the host network with no
-  filtering. `restricted` creates a private network namespace with loopback
-  only; the session tool bridge is reached through the helper's loopback proxy.
-  `none` has no network at all, including the bridge, and is therefore rejected
-  for orchestrated commands. `restricted`/`none` require unprivileged user and
-  network namespaces; if unavailable, the session is refused.
+- **Network policy is namespace-based and, for non-open sessions, seccomp-filtered.**
+  `open` uses the host network with no filtering. `restricted` creates a private
+  network namespace with loopback only; the session tool bridge is reached
+  through the helper's loopback proxy. `none` has no network at all, including
+  the bridge, and is therefore rejected for orchestrated commands.
+  `restricted`/`none` require unprivileged user and network namespaces; if
+  unavailable, the session is refused. Because a network namespace does not
+  isolate AF_UNIX sockets, the helper also denies `socket(AF_UNIX)` and
+  `io_uring_setup` with `EPERM` for both policies. The bridge proxy is forked
+  before the filter and forwards only loopback TCP to the host bridge socket.
 - **Unconfined mode** is an explicit escape hatch for hosts without a verified
   confinement implementation (currently macOS and Windows) or an operator
   choosing it on Linux. It requires `acknowledge_unconfined: true` and
@@ -226,18 +233,19 @@ unwrapped-process fallback.
 
 Stated plainly so nobody over-reads the guarantees above:
 
-1. **Linux confinement evidence is host-dependent and not live-verified here.**
-   Confined modes need the verified helper plus Landlock ABI ≥ 3, and
-   `restricted`/`none` need unprivileged user and network namespaces. The helper
-   has its own selftest and the policy matrix is unit/integration-tested, but this
-   Windows checkout cannot execute Linux Landlock or namespace behavior. A
-   Windows run is not evidence for Linux confinement. macOS and Windows have no
+1. **Linux confinement is live-verified only on WSL2 so far.** Confined modes
+   need the verified helper plus Landlock ABI ≥ 3, and `restricted`/`none` need
+   unprivileged user and network namespaces. The audit executed the helper on
+   WSL2 Ubuntu 24.04.5 (`6.18.33.2-microsoft-standard-WSL2`, Landlock ABI 7,
+   Node 24.20.0) as an unprivileged user: filesystem boundaries, environment
+   allowlisting, timeout/output bounds, AF_UNIX denial, trusted-Git boundaries,
+   evidence gating and the `restricted` proxy all passed. This is real kernel
+   evidence but not a bare-metal, multi-distro or CI matrix result, and the full
+   Linux Vitest suite was not run offline. macOS and Windows still have no
    verified confinement and run engines only `unconfined` (gap 4). Verification
    and post-integration checks are stricter: because they execute
    worker-controlled code, they refuse to run on every non-Linux platform and
-   fail closed instead of using an unconfined host fallback. The Linux
-   executor path is code- and test-confirmed but not executed against a live
-   kernel in this environment.
+   fail closed instead of using an unconfined host fallback.
 2. **HTTP transport authentication is a bearer token over loopback.** Any
    process on the host that obtains the token can call the bridge with the
    corresponding identity. Tokens are per-run/launch, short-lived and never
@@ -265,8 +273,10 @@ Stated plainly so nobody over-reads the guarantees above:
    - `none` — no network at all, including the bridge. Orchestrated commands
      (`run`, `chat`, server) reject it because they require the bridge.
 
-   Landlock does not mediate sockets; network isolation comes from the network
-   namespace. The policy is fixed when the session starts and is not inherited
+   Landlock does not mediate sockets. IP network isolation comes from the
+   network namespace; host-local AF_UNIX is denied by the helper's seccomp
+   filter, and `io_uring_setup` is denied as a non-seccomp-mediated escape.
+   The policy is fixed when the session starts and is not inherited
    across delegation: a task delegated to a Ship with `network_policy: open`
    runs with that Ship's egress. There is no application-level URL allowlist.
    With `open`, a compromised engine can reach any service the host can reach.
@@ -314,6 +324,22 @@ Stated plainly so nobody over-reads the guarantees above:
     Windows and macOS, which use case-insensitive filesystems by default). The
     same path is checked both lexically and after `realpath`, so a link or case
     variant cannot bypass the gate (`src/server/security.ts`).
+13. **Verification inherits the host `PATH`.** The executor skips PATH entries
+    inside the snapshot and resolves the command from the remaining host PATH,
+    adding the resolved command's directory to the exec roots. A writable
+    directory earlier on the operator's `PATH` could shadow a runtime with a
+    different binary. The worker cannot normally write such a directory, but
+    operators must keep `PATH` clean.
+14. **The executor does not drop to a dedicated uid.** It relies on the invoking
+    user's DAC plus Landlock. Run Pluton as an unprivileged user: as root,
+    root-readable host files under the allowed `/etc` read root (for example
+    `/etc/shadow`) are readable inside the check even though the worktree is
+    isolated.
+15. **The seccomp filter is a narrow denylist, not a syscall allowlist.** It
+    denies AF_UNIX and `io_uring_setup` for `restricted`/`none`; other IPC or
+    kernel interfaces are not enumerated, and `open` sessions are intentionally
+    unfiltered. The `restricted` bridge proxy runs outside the filter by design
+    and is trusted helper code.
 
 ## 9. Reporting
 
