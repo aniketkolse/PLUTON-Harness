@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -684,7 +685,10 @@ async function hashEntries(
     for (let i = 0; i < batch.length; i += 1) hashes.set(batch[i]!.path, lines[i] as string)
   }
   for (const entry of symlinks) {
-    const target = readFileSync(entry.absolute, 'utf8')
+    // Never read through the link: the blob for a 120000 entry is the link
+    // target, and following it would let worker-controlled content make the
+    // host read files outside the checkout (and commit their bytes).
+    const target = readlinkSync(entry.absolute)
     const result = await run(
       ['git', 'hash-object', '--no-filters', ...(write ? ['-w'] : []), '--stdin'],
       {
