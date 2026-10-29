@@ -20,15 +20,17 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -52,7 +54,7 @@ const ROOT_DIR = fileURLToPath(new URL('..', import.meta.url))
 const SCRATCH_BASE =
   process.env.PLUTON_CONFINEMENT_SCRATCH ||
   join('/var/tmp', `pluton-confinement-gate-${process.geteuid ? process.geteuid() : process.pid}`)
-const NODE = process.execPath
+let NODE = process.execPath
 const results = []
 
 const STATUS = {
@@ -100,6 +102,49 @@ function safeRm(p) {
   } catch {
     // Ignore cleanup errors
   }
+}
+
+/**
+ * Hosted CI installs Node under `/opt/hostedtoolcache`, which is group/other
+ * writable. The verification trust boundary correctly refuses to execute a
+ * host binary from such a directory, so the gate stages the same runtime into a
+ * user-owned 0700 directory with a 0500 file before exercising the real
+ * executor. The production refusal is unchanged: this only removes the
+ * runner's tool-cache layout from the equation.
+ */
+function stageTrustedNode() {
+  if (process.platform !== 'linux') return process.execPath
+  const euid = process.geteuid ? process.geteuid() : -1
+  const failures = []
+  const bases = [process.env.HOME, homedir(), SCRATCH_BASE].filter(
+    (base) => typeof base === 'string' && base.length > 0,
+  )
+  for (const base of new Set(bases)) {
+    let dir = null
+    try {
+      mkdirSync(base, { recursive: true })
+      dir = mkdtempSync(join(base, '.pluton-confinement-node-'))
+      chmodSync(dir, 0o700)
+      const candidate = join(dir, 'node')
+      copyFileSync(process.execPath, candidate)
+      chmodSync(candidate, 0o500)
+      const accepted = resolveCommand(
+        [candidate],
+        '/nonexistent/pluton-confinement-snapshot',
+        [],
+        euid,
+      )
+      const staged = dir
+      process.once('exit', () => safeRm(staged))
+      return accepted
+    } catch (error) {
+      if (dir !== null) safeRm(dir)
+      failures.push(`${base}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  throw new Error(
+    `could not stage a trusted Node runtime for the confinement gate: ${failures.join('; ')}`,
+  )
 }
 
 function initRepo(path) {
@@ -197,6 +242,7 @@ async function runUnprivilegedInvariants() {
 
   safeRm(SCRATCH_BASE)
   mkdirSync(SCRATCH_BASE, { recursive: true })
+  NODE = stageTrustedNode()
   const baseRepo = initRepo(join(SCRATCH_BASE, 'fixture-repo'))
 
   // Invariant 1: Filesystem read/write confinement
