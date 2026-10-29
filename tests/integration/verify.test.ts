@@ -10,6 +10,7 @@ import { admitTask } from '../../src/orchestrator/task-graph.ts'
 import { applyTaskVerificationVerdict, runVerificationChecks } from '../../src/verify/runner.ts'
 import { createVerificationExecutor } from '../../src/verify/executor.ts'
 import { hostTestExecutor } from '../helpers/verification.ts'
+import { cleanupTrustedNode, trustedNodeExecutable } from '../helpers/trusted-node.ts'
 
 /**
  * Integration: the Phase-7 verification gate. Checks are configured argv
@@ -20,7 +21,6 @@ import { hostTestExecutor } from '../helpers/verification.ts'
  */
 
 const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
-const NODE = JSON.stringify(process.execPath)
 // The real CLI cannot inject a test executor. On hosts without proven
 // verification confinement the gate must refuse, so the success-path CLI test
 // only runs where the production executor is actually available.
@@ -29,7 +29,9 @@ const ISOLATION_AVAILABLE = createVerificationExecutor().availability?.available
 let projectDir: string
 let artifactsDir: string
 
-const CONFIG = `version: 1
+function configFor(node: string): string {
+  const NODE = JSON.stringify(node)
+  return `version: 1
 project:
   name: verify-it
   repository: .
@@ -71,15 +73,17 @@ muses:
     workspace_policy: isolated-task-checkout
     approval_mode: ask-for-sensitive-actions
 `
+}
 
 beforeAll(() => {
   projectDir = mkdtempSync(join(tmpdir(), 'pluton-verify-'))
-  writeFileSync(join(projectDir, 'pluton.yaml'), CONFIG)
+  writeFileSync(join(projectDir, 'pluton.yaml'), configFor(trustedNodeExecutable()))
   artifactsDir = join(projectDir, '.pluton', 'state', 'artifacts')
 })
 
 afterAll(() => {
   rmSync(projectDir, { recursive: true, force: true })
+  cleanupTrustedNode()
 })
 
 function runCli(args: string[]): { status: number; stdout: string; stderr: string } {

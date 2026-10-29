@@ -10,9 +10,9 @@ import { admitTask } from '../../src/orchestrator/task-graph.ts'
 import { resumeRun } from '../../src/cli/commands/run.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import { createVerificationExecutor } from '../../src/verify/executor.ts'
+import { cleanupTrustedNode, trustedNodeExecutable } from '../helpers/trusted-node.ts'
 
 const BIN = fileURLToPath(new URL('../../bin/pluton.js', import.meta.url))
-const NODE = JSON.stringify(process.execPath)
 // `pluton verify` cannot inject a test executor. The completion e2e only runs
 // where production verification confinement is actually available; elsewhere
 // the same test asserts fail-closed behaviour instead.
@@ -20,14 +20,15 @@ const ISOLATION_AVAILABLE = createVerificationExecutor().availability?.available
 
 let projectDir: string
 
-const CONFIG = `version: 1
+function configFor(node: string): string {
+  return `version: 1
 project:
   name: verify-redispatch-it
   repository: .
   default_branch: main
   verification:
     - name: check-pass
-      command: [${NODE}, "-e", "process.exit(0)"]
+      command: [${JSON.stringify(node)}, "-e", "process.exit(0)"]
 runtime:
   max_concurrent_workers: 2
   max_team_size: 4
@@ -72,6 +73,7 @@ muses:
     workspace_policy: isolated-task-checkout
     approval_mode: autonomous-bounded
 `
+}
 
 beforeAll(() => {
   registerBuiltinEngines()
@@ -85,11 +87,12 @@ beforeAll(() => {
   execFileSync('git', ['config', 'user.name', 'test'], { cwd: projectDir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir })
   execFileSync('git', ['commit', '--allow-empty', '-m', 'root'], { cwd: projectDir })
-  writeFileSync(join(projectDir, 'pluton.yaml'), CONFIG)
+  writeFileSync(join(projectDir, 'pluton.yaml'), configFor(trustedNodeExecutable()))
 })
 
 afterAll(() => {
   rmSync(projectDir, { recursive: true, force: true })
+  cleanupTrustedNode()
 })
 
 function runCli(args: string[]): { status: number; stdout: string; stderr: string } {

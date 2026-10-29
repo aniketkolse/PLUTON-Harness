@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import type { RunBudget } from '../../src/domain/models.ts'
 import { migrate } from '../../src/store/migrations.ts'
@@ -20,6 +20,7 @@ import {
   type VerificationExecutionRequest,
 } from '../../src/verify/executor.ts'
 import { runVerificationChecks } from '../../src/verify/runner.ts'
+import { cleanupTrustedNode, trustedNodeExecutable } from '../helpers/trusted-node.ts'
 
 const dirs: string[] = []
 const dbs: DatabaseSync[] = []
@@ -34,6 +35,10 @@ afterEach(() => {
   }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
+
+// Vitest may terminate its worker without emitting `exit`; remove the staged
+// runtime explicitly so repeated runs do not accumulate copies.
+afterAll(cleanupTrustedNode)
 
 function tmp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix))
@@ -373,7 +378,7 @@ describe('dedicated verification executor', () => {
       const executor = createVerificationExecutor()
       const result = await executor.run({
         command: [
-          process.execPath,
+          trustedNodeExecutable(),
           '-e',
           "require('node:fs').writeFileSync('snapshot-ran.txt', 'yes')",
         ],
@@ -406,7 +411,7 @@ describe('dedicated verification executor', () => {
       const executor = createVerificationExecutor()
       const result = await executor.run({
         command: [
-          process.execPath,
+          trustedNodeExecutable(),
           '-e',
           [
             "const net = require('node:net')",
