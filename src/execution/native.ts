@@ -1155,7 +1155,11 @@ class NativeExecutionSession implements ExecutionSession {
     await Promise.all(survivors.map((record) => this.terminate(record, 'SIGKILL')))
     await this.waitForRecords(survivors, 2_000)
     this.records.clear()
-    rmSync(this.tmpDir, { recursive: true, force: true })
+    try {
+      rmSync(this.tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    } catch {
+      // Best-effort cleanup on platforms where process termination takes extra time to release locks.
+    }
     this.emit({ type: 'execution.session_closed', detail: 'session closed; live process trees terminated' })
     this.provider.forget(this)
   }
