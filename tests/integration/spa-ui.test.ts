@@ -720,6 +720,78 @@ describe('PLUTON SPA — replaced assets', () => {
     }
   })
 
+  it('surfaces durable activity, an active-only inspector, and the authoritative worker detail modal (PLUTON 3.0)', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const css = await (await fetch(`http://127.0.0.1:${server.port}/app.css`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Phase 3: concise durable activity in the main conversation.
+      expect(js).toContain('function appendRunActivity')
+      expect(js).toContain('function loadRunActivity')
+      expect(js).toContain('function handleRunActivityFrame')
+      expect(js).toContain("'/activity?' +")
+      expect(js).toContain('tail=1&limit=200')
+      expect(js).toContain("ev.type === 'run_activity'")
+      // A full transcript render wipes the list that held activity rows: the
+      // cursor resets and the next load re-fetches the tail window.
+      expect(js).toContain('function resetRunActivityView')
+      expect(js).toContain('state.activityNeedsRebuild')
+      expect(js).toContain('resetRunActivityView();')
+      expect(css).toContain('.msg-activity')
+      expect(css).toContain('.msg-activity.tone-error')
+
+      // Phase 4: only active/waiting workers get a partition; the empty state
+      // is quiet and the count says "active".
+      expect(js).toContain('ACTIVE_WORKER_STATES')
+      expect(js).toContain('function isActiveWorkerState')
+      expect(js).toContain('function syncWorkerPartition')
+      expect(js).toContain("count + ' active worker'")
+      expect(js).toContain('No active workers')
+      expect(js).not.toContain('worker-badge-role')
+      expect(css).toContain('.worker-empty')
+      expect(css).toMatch(/\.worker-partition\s*\{[^}]*flex:\s*1 1 0/)
+      expect(css).toMatch(/\.worker-stream\s*\{[^}]*overflow-y:\s*auto/)
+
+      // Phase 5: the modal is backed by the authoritative detail endpoint and
+      // the operator message route; closing never calls cancel.
+      expect(html).toContain('id="workerDetailModal"')
+      expect(html).toContain('id="workerDetailBody"')
+      expect(html).toContain('id="workerDetailMessageInput"')
+      expect(js).toContain('function openWorkerDetail')
+      expect(js).toContain('function closeWorkerDetail')
+      expect(js).toContain('function renderWorkerDetail')
+      expect(js).toContain("'/tasks/' + encodeURIComponent(ctx.taskId) + '/detail'")
+      expect(js).toContain("'/tasks/' + encodeURIComponent(ctx.taskId) + '/message'")
+      expect(js).toContain('scheduleWorkerDetailRefresh')
+      expect(js).toContain('Acceptance criteria')
+      expect(js).toContain('Supervisor communication')
+      expect(js).toContain('Final output')
+      // The composer input sits outside `.field`, so it needs its own dark
+      // theme rules; browser-default white would break the modal.
+      expect(css).toContain('.worker-detail-compose input {')
+      expect(css).toContain('background: var(--bg-inset);')
+      const closeIdx = js.indexOf('function closeWorkerDetail()')
+      expect(closeIdx).toBeGreaterThan(-1)
+      const closeBody = js.slice(closeIdx, closeIdx + 700)
+      expect(closeBody).not.toContain('/cancel')
+
+      // Phase 6: muted statuses/spinner/dirty marker and no bright-red delete.
+      expect(css).toMatch(/\.worker-badge-status\.is-running,[\s\S]*?color:\s*var\(--text-muted\)/)
+      expect(css).toMatch(/\.tool-spinner\s*\{[^}]*border:\s*2px solid var\(--text-muted\)/)
+      expect(css).toMatch(/\.file-viewer-dirty\s*\{[^}]*color:\s*var\(--text-muted\)/)
+      expect(css).toContain('.session-delete:hover { color: var(--text-soft)')
+      expect(js).toContain("title: 'Delete session'")
+      expect(js).not.toContain("confirmLabel: 'Delete session',\n      danger: true")
+      expect(css).toContain('.worker-detail-card')
+      expect(css).toContain('.wd-section-title')
+    } finally {
+      await server.close()
+    }
+  })
+
   it('matches the Ship Activity Inspector surfaces to the left sidebar tokens', async () => {
     const { appServer } = await setupTestProject()
     const server = await appServer

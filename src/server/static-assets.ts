@@ -529,6 +529,29 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
     </div>
   </div>
 
+  <!-- Worker detail (authoritative task view; closing never cancels) -->
+  <div id="workerDetailModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="workerDetailTitle">
+    <div class="modal-card worker-detail-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="workerDetailTitle">Worker detail</h3>
+        <div class="worker-detail-head-meta">
+          <span id="workerDetailStatus" class="worker-badge-status">unknown</span>
+          <button id="workerDetailClose" class="icon-btn" type="button" aria-label="Close worker detail">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="workerDetailBody" class="worker-detail-body"></div>
+      <div class="worker-detail-foot">
+        <span id="workerDetailHint" class="modal-hint">Read-only while the worker is not running.</span>
+        <div class="worker-detail-compose">
+          <input id="workerDetailMessageInput" type="text" autocomplete="off" placeholder="Message this worker" disabled>
+          <button id="workerDetailSend" class="btn-secondary" type="button" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Pluton-owned confirm / prompt dialog (no browser-native dialogs) -->
   <div id="plutonDialog" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="plutonDialogTitle" aria-describedby="plutonDialogMessage">
     <div class="modal-card">
@@ -801,7 +824,7 @@ body {
 .session-item:hover .session-delete,
 .session-item.is-active .session-delete,
 .session-delete:focus-visible { opacity: 1; }
-.session-delete:hover { color: var(--accent-danger); background: rgba(248, 113, 113, 0.12); }
+.session-delete:hover { color: var(--text-soft); background: var(--bg-hover); }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.is-active { background: var(--bg-active); border-color: var(--border-strong); }
 .session-title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -918,7 +941,7 @@ body {
 .file-viewer-icon svg { width: 16px; height: 16px; }
 .file-viewer-path { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-viewer-lang { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); border: 1px solid var(--border-soft); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
-.file-viewer-dirty { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-warn); flex-shrink: 0; }
+.file-viewer-dirty { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); flex-shrink: 0; }
 .file-viewer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .file-viewer-meta { padding: 5px 16px; border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--text-dim); background: var(--bg-main); flex-shrink: 0; }
 .code-editor { flex: 1; min-height: 0; display: flex; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.62; background: #141418; }
@@ -1268,6 +1291,36 @@ select.mini-select {
 .msg-system { color: var(--text-muted); font-size: 12px; padding: 2px 4px; }
 .msg-system .msg-body { font-size: 12px; color: var(--text-muted); }
 .msg-error .msg-body { color: #fca5a5; }
+/* Durable Supervisor/worker activity: quiet progress, not a chat turn. */
+.msg-activity { padding: 1px 4px; gap: 2px; }
+.msg-activity-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.msg-activity-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.msg-activity-actor { font-weight: 600; color: var(--text-soft); }
+.msg-activity-text { overflow-wrap: anywhere; min-width: 0; }
+.msg-activity-detail {
+  margin-left: 44px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.msg-activity.tone-error .msg-activity-text { color: #fca5a5; }
+.msg-activity.tone-warning .msg-activity-text { color: var(--accent-warn); }
+.msg-activity.tone-success .msg-activity-text { color: var(--accent-ok); }
+.msg-activity.tone-message .msg-activity-actor { color: var(--accent-cyan); }
 
 .msg-body p, .msg-body ul, .msg-body ol, .msg-body blockquote { width: 100%; max-width: 100%; }
 .msg-body p { margin: 0 0 8px; }
@@ -1487,7 +1540,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
   display: inline-block;
   width: 9px;
   height: 9px;
-  border: 2px solid var(--accent-warn);
+  border: 2px solid var(--text-muted);
   border-top-color: transparent;
   border-radius: 50%;
   animation: tool-spin 0.8s linear infinite;
@@ -2007,7 +2060,17 @@ details:not([open]) > .tool-card-head .tool-chevron {
   flex-direction: column;
   background: var(--bg-sidebar);
   overflow: hidden;
+  cursor: pointer;
 }
+.worker-partition:focus-within {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -2px;
+}
+.worker-partition-head:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -2px;
+}
+.worker-partition:hover .worker-partition-head { background: var(--bg-hover); }
 .worker-partition-head {
   display: flex;
   align-items: center;
@@ -2028,20 +2091,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.worker-badge-role {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-soft);
-  text-transform: uppercase;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-}
 .worker-partition-name {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .worker-partition-task {
   font-family: var(--font-mono);
@@ -2053,6 +2110,300 @@ details:not([open]) > .tool-card-head .tool-chevron {
 }
 .worker-partition-model {
   font-size: 10px;
+}
+.worker-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.worker-empty-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.worker-empty-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 240px;
+}
+
+/* ===================== Worker Detail Modal ===================== */
+.worker-detail-card {
+  width: calc(100vw - 40px);
+  max-width: 880px;
+  max-height: 88vh;
+  gap: 10px;
+}
+.worker-detail-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.worker-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+.worker-detail-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+.worker-detail-compose {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 320px;
+}
+.worker-detail-compose input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--text-soft);
+  font-family: inherit;
+  font-size: 12px;
+}
+.worker-detail-compose input::placeholder { color: var(--text-dim); }
+.worker-detail-compose input:focus { outline: none; border-color: var(--border-strong); }
+.worker-detail-compose input:disabled { color: var(--text-dim); }
+.wd-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+}
+.wd-kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 12px;
+}
+.wd-kv-label {
+  flex: 0 0 104px;
+  color: var(--text-dim);
+}
+.wd-kv-value {
+  min-width: 0;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+.wd-muted {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.wd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+.wd-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.wd-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+.wd-empty.wd-error { color: var(--accent-danger); }
+.wd-prose {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wd-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+.wd-list li { overflow-wrap: anywhere; }
+.wd-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wd-activity-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.wd-activity-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.wd-activity-actor { font-weight: 600; color: var(--text-soft); }
+.wd-activity-text { min-width: 0; overflow-wrap: anywhere; }
+.wd-activity-detail {
+  flex-basis: 100%;
+  margin-left: 42px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.wd-activity-row.tone-error .wd-activity-text { color: #fca5a5; }
+.wd-activity-row.tone-warning .wd-activity-text { color: var(--accent-warn); }
+.wd-activity-row.tone-success .wd-activity-text { color: var(--accent-ok); }
+.wd-tool-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wd-tool {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.wd-tool-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.wd-tool-step { overflow-wrap: anywhere; }
+.wd-tool.is-error .wd-tool-step { color: #fca5a5; }
+.wd-file-group-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.wd-file-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.wd-file-list li { overflow-wrap: anywhere; padding: 1px 0; }
+.wd-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wd-message {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 8px;
+}
+.wd-message.is-in { border-left-color: var(--accent-cyan); }
+.wd-message-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.wd-message-dir {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+}
+.wd-message-from, .wd-message-to { color: var(--text-soft); }
+.wd-message-kind {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent-cyan);
+}
+.wd-message-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+}
+.wd-message-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+}
+.wd-check-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wd-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.wd-check-status {
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.wd-check.is-passed .wd-check-status { color: var(--accent-ok); }
+.wd-check.is-failed .wd-check-status { color: var(--accent-danger); }
+.wd-check-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.wd-verdict {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.wd-verdict.is-passed, .wd-verdict.is-approved { color: var(--accent-ok); }
+.wd-verdict.is-failed, .wd-verdict.is-rejected { color: var(--accent-danger); }
+.wd-pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  background: var(--bg-main);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wd-pre.is-error { color: #fca5a5; }
+@media (max-width: 760px) {
+  .wd-meta-grid { grid-template-columns: minmax(0, 1fr); }
+  .worker-detail-card { width: calc(100vw - 24px); max-height: 92vh; }
 }
 .worker-partition-workspace-line {
   padding: 2px 12px 4px;
@@ -2082,8 +2433,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
 }
 .worker-badge-status.is-running,
 .worker-badge-status.is-active {
-  background: rgba(52, 211, 153, 0.15);
-  color: var(--accent-ok);
+  background: var(--bg-hover);
+  color: var(--text-muted);
 }
 .worker-badge-status.is-waiting {
   background: rgba(251, 191, 36, 0.15);
@@ -2118,6 +2469,10 @@ details:not([open]) > .tool-card-head .tool-chevron {
 }
 .worker-stream-entry.is-tool {
   color: var(--text-muted);
+}
+.worker-stream-entry.is-message {
+  color: var(--accent-cyan);
+  opacity: 0.85;
 }
 .worker-stream-entry.is-err {
   color: var(--accent-danger);
@@ -2238,6 +2593,19 @@ details:not([open]) > .tool-card-head .tool-chevron {
     attachments: [],
     tasks: {},
     workers: {},
+    // Worker detail modal (Phase 5): the authoritative task view and its
+    // debounced live-refresh handle. null while the modal is closed.
+    workerDetail: null,
+    // Durable activity feed (PLUTON 3.0): one item per meaningful event,
+    // deduped by durable seq. activityRunId scopes the feed to one run.
+    activitySeq: 0,
+    activityRunId: null,
+    // Set whenever the conversation DOM is replaced: the rows are gone, so the
+    // cursor must be treated as unusable and the tail re-fetched once.
+    activityNeedsRebuild: false,
+    activityTimer: null,
+    activityFetching: false,
+    activityPending: false,
     rightInspectorOpen: false,
     activeRunId: null,
     selectedRunId: null,
@@ -2721,6 +3089,10 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var list = el('messagesList');
     if (!list) return;
     list.innerHTML = '';
+    // Durable activity rows live in the same list that was just wiped. Their
+    // cursor is only valid for the DOM that showed them, so re-derive them
+    // instead of leaving a high cursor that would hide them forever.
+    resetRunActivityView();
     state.liveBody = null;
     state.streamingText = '';
     if (!messages || messages.length === 0) {
@@ -2747,6 +3119,130 @@ details:not([open]) > .tool-card-head .tool-chevron {
       state.bulkRendering = false;
     }
     maybeScroll(true);
+  }
+
+  // ------------------------------------------------------- durable activity
+  // Concise Supervisor progress in the main conversation. Items come from the
+  // durable event log (SSE run_activity frames or the seq-resumable REST
+  // endpoint), never from guesses: seq is the dedupe and recovery key.
+  var RUN_ACTIVITY_TONES = { info: 1, success: 1, warning: 1, error: 1, message: 1 };
+
+  function clearRunActivity() {
+    var list = el('messagesList');
+    if (list) {
+      var nodes = list.querySelectorAll('.msg-activity');
+      Array.prototype.forEach.call(nodes, function (node) { node.remove(); });
+    }
+    state.activitySeq = 0;
+    state.activityRunId = null;
+    state.activityNeedsRebuild = false;
+    if (state.activityTimer) {
+      clearTimeout(state.activityTimer);
+      state.activityTimer = null;
+    }
+  }
+
+  /**
+   * The conversation DOM was replaced (session switch / full transcript
+   * render): drop the durable cursor so loadRunActivity re-fetches the last
+   * window for the run. A live frame may still land first, so the next fetch
+   * must use the tail window rather than resuming from that frame's seq.
+   */
+  function resetRunActivityView() {
+    state.activitySeq = 0;
+    state.activityRunId = null;
+    state.activityNeedsRebuild = true;
+    if (state.activityTimer) {
+      clearTimeout(state.activityTimer);
+      state.activityTimer = null;
+    }
+  }
+
+  function appendRunActivity(item) {
+    if (!item || typeof item.seq !== 'number') return false;
+    if (state.activityRunId !== null && item.runId && item.runId !== state.activityRunId) return false;
+    if (item.seq <= state.activitySeq) return false;
+    var list = el('messagesList');
+    if (!list) return false;
+    var tone = RUN_ACTIVITY_TONES[item.tone] ? item.tone : 'info';
+    var row = document.createElement('div');
+    row.className = 'msg msg-activity tone-' + tone;
+    row.setAttribute('data-activity-seq', String(item.seq));
+    var time = formatTime(item.at);
+    var html = '<div class="msg-activity-line">' +
+      (time ? '<span class="msg-activity-time">' + escapeHtml(time) + '</span>' : '') +
+      '<span class="msg-activity-actor">' + escapeHtml(item.actorLabel || 'Pluton') + '</span>' +
+      '<span class="msg-activity-text">' + escapeHtml(redactSecrets(item.text || '')) + '</span>' +
+      '</div>';
+    if (item.detail) {
+      html += '<div class="msg-activity-detail">' + escapeHtml(redactSecrets(item.detail)) + '</div>';
+    }
+    row.innerHTML = html;
+    list.appendChild(row);
+    state.activitySeq = item.seq;
+    trimMessagesList();
+    if (!state.bulkRendering) maybeScroll(false);
+    return true;
+  }
+
+  async function loadRunActivity(runId) {
+    if (!runId) return;
+    if (state.activityRunId !== runId) {
+      clearRunActivity();
+      state.activityRunId = runId;
+    }
+    // One request at a time: a burst of worker frames must not open parallel
+    // fetches that can render out of order. A pending flag coalesces them.
+    if (state.activityFetching) {
+      state.activityPending = true;
+      return;
+    }
+    state.activityFetching = true;
+    try {
+      // A rebuilt DOM has no rows, so a cursor-only resume would skip the
+      // window it is missing. Fetch the tail once, then resume by seq.
+      var rebuild = state.activityNeedsRebuild === true || state.activitySeq <= 0;
+      var res = await apiFetch('/api/runs/' + encodeURIComponent(runId) + '/activity?' +
+        (rebuild ? 'tail=1&limit=200' : 'afterSeq=' + encodeURIComponent(state.activitySeq)));
+      var items = res && res.activity && Array.isArray(res.activity.activity) ? res.activity.activity : [];
+      items.forEach(appendRunActivity);
+      state.activityNeedsRebuild = false;
+    } catch (err) {
+      // Activity is auxiliary: a transient failure must not break run loading.
+      // The next event (or reconnect) retries from the same durable cursor.
+    } finally {
+      state.activityFetching = false;
+      if (state.activityPending) {
+        state.activityPending = false;
+        scheduleActivityRefresh();
+      }
+    }
+  }
+
+  function scheduleActivityRefresh() {
+    if (!state.activeRunId || state.activityTimer) return;
+    state.activityTimer = setTimeout(function () {
+      state.activityTimer = null;
+      loadRunActivity(state.activeRunId);
+    }, 250);
+  }
+
+  function handleRunActivityFrame(activity) {
+    if (!activity || typeof activity.seq !== 'number' || !activity.runId) return;
+    if (state.activeRunId && activity.runId !== state.activeRunId) return;
+    if (!state.activeRunId) state.activeRunId = activity.runId;
+    if (state.activityRunId !== activity.runId) {
+      // A pending tail rebuild is about the conversation DOM, not the run:
+      // an early live frame must not cancel it, or the earlier window is lost.
+      var rebuilding = state.activityNeedsRebuild === true;
+      clearRunActivity();
+      state.activityRunId = activity.runId;
+      state.activityNeedsRebuild = rebuilding;
+    }
+    appendRunActivity(activity);
+    if (state.workerDetail && activity.taskId === state.workerDetail.taskId) {
+      scheduleWorkerDetailRefresh();
+    }
   }
 
   /**
@@ -3102,6 +3598,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (ev.type && ev.type.startsWith('worker.')) {
       if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
       handleWorkerEvent(ev);
+      scheduleActivityRefresh();
     } else if (ev.type === 'token' && ev.sessionId === state.activeSessionId) {
       appendStreamingToken(ev.text);
     } else if (ev.type === 'thought' && ev.sessionId === state.activeSessionId) {
@@ -3143,14 +3640,20 @@ details:not([open]) > .tool-card-head .tool-chevron {
       state.activeRunId = ev.runId;
       applyRunState(ev.state, ev.goal, ev.error, ev.summary);
       refreshActiveRun();
+      scheduleActivityRefresh();
       scheduleFilesRefresh();
+      if (state.workerDetail) scheduleWorkerDetailRefresh();
     } else if (ev.type === 'task_state') {
       if (ev.runId && state.activeRunId && ev.runId !== state.activeRunId) return;
       state.tasks[ev.taskId] = { id: ev.taskId, title: ev.title, state: ev.state, runId: ev.runId };
       if (ev.runId) state.activeRunId = ev.runId;
       updateActivityBadge();
       reconstituteWorkerPartitions();
+      scheduleActivityRefresh();
       scheduleFilesRefresh();
+      if (state.workerDetail && state.workerDetail.taskId === ev.taskId) scheduleWorkerDetailRefresh();
+    } else if (ev.type === 'run_activity') {
+      handleRunActivityFrame(ev.activity);
     }
   }
 
@@ -3231,8 +3734,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var ok = await plutonConfirm({
       title: 'Delete session',
       message: 'Delete "' + ((target && target.title) || 'this session') + '"? Its transcript is removed permanently.',
-      confirmLabel: 'Delete session',
-      danger: true
+      confirmLabel: 'Delete session'
     });
     if (!ok) return;
     try {
@@ -4274,6 +4776,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (state.loadedRunId && state.loadedRunId !== runId) {
       state.tasks = {};
       state.workers = {};
+      clearRunActivity();
+      if (workerDetailIsOpen()) closeWorkerDetail();
       var grid = el('rightInspectorGrid');
       if (grid) grid.innerHTML = '';
     }
@@ -4296,6 +4800,9 @@ details:not([open]) > .tool-card-head .tool-chevron {
         updateActivityBadge();
         reconstituteWorkerPartitions(res.run.tasks);
       }
+      // Recover activity missed while disconnected (the log watcher only
+      // streams future events); the cursor makes this exactly-once.
+      await loadRunActivity(runId);
     } catch (err) {
       renderOrchestra(null, [], []);
       renderDag([], []);
@@ -5438,6 +5945,41 @@ details:not([open]) > .tool-card-head .tool-chevron {
     return String(str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
+  // Authoritative active task states: exactly the states in which a worker is
+  // running, admitted with a live session, or waiting on the operator/children
+  // (not finished). Anything terminal or merely queued stays out of the
+  // inspector; history is retained in state.workers for the detail view.
+  var ACTIVE_WORKER_STATES = {
+    admitted: 1,
+    running: 1,
+    waiting_for_children: 1,
+    needs_approval: 1,
+    needs_input: 1,
+    verifying: 1
+  };
+
+  function isActiveWorkerState(status) {
+    return !!ACTIVE_WORKER_STATES[status];
+  }
+
+  function updateWorkerEmptyState() {
+    var grid = el('rightInspectorGrid');
+    if (!grid) return;
+    var partitions = grid.querySelectorAll('.worker-partition');
+    var empty = grid.querySelector('.worker-empty');
+    if (partitions.length === 0) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'worker-empty';
+        empty.innerHTML = '<div class="worker-empty-title">No active workers</div>' +
+          '<div class="worker-empty-hint">Worker activity appears here while a task is running.</div>';
+        grid.appendChild(empty);
+      }
+    } else if (empty) {
+      empty.remove();
+    }
+  }
+
   function updateInspectorPartitionsLayout() {
     var grid = el('rightInspectorGrid');
     if (!grid) return;
@@ -5445,12 +5987,36 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var count = partitions.length;
     var countBadge = el('rightInspectorCount');
     if (countBadge) {
-      countBadge.textContent = count + ' worker' + (count === 1 ? '' : 's');
+      countBadge.textContent = count + ' active worker' + (count === 1 ? '' : 's');
     }
     if (count > 4) {
       grid.classList.add('has-many-workers');
     } else {
       grid.classList.remove('has-many-workers');
+    }
+    updateWorkerEmptyState();
+  }
+
+  /** Create, update, or remove the one partition for a worker from its state. */
+  function syncWorkerPartition(worker) {
+    var grid = el('rightInspectorGrid');
+    if (!grid || !worker || !worker.taskId) return;
+    var partitionId = 'worker-partition-' + sanitizeId(worker.taskId);
+    var partition = document.getElementById(partitionId);
+    if (!isActiveWorkerState(worker.status)) {
+      if (partition) partition.remove();
+      return;
+    }
+    if (!partition) {
+      partition = createWorkerPartitionElement(worker);
+      grid.appendChild(partition);
+      if (worker.logs && worker.logs.length > 0) {
+        worker.logs.forEach(function (log) {
+          appendWorkerStreamEntry(partition, log.text, log.cls);
+        });
+      }
+    } else {
+      updateWorkerPartitionElement(partition, worker);
     }
   }
 
@@ -5463,12 +6029,17 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
     var head = document.createElement('div');
     head.className = 'worker-partition-head';
+    // The header is the accessible control; the whole card is also clickable.
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-label', 'Open details for ' + (worker.shipName || worker.role || 'worker'));
 
     var title = document.createElement('div');
     title.className = 'worker-partition-title';
-    title.innerHTML = '<span class="worker-partition-name">' + escapeHtml(worker.shipName || worker.role || 'worker') + '</span>' +
-      (worker.role ? ' <span class="worker-badge-role">' + escapeHtml(worker.role) + '</span>' : '') +
-      ' <span class="worker-partition-task">' + escapeHtml(worker.taskId) + '</span>' +
+    // One primary identity: the configured Ship display name (role is only a
+    // fallback when no display name was captured). Never both.
+    title.innerHTML = '<span class="worker-partition-name" title="' + escapeHtml(worker.shipName || worker.role || 'worker') + '">' + escapeHtml(worker.shipName || worker.role || 'worker') + '</span>' +
+      ' <span class="worker-partition-task" title="' + escapeHtml(worker.taskId) + '">' + escapeHtml(worker.taskId) + '</span>' +
       (worker.model ? ' <span class="tag-mono worker-partition-model">' + escapeHtml(worker.model) + '</span>' : '');
 
     var statusWrap = document.createElement('div');
@@ -5500,10 +6071,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var nameBadge = partition.querySelector('.worker-partition-name');
     if (nameBadge && (worker.shipName || worker.role)) {
       nameBadge.textContent = worker.shipName || worker.role;
-    }
-    var roleBadge = partition.querySelector('.worker-badge-role');
-    if (roleBadge && worker.role) {
-      roleBadge.textContent = worker.role;
+      nameBadge.title = worker.shipName || worker.role;
     }
     var statusBadge = partition.querySelector('.worker-badge-status');
     if (statusBadge) {
@@ -5578,6 +6146,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (ev.model) worker.model = ev.model;
     if (ev.workspace) worker.workspace = ev.workspace;
 
+    // Activity-only messages never change a worker's lifecycle status.
     if (ev.type === 'worker.started' || ev.type === 'worker.progress') {
       worker.status = 'running';
       scheduleFilesRefresh();
@@ -5596,24 +6165,24 @@ details:not([open]) > .tool-card-head .tool-chevron {
       worker.status = 'created';
     }
 
-    var grid = el('rightInspectorGrid');
-    var partition = null;
-    if (grid) {
-      var partitionId = 'worker-partition-' + sanitizeId(ev.taskId);
-      partition = document.getElementById(partitionId);
-      if (!partition) {
-        partition = createWorkerPartitionElement(worker);
-        grid.appendChild(partition);
-        updateInspectorPartitionsLayout();
-      } else {
-        updateWorkerPartitionElement(partition, worker);
-      }
+    // Authoritative filter: the card exists only while the worker is active.
+    // A terminal event removes it from the inspector, never from state.workers.
+    syncWorkerPartition(worker);
+    updateInspectorPartitionsLayout();
+    if (state.workerDetail && state.workerDetail.taskId === ev.taskId) {
+      scheduleWorkerDetailRefresh();
     }
 
     var entryText = '';
     var entryClass = '';
     if (ev.payload) {
-      if (typeof ev.payload.token === 'string') {
+      if (ev.type === 'worker.message' && typeof ev.payload.body === 'string') {
+        var senderLabel = typeof ev.payload.senderLabel === 'string' ? ev.payload.senderLabel : 'worker';
+        var recipientLabel = typeof ev.payload.recipientLabel === 'string' ? ev.payload.recipientLabel : 'worker';
+        var messageKind = typeof ev.payload.kind === 'string' ? ev.payload.kind : 'message';
+        entryText = '\u2192 ' + senderLabel + ' \u2192 ' + recipientLabel + ' (' + messageKind + '): ' + ev.payload.body;
+        entryClass = 'is-message';
+      } else if (typeof ev.payload.token === 'string') {
         entryText = ev.payload.token;
         entryClass = 'is-token';
       } else if (typeof ev.payload.step === 'string') {
@@ -5647,6 +6216,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (worker.logs.length > MAX_WORKER_STREAM_ENTRIES) {
       worker.logs.shift();
     }
+    var partition = document.getElementById('worker-partition-' + sanitizeId(ev.taskId));
     if (partition) {
       appendWorkerStreamEntry(partition, entryText, entryClass);
     }
@@ -5658,23 +6228,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var grid = el('rightInspectorGrid');
     if (!grid) return;
 
-    Object.keys(state.workers).forEach(function (id) {
-      var worker = state.workers[id];
-      var partitionId = 'worker-partition-' + sanitizeId(worker.taskId);
-      var partition = document.getElementById(partitionId);
-      if (!partition) {
-        partition = createWorkerPartitionElement(worker);
-        grid.appendChild(partition);
-        if (worker.logs && worker.logs.length > 0) {
-          worker.logs.forEach(function (log) {
-            appendWorkerStreamEntry(partition, log.text, log.cls);
-          });
-        }
-      } else {
-        updateWorkerPartitionElement(partition, worker);
-      }
-    });
-
+    // Tasks are authoritative for assignment/state; live worker events refine
+    // them afterwards (a just-started worker may still look queued here).
     if (Array.isArray(tasks) && tasks.length > 0) {
       tasks.forEach(function (t) {
         if (!t || !t.id) return;
@@ -5697,18 +6252,352 @@ details:not([open]) > .tool-card-head .tool-chevron {
           if (!worker.model && t.model) worker.model = t.model;
           if (!worker.workspace && t.workspace) worker.workspace = t.workspace;
         }
-        var partitionId = 'worker-partition-' + sanitizeId(t.id);
-        var partition = document.getElementById(partitionId);
-        if (!partition) {
-          partition = createWorkerPartitionElement(worker);
-          grid.appendChild(partition);
-        } else {
-          updateWorkerPartitionElement(partition, worker);
-        }
       });
     }
 
+    Object.keys(state.workers).forEach(function (id) {
+      syncWorkerPartition(state.workers[id]);
+    });
+
+    // A partition may outlive its worker record (run switch, pruned history):
+    // remove anything that is not an active, still-known worker.
+    Array.prototype.forEach.call(grid.querySelectorAll('.worker-partition'), function (partition) {
+      var taskId = partition.getAttribute('data-task-id');
+      var worker = taskId ? state.workers[taskId] : null;
+      if (!worker || !isActiveWorkerState(worker.status)) partition.remove();
+    });
+
     updateInspectorPartitionsLayout();
+  }
+
+  // ------------------------------------------------------ worker detail view
+  // A read-only, authoritative view of one task. Closing it is a view
+  // operation: it never cancels the worker and never deletes its output.
+
+  function workerDetailIsOpen() {
+    var modal = el('workerDetailModal');
+    return !!(modal && !modal.classList.contains('is-hidden'));
+  }
+
+  function openWorkerDetail(taskId) {
+    if (!taskId || !state.activeRunId) return;
+    var modal = el('workerDetailModal');
+    if (!modal) return;
+    state.workerDetail = {
+      runId: state.activeRunId,
+      taskId: taskId,
+      detail: null,
+      timer: null,
+      fetching: false,
+      pending: false
+    };
+    modal.classList.remove('is-hidden');
+    var body = el('workerDetailBody');
+    if (body) body.innerHTML = '<div class="wd-empty">Loading worker detail…</div>';
+    var title = el('workerDetailTitle');
+    var worker = state.workers[taskId];
+    if (title) title.textContent = (worker && (worker.shipName || worker.role)) || 'Worker detail';
+    var status = el('workerDetailStatus');
+    if (status) {
+      status.className = 'worker-badge-status';
+      status.textContent = (worker && worker.status) || 'loading';
+    }
+    var input = el('workerDetailMessageInput');
+    if (input) {
+      input.value = '';
+      input.disabled = true;
+    }
+    var send = el('workerDetailSend');
+    if (send) send.disabled = true;
+    var hint = el('workerDetailHint');
+    if (hint) hint.textContent = 'Loading worker state…';
+    loadWorkerDetail();
+  }
+
+  function closeWorkerDetail() {
+    var modal = el('workerDetailModal');
+    if (modal) modal.classList.add('is-hidden');
+    if (state.workerDetail && state.workerDetail.timer) {
+      clearTimeout(state.workerDetail.timer);
+    }
+    state.workerDetail = null;
+    var input = el('workerDetailMessageInput');
+    if (input) input.value = '';
+    var send = el('workerDetailSend');
+    if (send) send.disabled = true;
+  }
+
+  async function loadWorkerDetail() {
+    var ctx = state.workerDetail;
+    if (!ctx) return;
+    if (ctx.fetching) {
+      ctx.pending = true;
+      return;
+    }
+    ctx.fetching = true;
+    try {
+      var res = await apiFetch(
+        '/api/runs/' + encodeURIComponent(ctx.runId) +
+        '/tasks/' + encodeURIComponent(ctx.taskId) + '/detail'
+      );
+      if (!state.workerDetail || state.workerDetail.taskId !== ctx.taskId) return;
+      state.workerDetail.detail = res.detail;
+      renderWorkerDetail(res.detail);
+    } catch (err) {
+      if (state.workerDetail && state.workerDetail.taskId === ctx.taskId) {
+        var body = el('workerDetailBody');
+        if (body) {
+          body.innerHTML = '<div class="wd-empty wd-error">' +
+            escapeHtml(redactSecrets(err && err.message ? err.message : 'Failed to load worker detail')) +
+            '</div>';
+        }
+      }
+    } finally {
+      ctx.fetching = false;
+      if (state.workerDetail === ctx && ctx.pending) {
+        ctx.pending = false;
+        scheduleWorkerDetailRefresh();
+      }
+    }
+  }
+
+  function scheduleWorkerDetailRefresh(delay) {
+    var ctx = state.workerDetail;
+    if (!ctx || ctx.timer) return;
+    ctx.timer = setTimeout(function () {
+      if (!state.workerDetail || state.workerDetail !== ctx) return;
+      ctx.timer = null;
+      loadWorkerDetail();
+    }, delay === undefined ? 400 : delay);
+  }
+
+  function wdText(value) {
+    return escapeHtml(redactSecrets(String(value === null || value === undefined ? '' : value)));
+  }
+
+  function wdEmpty(text) {
+    return '<div class="wd-empty">' + escapeHtml(text) + '</div>';
+  }
+
+  function wdSection(title, html) {
+    return '<section class="wd-section"><div class="wd-section-title">' + escapeHtml(title) + '</div>' + html + '</section>';
+  }
+
+  function wdKv(label, value) {
+    var shown = value === null || value === undefined || value === ''
+      ? '<span class="wd-muted">not recorded</span>'
+      : wdText(value);
+    return '<div class="wd-kv"><span class="wd-kv-label">' + escapeHtml(label) + '</span>' +
+      '<span class="wd-kv-value">' + shown + '</span></div>';
+  }
+
+  function wdList(items) {
+    if (!items || items.length === 0) return wdEmpty('None recorded.');
+    return '<ul class="wd-list">' + items.map(function (item) {
+      return '<li>' + wdText(item) + '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function wdActivity(items) {
+    if (!items || items.length === 0) return wdEmpty('No progress recorded yet.');
+    return '<div class="wd-activity">' + items.map(function (item) {
+      return '<div class="wd-activity-row tone-' + escapeHtml(item.tone || 'info') + '">' +
+        '<span class="wd-activity-time">' + escapeHtml(formatTime(item.at)) + '</span>' +
+        '<span class="wd-activity-actor">' + wdText(item.actorLabel || item.actor || 'Pluton') + '</span>' +
+        '<span class="wd-activity-text">' + wdText(item.text) + '</span>' +
+        (item.detail ? '<div class="wd-activity-detail">' + wdText(item.detail) + '</div>' : '') +
+        '</div>';
+    }).join('') + '</div>';
+  }
+
+  function wdMessages(messages) {
+    if (!messages || messages.length === 0) return wdEmpty('No messages exchanged.');
+    return '<div class="wd-messages">' + messages.map(function (message) {
+      var direction = message.direction === 'in' ? 'received' : 'sent';
+      return '<div class="wd-message is-' + escapeHtml(message.direction) + '">' +
+        '<div class="wd-message-head">' +
+        '<span class="wd-message-dir">' + direction + '</span>' +
+        '<span class="wd-message-from">' + wdText(message.senderLabel) + '</span>' +
+        '<span class="wd-message-arrow">→</span>' +
+        '<span class="wd-message-to">' + wdText(message.recipientLabel) + '</span>' +
+        '<span class="wd-message-kind">' + wdText(message.kind) + '</span>' +
+        '<span class="wd-message-time">' + escapeHtml(formatTime(message.createdAt)) + '</span>' +
+        '</div>' +
+        '<div class="wd-message-body">' + wdText(message.body) + '</div>' +
+        '</div>';
+    }).join('') + '</div>';
+  }
+
+  function wdToolCalls(calls) {
+    if (!calls || calls.length === 0) return wdEmpty('No tool calls recorded.');
+    return '<ol class="wd-tool-list">' + calls.map(function (call) {
+      return '<li class="wd-tool' + (call.isError ? ' is-error' : '') + '">' +
+        '<span class="wd-tool-time">' + escapeHtml(formatTime(call.at)) + '</span>' +
+        '<span class="wd-tool-step">' + wdText(call.step) + '</span>' +
+        '</li>';
+    }).join('') + '</ol>';
+  }
+
+  function wdFiles(files) {
+    var changed = (files && files.changed) || [];
+    var untracked = (files && files.untracked) || [];
+    if (changed.length === 0 && untracked.length === 0) {
+      return wdEmpty('No changed files recorded in the task checkout.');
+    }
+    var html = '';
+    if (changed.length > 0) {
+      html += '<div class="wd-file-group-title">Modified</div><ul class="wd-file-list">' +
+        changed.map(function (path) { return '<li class="mono">' + wdText(path) + '</li>'; }).join('') +
+        '</ul>';
+    }
+    if (untracked.length > 0) {
+      html += '<div class="wd-file-group-title">Untracked</div><ul class="wd-file-list">' +
+        untracked.map(function (path) { return '<li class="mono">' + wdText(path) + '</li>'; }).join('') +
+        '</ul>';
+    }
+    if (files && files.truncated) html += '<div class="wd-muted">File list truncated.</div>';
+    return html;
+  }
+
+  function wdVerification(verification) {
+    if (!verification) return wdEmpty('No verification recorded for this task.');
+    var verdict = verification.verdict || 'pending';
+    var html = '<div class="wd-kv"><span class="wd-kv-label">Verdict</span>' +
+      '<span class="wd-verdict is-' + escapeHtml(verdict) + '">' + escapeHtml(verdict) + '</span></div>';
+    var checks = verification.checks || [];
+    if (checks.length === 0) {
+      html += wdEmpty('No verification checks ran.');
+    } else {
+      html += '<ul class="wd-check-list">' + checks.map(function (check) {
+        return '<li class="wd-check is-' + escapeHtml(check.status) + '">' +
+          '<span class="wd-check-name">' + wdText(check.name) + '</span>' +
+          '<span class="wd-check-status">' + escapeHtml(check.status) + '</span>' +
+          (check.exitCode === null || check.exitCode === undefined ? '' : '<span class="wd-check-meta">exit ' + escapeHtml(check.exitCode) + '</span>') +
+          (check.durationMs === null || check.durationMs === undefined ? '' : '<span class="wd-check-meta">' + escapeHtml(Math.round(check.durationMs)) + ' ms</span>') +
+          '<span class="wd-check-meta">attempt ' + escapeHtml(check.attempt) + '</span>' +
+          '</li>';
+      }).join('') + '</ul>';
+    }
+    return html;
+  }
+
+  function wdFinalOutput(result, failure) {
+    if (failure) {
+      var failureText = typeof failure === 'object'
+        ? (failure.message || failure.error || JSON.stringify(failure, null, 2))
+        : String(failure);
+      return '<pre class="wd-pre is-error">' + wdText(String(failureText).slice(0, 20000)) + '</pre>';
+    }
+    if (!result) return wdEmpty('No final output recorded yet.');
+    var parts = [];
+    if (typeof result === 'object') {
+      if (result.summary) parts.push(String(result.summary));
+      if (result.text) parts.push(String(result.text));
+      if (parts.length === 0) parts.push(JSON.stringify(result, null, 2));
+    } else {
+      parts.push(String(result));
+    }
+    return '<pre class="wd-pre">' + wdText(parts.join('\\n\\n').slice(0, 20000)) + '</pre>';
+  }
+
+  function renderWorkerDetail(detail) {
+    if (!detail || !detail.task) return;
+    var task = detail.task;
+    var title = el('workerDetailTitle');
+    if (title) {
+      title.textContent = (task.assigneeName || task.assigneeShipId || 'Worker') + ' · ' + (task.title || task.id);
+    }
+    var status = el('workerDetailStatus');
+    if (status) {
+      status.className = 'worker-badge-status is-' + escapeHtml(task.state || 'unknown');
+      status.textContent = task.state || 'unknown';
+    }
+
+    var meta = '<div class="wd-meta-grid">' +
+      wdKv('Task', task.id) +
+      wdKv('Run state', detail.runState) +
+      wdKv('Assignee', task.assigneeName || task.assigneeShipId) +
+      wdKv('Role', task.role) +
+      wdKv('Engine', task.engine) +
+      wdKv('Model', task.model) +
+      wdKv('Attempt', task.attempt === undefined ? null : String(task.attempt)) +
+      wdKv('Workspace', task.workspacePath || task.workspaceId) +
+      wdKv('Created', task.createdAt) +
+      wdKv('Started', task.startedAt) +
+      wdKv('Completed', task.completedAt) +
+      '</div>';
+
+    var retries = detail.retries || {};
+    var retryHtml = '<div class="wd-meta-grid">' +
+      wdKv('Attempts', String(retries.attempts === undefined ? 0 : retries.attempts)) +
+      wdKv('Retries scheduled', String(retries.retryScheduled === undefined ? 0 : retries.retryScheduled)) +
+      wdKv('Revisions', String(retries.revisions === undefined ? 0 : retries.revisions)) +
+      wdKv('Lease blockers', String(retries.leaseBlockers === undefined ? 0 : retries.leaseBlockers)) +
+      '</div>';
+
+    var html = meta +
+      wdSection('Task brief', task.brief ? '<div class="wd-prose">' + wdText(task.brief) + '</div>' : wdEmpty('No brief recorded.')) +
+      wdSection('Acceptance criteria', wdList(detail.acceptanceCriteria)) +
+      wdSection('Depends on', wdList(task.dependsOn)) +
+      wdSection('Write scope', wdList(task.writeScope)) +
+      wdSection('Progress', wdActivity(detail.activity)) +
+      wdSection('Supervisor communication', wdActivity(detail.supervisorActivity)) +
+      wdSection('Tool calls', wdToolCalls(detail.toolCalls)) +
+      wdSection('Changed files', wdFiles(detail.files)) +
+      wdSection('Messages', wdMessages(detail.messages)) +
+      wdSection('Errors, retries, and blockers', retryHtml) +
+      wdSection('Verification', wdVerification(detail.verification)) +
+      wdSection('Final output', wdFinalOutput(detail.result, detail.failure));
+
+    var body = el('workerDetailBody');
+    if (body) body.innerHTML = html;
+    updateWorkerDetailComposer(detail);
+  }
+
+  function updateWorkerDetailComposer(detail) {
+    var canMessage = !!(detail && detail.canMessage);
+    var input = el('workerDetailMessageInput');
+    var send = el('workerDetailSend');
+    var hint = el('workerDetailHint');
+    if (input) {
+      input.disabled = !canMessage;
+      input.placeholder = canMessage
+        ? 'Message this worker (delivered at its next tool call)'
+        : 'This worker is not accepting messages';
+    }
+    if (send) send.disabled = !canMessage;
+    if (hint) {
+      hint.textContent = canMessage
+        ? 'Delivered at the worker\\'s next tool call.'
+        : 'Read-only: the task is finished or not dispatched.';
+    }
+  }
+
+  async function sendWorkerDetailMessage() {
+    var ctx = state.workerDetail;
+    if (!ctx || !ctx.detail || !ctx.detail.canMessage) return;
+    var input = el('workerDetailMessageInput');
+    var send = el('workerDetailSend');
+    var body = input ? input.value.trim() : '';
+    if (!body) return;
+    if (send) send.disabled = true;
+    if (input) input.disabled = true;
+    try {
+      await apiFetch(
+        '/api/runs/' + encodeURIComponent(ctx.runId) +
+        '/tasks/' + encodeURIComponent(ctx.taskId) + '/message',
+        { method: 'POST', body: JSON.stringify({ body: body }) }
+      );
+      if (input) input.value = '';
+      toast('Message queued for the worker');
+      scheduleWorkerDetailRefresh(0);
+    } catch (err) {
+      toast('Message failed: ' + (err && err.message ? err.message : 'unknown error'), true);
+    } finally {
+      if (state.workerDetail === ctx) {
+        updateWorkerDetailComposer(ctx.detail);
+      }
+    }
   }
 
   // -------------------------------------------------------------- popovers
@@ -5769,6 +6658,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var modal = el('attachModal');
     if (modal && !modal.classList.contains('is-hidden')) {
       closeAttachModal();
+      return true;
+    }
+    var workerModal = el('workerDetailModal');
+    if (workerModal && !workerModal.classList.contains('is-hidden')) {
+      // Closing the detail view never cancels the worker or deletes output.
+      closeWorkerDetail();
       return true;
     }
     var insp = el('rightInspector');
@@ -6134,6 +7029,54 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (rightInspectorClose) {
       rightInspectorClose.addEventListener('click', function () {
         toggleRightInspector(false);
+      });
+    }
+
+    // Worker cards open the authoritative detail modal; the whole card is the
+    // target because a worker is one identity, not a set of hidden affordances.
+    var inspectorGrid = el('rightInspectorGrid');
+    if (inspectorGrid) {
+      inspectorGrid.addEventListener('click', function (e) {
+        var node = e.target;
+        while (node && node !== inspectorGrid) {
+          if (node.classList && node.classList.contains('worker-partition')) {
+            openWorkerDetail(node.getAttribute('data-task-id'));
+            return;
+          }
+          node = node.parentNode;
+        }
+      });
+      inspectorGrid.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        var node = e.target;
+        while (node && node !== inspectorGrid) {
+          if (node.classList && node.classList.contains('worker-partition')) {
+            e.preventDefault();
+            openWorkerDetail(node.getAttribute('data-task-id'));
+            return;
+          }
+          node = node.parentNode;
+        }
+      });
+    }
+
+    var workerDetailClose = el('workerDetailClose');
+    if (workerDetailClose) workerDetailClose.addEventListener('click', closeWorkerDetail);
+    var workerDetailSend = el('workerDetailSend');
+    if (workerDetailSend) workerDetailSend.addEventListener('click', sendWorkerDetailMessage);
+    var workerDetailInput = el('workerDetailMessageInput');
+    if (workerDetailInput) {
+      workerDetailInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendWorkerDetailMessage();
+        }
+      });
+    }
+    var workerDetailModal = el('workerDetailModal');
+    if (workerDetailModal) {
+      workerDetailModal.addEventListener('click', function (e) {
+        if (e.target === workerDetailModal) closeWorkerDetail();
       });
     }
 
