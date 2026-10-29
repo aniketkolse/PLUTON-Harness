@@ -62,7 +62,7 @@ function errorCodeOf(e: unknown): string {
 export abstract class AcpEngineSessionBase implements EngineSession {
   readonly info: EngineSessionInfo
   protected readonly client: AcpClient
-  protected readonly pinnedModel: string
+  pinnedModel: string
   protected readonly nativeSessionId: string
   private busy = false
   private closed = false
