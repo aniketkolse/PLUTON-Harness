@@ -169,11 +169,23 @@ describe('native policy acceptance', () => {
     ).toThrow(/unprivileged user and network namespaces are required/)
   })
 
-  it('does not require namespaces for an open network', () => {
+  it('requires user, mount and PID namespaces even for an open network, but not network namespaces', () => {
+    for (const missing of [
+      { userNamespaces: false },
+      { mountNamespaces: false },
+      { pidNamespaces: false },
+    ]) {
+      expect(() =>
+        assertPolicySupported(policy({ network: 'open' }), capabilities(missing)),
+      ).toThrow(/user, mount and PID namespaces/)
+    }
+
+    // Open networks do not need a network namespace; filesystem confinement
+    // alone is a valid confined policy.
     expect(() =>
       assertPolicySupported(
         policy({ network: 'open' }),
-        capabilities({ userNamespaces: false, networkNamespaces: false }),
+        capabilities({ networkNamespaces: false }),
       ),
     ).not.toThrow()
   })

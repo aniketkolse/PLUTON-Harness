@@ -50,7 +50,8 @@ Confined modes use the verified `native/landlock-run` helper:
   helper ABI, SHA-256, size and target manifest before use
   (`src/execution/capabilities.ts`).
 - On Linux, `read-only`/`workspace-write` require Landlock ABI ≥ 3 (Linux kernel
-  ≥ 6.2 with Landlock enabled) and the matching helper binary.
+  ≥ 6.2 with Landlock enabled), the matching helper binary, and unprivileged
+  user, mount and PID namespaces.
 
 ### 2.2 Network policy
 
@@ -71,10 +72,12 @@ sockets.
 
 ### 2.3 Namespaces and process hygiene
 
-When the host supports them, the helper creates a private user namespace, mount
-namespace, private `/tmp`, fresh `/proc` and a PID namespace; the engine runs as
-PID 1 inside the namespace. These are reported per session in the enforcement
-report rather than assumed.
+Confined modes require unprivileged user, mount and PID namespaces. The helper
+creates a private user namespace, mount namespace, private `/tmp`, fresh `/proc`
+and a PID namespace; the engine runs as PID 1 inside the namespace. These are
+reported per session in the enforcement report rather than assumed. Network
+namespaces are required only for `restricted`/`none` and are reported separately
+from filesystem confinement.
 
 The provider also enforces:
 
@@ -193,8 +196,8 @@ Pluton refuses to start when any of these checks fail:
 
 - effective mode is `unconfined` without
   `sandbox.native.acknowledge_unconfined: true`;
-- effective mode is `read-only` or `workspace-write` without a verified helper
-  and Landlock ABI ≥ 3;
+- effective mode is `read-only` or `workspace-write` without a verified helper,
+  Landlock ABI ≥ 3, or unprivileged user/mount/PID namespaces;
 - effective network is `restricted` or `none` without unprivileged user and
   network namespaces;
 - platform is macOS or Windows and the effective policy is not

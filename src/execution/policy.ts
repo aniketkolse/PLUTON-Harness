@@ -97,8 +97,9 @@ function unsupported(policy: EffectiveExecutionPolicy, reason: string, fix: stri
 /**
  * Validate the complete policy against the reported capabilities.
  *
- * - Linux confined modes require a verified helper and Landlock ABI >= 3.
- * - `restricted`/`none` additionally require user and network namespaces.
+ * - Linux confined modes require a verified helper, Landlock ABI >= 3, and
+ *   unprivileged user/mount/PID namespaces.
+ * - `restricted`/`none` additionally require network namespaces.
  * - macOS/Windows only support `open` + `unconfined`.
  * - `unconfined` only supports `open` everywhere.
  */
@@ -150,6 +151,11 @@ export function assertPolicySupported(
       'use a Linux kernel >= 6.2 with Landlock enabled, or explicitly choose mode: unconfined',
     )
   }
+  // Match the provider's prepare() guard: a verified helper and Landlock alone
+  // are not confinement if the host cannot create the namespaces the helper
+  // needs. Fail closed here, before any run row or process exists. Checked
+  // after the network requirement so a restricted policy reports the specific
+  // namespace it is missing.
   if (policy.network === 'restricted' || policy.network === 'none') {
     if (!capabilities.userNamespaces || !capabilities.networkNamespaces) {
       unsupported(
@@ -158,6 +164,13 @@ export function assertPolicySupported(
         'enable unprivileged user namespaces, run with the required namespace privileges, or choose network_policy: open',
       )
     }
+  }
+  if (!capabilities.userNamespaces || !capabilities.mountNamespaces || !capabilities.pidNamespaces) {
+    unsupported(
+      policy,
+      'native confinement requires unprivileged user, mount and PID namespaces on this host',
+      'enable unprivileged namespaces, or explicitly choose mode: unconfined',
+    )
   }
 }
 

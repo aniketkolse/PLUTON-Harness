@@ -645,7 +645,20 @@ export class NativeExecutionProvider implements ExecutionProvider {
   async probe(): Promise<ExecutionProbe> {
     const caps = this.capabilities()
     const helper = caps.helper
-    const confined = this.platform === 'linux' && helper.available && (caps.landlockAbi ?? 0) >= 3
+    // `prepare()` refuses confined modes unless user, mount and PID namespaces
+    // are proven. The probe must not claim more than prepare can deliver: a
+    // helper with no namespaces is not OS confinement.
+    const namespaceConfinement =
+      caps.userNamespaces && caps.mountNamespaces && caps.pidNamespaces
+    const confined =
+      this.platform === 'linux' &&
+      helper.available &&
+      (caps.landlockAbi ?? 0) >= 3 &&
+      namespaceConfinement
+    // Network confinement is a separate capability: `open` policies do not
+    // need a network namespace, and a host may prove filesystem confinement
+    // without proving `unshare -Urn`.
+    const networkConfinement = confined && caps.networkNamespaces
     const backend: ExecutionBackend = this.closed ? 'unavailable' : confined ? 'landlock' : 'unconfined'
     let detail: string
     let fix: string | undefined
@@ -655,13 +668,26 @@ export class NativeExecutionProvider implements ExecutionProvider {
     } else if (this.platform === 'linux' && confined) {
       detail =
         `native Linux confinement: verified landlock-run ${String(helper.version)} (Landlock ABI ${String(caps.landlockAbi)}) ` +
-        'enforces filesystem access, private mount/network/PID namespaces and a per-session tmpfs; ' +
+        'enforces filesystem access and private mount/PID namespaces with a per-session tmpfs; ' +
+        (networkConfinement
+          ? 'network namespaces are available for restricted/none policies; '
+          : 'network namespaces are unavailable, so network access is never confined; ') +
         'CPU/memory limits are recorded but not cgroup-enforced'
     } else if (this.platform === 'linux') {
+      const reasons: string[] = []
+      if (!helper.available) reasons.push(helper.detail ?? 'the verified native helper is unavailable')
+      if ((caps.landlockAbi ?? 0) < 3) {
+        reasons.push(`Landlock ABI 3 or newer is required (reported: ${String(caps.landlockAbi)})`)
+      }
+      if (!namespaceConfinement) {
+        reasons.push('unprivileged user, mount and PID namespaces are unavailable')
+      }
       detail =
-        `native Linux confinement is unavailable (${helper.detail ?? `Landlock ABI ${String(caps.landlockAbi)}`}); ` +
+        `native Linux confinement is unavailable (${reasons.join('; ')}); ` +
         'only mode unconfined with network_policy open can run, and confined policies fail closed'
-      fix = 'install the verified landlock-run helper for this architecture, or explicitly choose unconfined'
+      fix =
+        'install the verified landlock-run helper for this architecture, enable unprivileged ' +
+        'namespaces, or explicitly choose unconfined'
     } else {
       detail =
         `native execution on ${this.platform} supports only mode unconfined with network_policy open; ` +
@@ -680,7 +706,7 @@ export class NativeExecutionProvider implements ExecutionProvider {
         processTreeKill: true,
         outputBounds: true,
         filesystemConfinement: confined,
-        networkConfinement: confined && caps.userNamespaces && caps.networkNamespaces,
+        networkConfinement,
         resourceLimits: false,
         terminal: false,
         landlockAbi: caps.landlockAbi,

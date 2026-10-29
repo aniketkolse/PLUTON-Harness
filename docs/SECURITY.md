@@ -152,8 +152,8 @@ unwrapped-process fallback.
   network namespaces. `read-only` permits writes only to the session temporary
   directory; `workspace-write` additionally permits the task checkout/work
   directory and engine home. System runtime roots are read/execute only.
-  A missing helper, helper hash/size mismatch, or Landlock ABI < 3 is an error
-  before dispatch.
+  A missing helper, helper hash/size mismatch, Landlock ABI < 3, or missing
+  unprivileged user/mount/PID namespaces is an error before dispatch.
 - **Network policy is namespace-based and, for non-open sessions, seccomp-filtered.**
   `open` uses the host network with no filtering. `restricted` creates a private
   network namespace with loopback only; the session tool bridge is reached

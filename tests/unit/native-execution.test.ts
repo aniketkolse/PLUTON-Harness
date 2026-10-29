@@ -21,6 +21,7 @@ import {
   type ExecutionEvent,
   type ExecutionSessionSpec,
 } from '../../src/execution/native.ts'
+import type { NativeCapabilities } from '../../src/execution/policy.ts'
 
 /**
  * Native execution provider: process-level policy, bounded exec, tree-aware
@@ -93,6 +94,24 @@ function makeProvider(
   return provider
 }
 
+/** Explicit capability matrix for deterministic probe assertions on Linux. */
+function linuxCaps(overrides: Partial<NativeCapabilities> = {}): NativeCapabilities {
+  return {
+    platform: 'linux',
+    arch: 'x64',
+    kernelRelease: '6.8.0-test',
+    landlockAbi: 6,
+    userNamespaces: true,
+    mountNamespaces: true,
+    networkNamespaces: true,
+    pidNamespaces: true,
+    cgroupV2: true,
+    helper: { available: true, version: '1.2.3', sha256: 'a'.repeat(64) },
+    runtimeRoots: [],
+    ...overrides,
+  }
+}
+
 async function waitForEvent(
   events: ExecutionEvent[],
   type: ExecutionEvent['type'],
@@ -117,7 +136,9 @@ describe('NativeExecutionProvider', () => {
     if (process.platform === 'linux' && probe.capabilities.filesystemConfinement) {
       expect(probe.backend).toBe('landlock')
       expect(probe.enforcement).toBe('os-confinement')
-      expect(probe.capabilities.networkConfinement).toBe(true)
+      // Network confinement is reported separately; it can only be claimed
+      // when the host proved network namespaces.
+      expect(typeof probe.capabilities.networkConfinement).toBe('boolean')
     } else {
       expect(probe.backend).toBe('unconfined')
       expect(probe.enforcement).toBe('unconfined')
@@ -126,6 +147,40 @@ describe('NativeExecutionProvider', () => {
     }
     expect(probe.capabilities.processTreeKill).toBe(true)
   })
+
+  it.runIf(process.platform === 'linux')(
+    'claims OS confinement only when user, mount and PID namespaces are proven',
+    async () => {
+      const full = await makeProvider(makeRoot(), [], { capabilities: linuxCaps() }).probe()
+      expect(full.backend).toBe('landlock')
+      expect(full.enforcement).toBe('os-confinement')
+      expect(full.capabilities.filesystemConfinement).toBe(true)
+      expect(full.capabilities.networkConfinement).toBe(true)
+
+      const missingPid = await makeProvider(makeRoot(), [], {
+        capabilities: linuxCaps({ pidNamespaces: false }),
+      }).probe()
+      expect(missingPid.backend).toBe('unconfined')
+      expect(missingPid.enforcement).toBe('unconfined')
+      expect(missingPid.capabilities.filesystemConfinement).toBe(false)
+      expect(missingPid.capabilities.networkConfinement).toBe(false)
+      expect(missingPid.detail).toContain('PID namespaces are unavailable')
+    },
+  )
+
+  it.runIf(process.platform === 'linux')(
+    'reports filesystem confinement and network confinement independently',
+    async () => {
+      const probe = await makeProvider(makeRoot(), [], {
+        capabilities: linuxCaps({ networkNamespaces: false }),
+      }).probe()
+      expect(probe.backend).toBe('landlock')
+      expect(probe.enforcement).toBe('os-confinement')
+      expect(probe.capabilities.filesystemConfinement).toBe(true)
+      expect(probe.capabilities.networkConfinement).toBe(false)
+      expect(probe.detail).toContain('network namespaces are unavailable')
+    },
+  )
 
   it('rejects NaN or non-finite sessionTimeoutMs, terminateGraceMs, and maxOutputBytes in constructor', () => {
     const root = makeRoot()

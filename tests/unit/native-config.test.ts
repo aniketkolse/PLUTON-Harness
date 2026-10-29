@@ -46,6 +46,11 @@ const linuxWithoutNetworkNamespaces: NativeCapabilities = {
   networkNamespaces: false,
 }
 
+const linuxWithoutNamespaces: NativeCapabilities = {
+  ...linuxCapabilities,
+  mountNamespaces: false,
+}
+
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
@@ -183,6 +188,20 @@ describe('native execution config', () => {
     const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
     expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutHelper)).toThrow(
       SandboxUnavailableError,
+    )
+  })
+
+  it('fails closed when the host cannot create the namespaces confinement requires', () => {
+    const dir = root()
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    // A verified helper and Landlock without user/mount/PID namespaces cannot
+    // confine a process; assertNativeSandboxConfig must refuse before a run
+    // starts rather than letting prepare() fail later.
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutNamespaces)).toThrow(
+      SandboxUnavailableError,
+    )
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutNamespaces)).toThrow(
+      /user, mount and PID namespaces/,
     )
   })
 

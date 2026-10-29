@@ -8,6 +8,7 @@ import { runRun } from '../../src/cli/commands/run.ts'
 import type { ProjectContext } from '../../src/cli/context.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { PolicyDeniedError } from '../../src/domain/errors.ts'
+import { detectCapabilities } from '../../src/execution/capabilities.ts'
 import { createNativeExecutionProvider } from '../../src/execution/factory.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
@@ -266,14 +267,28 @@ describe('Native execution integration: manager & worker across isolated Git che
       const probe = await provider.probe()
       expect(probe.available).toBe(true)
       expect(probe.provider).toBe('native')
-      if (process.platform === 'linux' && probe.capabilities.filesystemConfinement) {
+
+      // Compare against an independent detection pass: the probe may not claim
+      // confinement that prepare() would refuse. Network confinement stays
+      // false on a filesystem-confined host without network namespaces.
+      const caps = detectCapabilities()
+      const filesystemConfinement =
+        process.platform === 'linux' &&
+        caps.helper.available &&
+        (caps.landlockAbi ?? 0) >= 3 &&
+        caps.userNamespaces &&
+        caps.mountNamespaces &&
+        caps.pidNamespaces
+      expect(probe.capabilities.filesystemConfinement).toBe(filesystemConfinement)
+      expect(probe.capabilities.networkConfinement).toBe(
+        filesystemConfinement && caps.networkNamespaces,
+      )
+      if (filesystemConfinement) {
         expect(probe.backend).toBe('landlock')
         expect(probe.enforcement).toBe('os-confinement')
-        expect(probe.capabilities.networkConfinement).toBe(true)
       } else {
         expect(probe.backend).toBe('unconfined')
         expect(probe.enforcement).toBe('unconfined')
-        expect(probe.capabilities.filesystemConfinement).toBe(false)
         expect(probe.capabilities.networkConfinement).toBe(false)
       }
     } finally {
