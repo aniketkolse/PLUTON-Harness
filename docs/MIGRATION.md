@@ -253,7 +253,10 @@ pre-migration snapshot before applying it; no operator action is required.
   evidence has a non-passed check.
 - On a git checkout the fingerprint covers HEAD plus tracked and untracked
   content (using a throwaway git index; the real index/worktree is untouched).
-  Non-git workspaces record `available: false` / null evidence.
+  Untracked top-level `.pluton/` entries are excluded because Pluton's own
+  running process writes the SQLite database and task checkouts there; tracked
+  `.pluton/` content remains covered. Non-git workspaces record
+  `available: false` / null evidence.
 - `pluton integrate` refuses to commit or merge a completed task whose checkout
   no longer matches the verified post-check fingerprint. The report gains a
   `blockedDrift` array and the run records `integration.drift_detected`.

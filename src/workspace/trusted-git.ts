@@ -594,7 +594,20 @@ async function listTree(
   return entries
 }
 
-function walkWorktree(checkout: string): WorktreeEntry[] {
+/**
+ * Pluton's top-level control plane: the SQLite database (plus WAL/SHM), engine
+ * state, session tmp and task checkouts. The running process writes it while a
+ * snapshot is being captured, so it can never be stable verification evidence.
+ * `createVerificationSnapshot` already refuses to copy it for the same reason.
+ */
+function isPlutonControlPlanePath(path: string): boolean {
+  return (path.split('/')[0] ?? '').toLowerCase() === '.pluton'
+}
+
+function walkWorktree(
+  checkout: string,
+  skipPath?: (relativePath: string, isDirectory: boolean) => boolean,
+): WorktreeEntry[] {
   const root = resolve(checkout)
   const out: WorktreeEntry[] = []
   const stack: string[] = ['']
@@ -605,6 +618,7 @@ function walkWorktree(checkout: string): WorktreeEntry[] {
       const name = entry.name
       if (name.toLowerCase() === '.git') continue
       const rel = relDir === '' ? name : `${relDir}/${name}`
+      if (skipPath !== undefined && skipPath(rel, entry.isDirectory())) continue
       if (!isSafeRepoPath(rel)) throw new Error(`worktree contains an unsafe path: ${JSON.stringify(rel)}`)
       const absolute = join(root, ...rel.split('/'))
       const info = lstatSync(absolute)
@@ -848,9 +862,26 @@ async function buildSnapshot(
   options: { writeObjects: boolean },
 ): Promise<RawSnapshot> {
   const identity = view.identity
-  const walked = walkWorktree(checkout)
   const headEntries = await listTree(view, identity.head)
   const tracked = new Set(headEntries.keys())
+  // Skip untracked control-plane directories entirely: they are not part of the
+  // deliverable, and their churn (SQLite WAL writes, task checkouts) would
+  // otherwise make every capture look like the worktree changed — or fail mid-
+  // walk. Directories that contain tracked `.pluton` content are still walked,
+  // and the filter below keeps every tracked entry, so `dirty`/`changes` cannot
+  // silently hide committed control-plane content.
+  const trackedControlPlaneDirs = new Set<string>()
+  for (const path of tracked) {
+    if (!isPlutonControlPlanePath(path)) continue
+    const segments = path.split('/')
+    for (let depth = 1; depth < segments.length; depth += 1) {
+      trackedControlPlaneDirs.add(segments.slice(0, depth).join('/'))
+    }
+  }
+  const walked = walkWorktree(checkout, (relativePath, isDirectory) => {
+    if (!isPlutonControlPlanePath(relativePath)) return false
+    return isDirectory ? !trackedControlPlaneDirs.has(relativePath) : !tracked.has(relativePath)
+  }).filter((entry) => !isPlutonControlPlanePath(entry.path) || tracked.has(entry.path))
   const untrackedCandidates = walked.filter((entry) => !tracked.has(entry.path)).map((entry) => entry.path)
   const ignored = await checkIgnoredAsync(view, untrackedCandidates)
   const commitEntries = walked.filter((entry) => tracked.has(entry.path) || !ignored.has(entry.path))

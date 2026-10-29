@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -89,6 +89,43 @@ describe('workspace verification evidence', () => {
     expect(committed.worktreeDirty).toBe(false)
     expect(committed.revision).not.toBe(initial.revision)
     expect(committed.worktreeFingerprint).not.toBe(untracked.worktreeFingerprint)
+  })
+
+  it('ignores control-plane churn while still fingerprinting deliverable content', async () => {
+    const dir = seedRepo()
+    const initial = await captureWorkspaceEvidence(dir)
+
+    mkdirSync(join(dir, '.pluton', 'state'), { recursive: true })
+    writeFileSync(join(dir, '.pluton', 'state', 'pluton.sqlite'), 'db')
+    writeFileSync(join(dir, '.pluton', 'state', 'pluton.sqlite-wal'), 'wal')
+    const state = await captureWorkspaceEvidence(dir)
+    expect(state.available).toBe(true)
+    expect(state.worktreeDirty).toBe(false)
+    expect(state.worktreeFingerprint).toBe(initial.worktreeFingerprint)
+
+    // The running CLI appends to the WAL while a check is being verified.
+    writeFileSync(join(dir, '.pluton', 'state', 'pluton.sqlite-wal'), 'wal-after-checkpoint')
+    expect((await captureWorkspaceEvidence(dir)).worktreeFingerprint).toBe(initial.worktreeFingerprint)
+
+    // Untracked deliverable content is still evidence.
+    writeFileSync(join(dir, 'added.ts'), 'export const z = 1\n')
+    const added = await captureWorkspaceEvidence(dir)
+    expect(added.worktreeDirty).toBe(true)
+    expect(added.worktreeFingerprint).not.toBe(initial.worktreeFingerprint)
+  })
+
+  it('still fingerprints control-plane paths that are tracked in HEAD', async () => {
+    const dir = seedRepo()
+    mkdirSync(join(dir, '.pluton', 'state'), { recursive: true })
+    writeFileSync(join(dir, '.pluton', 'state', 'pinned.txt'), 'one\n')
+    git(dir, ['add', '-A'])
+    git(dir, ['-c', 'user.name=Pluton', '-c', 'user.email=pluton@localhost', 'commit', '-m', 'track control plane'])
+    const initial = await captureWorkspaceEvidence(dir)
+
+    writeFileSync(join(dir, '.pluton', 'state', 'pinned.txt'), 'two\n')
+    const changed = await captureWorkspaceEvidence(dir)
+    expect(changed.worktreeDirty).toBe(true)
+    expect(changed.worktreeFingerprint).not.toBe(initial.worktreeFingerprint)
   })
 
   it('returns explicit unavailable evidence outside a git worktree', async () => {
