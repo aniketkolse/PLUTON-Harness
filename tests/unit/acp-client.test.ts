@@ -191,6 +191,23 @@ describe('AcpClient transport', () => {
     await expect(client.request('later', {})).rejects.toThrowError(EngineProtocolError)
   })
 
+  it('turns an asynchronous stdin EPIPE into a controlled transport failure', async () => {
+    const agent = new FakeAcpAgent()
+    agent.onMessage = () => true
+    const client = makeClient(agent)
+    await client.start()
+
+    const pending = client.request('work', {})
+    // Node reports failed writes on the stream instead of throwing, so an
+    // unhandled 'error' event would crash the whole process.
+    const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+    agent.child.stdin!.emit('error', epipe)
+
+    await expect(pending).rejects.toThrowError(/acp write failed: write EPIPE/)
+    expect(client.isDead).toBe(true)
+    expect(agent.killed).toBe(true)
+  })
+
   it('fails closed on a non-JSON stdout frame and kills the child', async () => {
     const agent = new FakeAcpAgent()
     agent.onMessage = () => true // swallow requests; we only care about the bad frame

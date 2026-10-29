@@ -171,6 +171,19 @@ export class AcpClient {
     child.stderr?.on('data', (chunk: string | Buffer) => {
       this.onStderr(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
     })
+    // write() reports EPIPE and other I/O failures asynchronously via the
+    // stream's 'error' event, not by throwing. Without this listener Node
+    // treats a child that exits mid-write as an uncaught process crash.
+    child.stdin?.on('error', (err: Error) => {
+      if (this.closing) {
+        // close() ended stdin deliberately and owns the shutdown path; the
+        // exit/grace/kill sequence below still runs.
+        return
+      }
+      this.die(
+        new EngineProtocolError(`acp write failed: ${err.message}`, { cause: err }),
+      )
+    })
     child.on('error', (err) => {
       if (this.state === 'running') {
         this.die(new EngineProtocolError(`acp transport error: ${err.message}`, { cause: err }))
@@ -236,7 +249,9 @@ export class AcpClient {
       } else {
         await this.spawnOnce()
       }
-      this.state = 'running'
+      // A stdin error during startup may already have recorded a fatal
+      // transport failure; never resurrect that client by overwriting it.
+      if (!this.isDead) this.state = 'running'
     } catch (err) {
       this.state = 'dead'
       this.cleanupChild()
