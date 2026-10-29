@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -72,7 +72,9 @@ function setupTestProject(options: { logWatcherIntervalMs?: number } = {}): {
   rootDir: string
   appServer: Promise<AppServerInstance>
 } {
-  const root = mkdtempSync(join(tmpdir(), 'pluton-server-it-'))
+  // Canonicalize so the server's workspace root matches on macOS (/var vs
+  // /private/var) and Windows runners (8.3 RUNNER~1 vs the long name).
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-server-it-')))
   tmpDirs.push(root)
   writeFileSync(join(root, 'pluton.yaml'), TEST_CONFIG, 'utf8')
   writeFileSync(join(root, 'sample.txt'), 'Hello Pluton Server', 'utf8')

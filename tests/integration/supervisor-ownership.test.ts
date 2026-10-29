@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -239,7 +239,10 @@ interface MakeWorldOptions {
 }
 
 function makeWorld(opts: MakeWorldOptions = {}): World {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-ownership-int-'))
+  // Canonicalize so the supervised engine's workdir and the project root share
+  // one identity on macOS (/var vs /private/var) and Windows runners (8.3
+  // RUNNER~1 vs the long profile name).
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-ownership-int-')))
   tmpDirs.push(dir)
   mkdirSync(join(dir, '.pluton', 'state'), { recursive: true })
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -24,7 +24,9 @@ afterEach(() => {
 })
 
 function tmp(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix))
+  // Canonicalize so the path under test has no platform alias prefix: on
+  // Windows the 8.3 RUNNER~1 temp root would itself trip the alias checks.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
   tmpDirs.push(dir)
   return dir
 }

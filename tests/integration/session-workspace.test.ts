@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -56,7 +56,9 @@ muses:
 `
 
 function makeProject(): { dir: string; configPath: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-ws-test-'))
+  // Canonicalize so the server's project identity matches on macOS
+  // (/var vs /private/var) and Windows runners (8.3 RUNNER~1 vs the long name).
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-ws-test-')))
   tmpDirs.push(dir)
   execFileSync('git', ['init', dir], { stdio: 'ignore' })
   execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@test.local'], { stdio: 'ignore' })

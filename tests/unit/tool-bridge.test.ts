@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -49,7 +49,9 @@ const WORKER_PERMISSIONS = ['task.delegate', 'task.inspect', 'result.collect', '
 const WORKER_TOOLS = ['task.delegate', 'task.inspect', 'task.wait', 'task.get_result', 'diff.inspect']
 
 function makeFixture(): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-bridge-'))
+  // Canonicalize so session-root containment matches on macOS (/var vs
+  // /private/var) and Windows runners (8.3 RUNNER~1 vs the long name).
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-bridge-')))
   tmpDirs.push(dir)
   mkdirSync(join(dir, '.pluton', 'state'), { recursive: true })
   writeFileSync(join(dir, 'README.md'), 'hello world')

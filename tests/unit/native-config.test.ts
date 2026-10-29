@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -97,7 +97,10 @@ function nativeConfig(overrides: Record<string, unknown> = {}) {
 }
 
 function root(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-native-config-'))
+  // Canonicalize so allowed-root comparisons use the same identity the
+  // execution layer derives on macOS (/var vs /private/var) and Windows
+  // runners (8.3 RUNNER~1 vs the long profile name).
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-native-config-')))
   tmpDirs.push(dir)
   return dir
 }

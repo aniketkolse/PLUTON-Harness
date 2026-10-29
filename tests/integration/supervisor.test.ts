@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -130,7 +130,10 @@ interface MakeWorldOptions {
 const WORKER_PERMISSIONS: Permission[] = ['task.delegate', 'task.inspect', 'result.collect', 'diff.inspect']
 
 function makeWorld(opts: MakeWorldOptions = {}): World {
-  const dir = mkdtempSync(join(tmpdir(), 'pluton-supervisor-'))
+  // Canonicalize so engine-permission containment compares the same root the
+  // supervisor derives on macOS (/var vs /private/var) and Windows runners
+  // (8.3 RUNNER~1 vs the long profile name).
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-supervisor-')))
   tmpDirs.push(dir)
   mkdirSync(join(dir, '.pluton', 'state'), { recursive: true })
   writeFileSync(join(dir, 'README.md'), '# project\n')

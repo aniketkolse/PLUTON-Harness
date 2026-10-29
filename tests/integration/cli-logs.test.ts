@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -94,7 +94,9 @@ function logsJson(args: string[]): { env: RunView; exitCode: number; stdout: str
 }
 
 beforeAll(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'pluton-cli-logs-it-'))
+  // Canonicalize so the CLI's own path identity matches on macOS (/var vs
+  // /private/var) and Windows runners (8.3 RUNNER~1 vs the long profile name).
+  projectDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-cli-logs-it-')))
   writeFileSync(join(projectDir, 'pluton.yaml'), CONFIG)
 
   const loaded = loadConfig(projectDir)

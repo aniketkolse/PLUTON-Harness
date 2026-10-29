@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -76,7 +76,9 @@ muses:
 }
 
 beforeAll(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'pluton-verify-'))
+  // Canonicalize so the CLI resolves the same project identity on macOS
+  // (/var vs /private/var) and Windows runners (8.3 RUNNER~1 vs the long name).
+  projectDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-verify-')))
   writeFileSync(join(projectDir, 'pluton.yaml'), configFor(trustedNodeExecutable()))
   artifactsDir = join(projectDir, '.pluton', 'state', 'artifacts')
 })
