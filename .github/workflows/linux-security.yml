@@ -46,6 +46,28 @@ jobs:
             echo "Invoking User: $(id)"
           } | tee .pluton-ci/system-environment.txt
 
+      - name: Enable unprivileged user namespaces (confinement prerequisite)
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+          # The native helper needs CLONE_NEWUSER to build its confinement
+          # namespaces; with the restriction active, unshare() succeeds but
+          # mapping the uid is denied ("write uid_map: Operation not permitted").
+          # This is a hosted-runner prerequisite, not a Pluton policy toggle: if
+          # the capability cannot be enabled and proven, this step fails and the
+          # gate below still fails closed.
+          restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
+          echo "kernel.apparmor_restrict_unprivileged_userns=$restrict"
+          if [ "$restrict" = "1" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Prove the exact capabilities the helper probe and selftest rely on.
+          unshare -Ur true
+          unshare -Urm true
+          unshare -Urn true
+          unshare -Urp true
+          echo "unprivileged user, mount, network and PID namespaces: available"
+
       - name: Validate native helper identity & probe
         run: |
           set -eo pipefail

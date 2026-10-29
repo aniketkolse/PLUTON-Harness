@@ -357,7 +357,12 @@ The repository enforces verification confinement guarantees on every push and pu
 request via a dedicated Linux CI workflow (`.github/workflows/linux-security.yml`).
 
 The gate runs on a standard Ubuntu 24.04 runner with kernel Landlock ABI >= 3,
-unprivileged user namespaces, and seccomp enabled:
+unprivileged user namespaces, and seccomp enabled. Ubuntu 24.04 restricts
+unprivileged user namespaces through AppArmor, so the workflow first disables
+`kernel.apparmor_restrict_unprivileged_userns` (a runner prerequisite) and then
+proves `unshare -Ur/-Urm/-Urn/-Urp` before running any gate. If the capability
+cannot be enabled or proven, the job fails; Pluton never treats a missing kernel
+capability as enforced confinement.
 
 1. **Helper Identity & Integrity:** Validates that the committed native helper
    `native/landlock-run/landlock-run-linux-x64` matches the SHA-256 and size
