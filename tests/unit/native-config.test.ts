@@ -12,8 +12,39 @@ import {
   createNativeExecutionProvider,
   nativeSpecForMuse,
 } from '../../src/execution/factory.ts'
+import type { NativeCapabilities } from '../../src/execution/policy.ts'
 
 const tmpDirs: string[] = []
+
+/**
+ * Explicit capability fixtures keep these config-gate tests independent of the
+ * host kernel and of whether the checked-out helper happens to be executable.
+ * Actual detection is covered by native-capabilities.test.ts.
+ */
+const linuxCapabilities: NativeCapabilities = {
+  platform: 'linux',
+  arch: 'x64',
+  kernelRelease: '6.8.0-test',
+  landlockAbi: 6,
+  userNamespaces: true,
+  mountNamespaces: true,
+  networkNamespaces: true,
+  pidNamespaces: true,
+  cgroupV2: true,
+  helper: { available: true, version: '0.1.0', sha256: 'a'.repeat(64) },
+  runtimeRoots: [],
+}
+
+const linuxWithoutHelper: NativeCapabilities = {
+  ...linuxCapabilities,
+  landlockAbi: null,
+  helper: { available: false, version: null, sha256: null, detail: 'native helper is missing' },
+}
+
+const linuxWithoutNetworkNamespaces: NativeCapabilities = {
+  ...linuxCapabilities,
+  networkNamespaces: false,
+}
 
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
@@ -111,36 +142,48 @@ describe('native execution config', () => {
     expect(docker.sandbox.kind).toBe('docker')
   })
 
-  it('refuses native without explicit partial-enforcement acknowledgement', () => {
+  it('does not gate on deprecated acknowledgement keys', () => {
     const dir = root()
     const loaded = loadConfig(
       (() => {
         const raw = nativeConfig()
         raw.sandbox.native.acknowledge_partial_enforcement = false
+        raw.sandbox.native.acknowledge_host_network = false
         return writeConfig(dir, raw)
       })(),
     )
-    expect(() => assertNativeSandboxConfig(loaded.config)).toThrow(SandboxUnavailableError)
-    expect(() =>
-      createNativeExecutionProvider({ config: loaded.config, rootDir: dir }),
-    ).toThrow(SandboxUnavailableError)
+    // docs/MIGRATION.md: the deprecated keys still parse but grant/gate nothing.
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxCapabilities)).not.toThrow()
+    expect(
+      createNativeExecutionProvider({
+        config: loaded.config,
+        rootDir: dir,
+        capabilities: linuxCapabilities,
+      }),
+    ).toBeDefined()
   })
 
-  it('refuses native network policies it cannot enforce', () => {
+  it('accepts a restricted network policy only when the host can enforce it', () => {
     const dir = root()
     const restricted = nativeConfig()
     restricted.runtime.network_policy = 'restricted'
     const loaded = validateConfig(restricted, dir, join(dir, 'pluton.yaml'))
-    expect(() => assertNativeSandboxConfig(loaded.config)).toThrow(SandboxUnavailableError)
-    expect(() => assertNativeSandboxConfig(loaded.config)).toThrow(/network_policy: open/)
+
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxCapabilities)).not.toThrow()
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutNetworkNamespaces)).toThrow(
+      SandboxUnavailableError,
+    )
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutNetworkNamespaces)).toThrow(
+      /network_policy: open/,
+    )
   })
 
-  it('refuses an unacknowledged host-network mapping', () => {
+  it('fails closed when the verified helper is unavailable', () => {
     const dir = root()
-    const raw = nativeConfig()
-    raw.sandbox.native.acknowledge_host_network = false
-    const loaded = validateConfig(raw, dir, join(dir, 'pluton.yaml'))
-    expect(() => assertNativeSandboxConfig(loaded.config)).toThrow(SandboxUnavailableError)
+    const loaded = validateConfig(nativeConfig(), dir, join(dir, 'pluton.yaml'))
+    expect(() => assertNativeSandboxConfig(loaded.config, linuxWithoutHelper)).toThrow(
+      SandboxUnavailableError,
+    )
   })
 
   it('tolerates unparsed native config with missing optional fields without NaN session timeouts', () => {
@@ -160,7 +203,11 @@ describe('native execution config', () => {
     delete (raw.sandbox.native as Record<string, unknown>).session_timeout_minutes
     delete (raw.sandbox.native as Record<string, unknown>).terminate_grace_seconds
     delete (raw.sandbox.native as Record<string, unknown>).max_output_bytes
-    const provider = createNativeExecutionProvider({ config: raw as any, rootDir: dir })
+    const provider = createNativeExecutionProvider({
+      config: raw as any,
+      rootDir: dir,
+      capabilities: linuxCapabilities,
+    })
     expect(provider).toBeDefined()
     expect(provider['sessionTimeoutMs']).toBe(0)
     expect(provider['terminateGraceMs']).toBe(2000)
