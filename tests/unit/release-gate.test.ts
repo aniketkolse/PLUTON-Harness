@@ -6,6 +6,7 @@ import {
   findContentLeaks,
   findForbiddenPackFiles,
   formatErrorDetail,
+  formatFailureTail,
   parseChangedFiles,
   parsePackManifest,
   renderResultLine,
@@ -73,6 +74,26 @@ describe('formatErrorDetail', () => {
     const detail = formatErrorDetail(many, 3)
     expect(detail.split(' | ')).toHaveLength(3)
     expect(detail).toContain('line 19')
+  })
+})
+
+describe('formatFailureTail', () => {
+  it('preserves indented stack traces and bounds the tail', () => {
+    const err = {
+      stdout: Array.from({ length: 200 }, (_, i) => `test line ${i}`).join('\n'),
+      stderr: 'Unhandled Rejection\nError: database is not open\n    at Store.getProject (store.ts:342:25)',
+    }
+    const tail = formatFailureTail(err, 120)
+    expect(tail).toHaveLength(120)
+    expect(tail).toContain('Unhandled Rejection')
+    expect(tail).toContain('Error: database is not open')
+    expect(tail).toContain('    at Store.getProject (store.ts:342:25)')
+    expect(tail).not.toContain('test line 0')
+  })
+
+  it('returns no dump when the error carries no captured output', () => {
+    expect(formatFailureTail(new Error('boom'))).toEqual([])
+    expect(formatFailureTail(null)).toEqual([])
   })
 })
 

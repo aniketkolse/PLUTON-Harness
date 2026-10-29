@@ -48,6 +48,7 @@ import {
   findContentLeaks,
   findForbiddenPackFiles,
   formatErrorDetail,
+  formatFailureTail,
   parseChangedFiles,
   parsePackManifest,
   renderResultLine,
@@ -256,11 +257,20 @@ try {
   const tail = out.split('\n').filter((l) => l.includes('Tests') || l.includes('Test Files')).slice(-2).join(' | ')
   record('check', 'npm run check (typecheck + tests)', PASS, tail || 'green')
 } catch (err) {
+  // The recorded detail is one bounded line; print the full captured tail so a
+  // stack trace (e.g. an unhandled rejection reported after the final test)
+  // survives into CI logs and can be diagnosed instead of guessed at.
+  const tail = formatFailureTail(err, 160)
+  if (tail.length > 0) {
+    console.error('\n--- npm run check captured output (tail) ---')
+    console.error(tail.join('\n'))
+    console.error('--- end captured output ---\n')
+  }
   record(
     'check',
     'npm run check (typecheck + tests)',
     FAIL,
-    formatErrorDetail(err),
+    formatErrorDetail(err, 12),
     'fix the failing test/typecheck before any release attempt',
   )
 }

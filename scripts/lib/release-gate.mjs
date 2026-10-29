@@ -88,6 +88,25 @@ export function formatErrorDetail(err, maxLines = 6) {
     .join(' | ')
 }
 
+/**
+ * Full captured stdout/stderr tail of a failed subprocess. `formatErrorDetail`
+ * is the bounded one-line summary; this preserves stack traces and test diffs
+ * for the diagnostic dump the release gate prints before recording a failure.
+ */
+export function formatFailureTail(err, maxLines = 120) {
+  if (err === null || typeof err !== 'object') return []
+  const parts = []
+  if (err.stdout) parts.push(String(err.stdout))
+  if (err.stderr) parts.push(String(err.stderr))
+  if (parts.length === 0) return []
+  return parts
+    .join('\n')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/, ''))
+    .filter((line) => line !== '')
+    .slice(-maxLines)
+}
+
 /** Packaged files that must never ship (tests, local state, databases, logs, tarballs). */
 export function findForbiddenPackFiles(files) {
   const forbiddenDir = /(^|\/)(tests?|coverage|\.pluton|node_modules)(\/|$)/i

@@ -40,6 +40,7 @@ export const STATUS: {
 export function parsePackManifest(raw: string): { files: string[] }
 export function parseChangedFiles(raw: string): string[]
 export function formatErrorDetail(err: unknown, maxLines?: number): string
+export function formatFailureTail(err: unknown, maxLines?: number): string[]
 export function findForbiddenPackFiles(files: string[]): string[]
 export function buildLeakPatterns(opts: {
   homeDir: string
