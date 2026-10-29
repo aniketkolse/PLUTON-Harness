@@ -350,6 +350,23 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 /**
+ * Node engine overrides (.js/.mjs/.cjs) are read, not executed, by the
+ * runtime. Their imports can live anywhere in the containing package, so the
+ * nearest package root is the smallest root that keeps the engine loadable.
+ * Falls back to the script's own directory when no package.json exists.
+ */
+function engineScriptRoot(script: string): string {
+  const entryDir = dirname(realExisting(script))
+  let candidate = entryDir
+  for (;;) {
+    if (existsSync(join(candidate, 'package.json'))) return candidate
+    const parent = dirname(candidate)
+    if (parent === candidate) return entryDir
+    candidate = parent
+  }
+}
+
+/**
  * Decode captured bytes without allowing UTF-8 replacement characters to
  * expand the result past the configured byte cap. When the cap cuts a
  * multibyte sequence, trim the partial sequence before decoding; the fallback
@@ -1343,11 +1360,25 @@ class NativeExecutionSession implements ExecutionSession {
     const systemRead = existingDirs(SYSTEM_READ_ROOTS)
     const systemExec = existingDirs(SYSTEM_EXEC_ROOTS)
     const commandDir = existsSync(command) ? dirname(realExisting(command)) : dirname(resolve(command))
+    // A .js/.mjs/.cjs engine override is executed by Node with the script as
+    // argv[0]; the confined runtime must be able to read the script and its
+    // package imports. Only this trusted engine entry is added, never
+    // arbitrary argument paths.
+    const scriptArg = args[0]
+    const entryRoot =
+      scriptArg !== undefined &&
+      isAbsolute(scriptArg) &&
+      /\.(?:m?js|cjs)$/i.test(scriptArg) &&
+      existsSync(scriptArg) &&
+      statSync(scriptArg).isFile()
+        ? engineScriptRoot(scriptArg)
+        : null
 
     const readRoots = dedupe([
       ...this.spec.allowedRoots,
       ...caps.runtimeRoots.filter((root) => existsSync(root)),
       ...systemRead,
+      ...(entryRoot !== null ? [entryRoot] : []),
     ])
     const execRoots = dedupe([
       ...systemExec,
@@ -1360,6 +1391,16 @@ class NativeExecutionSession implements ExecutionSession {
         ? dedupe([this.spec.hostWorkdir, this.spec.hostEngineHome, this.tmpDir])
         : [this.tmpDir]
 
+    // A private tmpfs over /tmp would hide any session path that legitimately
+    // lives there (e.g. a project created under the system temp directory).
+    // Landlock still grants no access to /tmp paths outside the declared
+    // roots; deferring the tmpfs mount only avoids hiding allowed content.
+    const sessionPaths = dedupe([cwd, ...readRoots, ...writeRoots])
+    const privateTmp =
+      caps.mountNamespaces &&
+      this.spec.mode !== 'unconfined' &&
+      !sessionPaths.some((root) => isInside('/tmp', root))
+
     return {
       helper_abi: HELPER_ABI,
       mode: this.spec.mode === 'read-only' ? 'read-only' : 'workspace-write',
@@ -1371,7 +1412,7 @@ class NativeExecutionSession implements ExecutionSession {
       write_roots: writeRoots,
       exec_roots: execRoots,
       tmp_dir: this.tmpDir,
-      private_tmp: caps.mountNamespaces && this.spec.mode !== 'unconfined',
+      private_tmp: privateTmp,
       ...(this.spec.network === 'restricted' && this.spec.bridge !== undefined
         ? { bridge: { unix_path: this.spec.bridge.unixPath, port: this.spec.bridge.port } }
         : {}),
