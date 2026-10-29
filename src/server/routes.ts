@@ -27,6 +27,7 @@ import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { diffWorktreePatch } from '../workspace/trusted-git.ts'
 import { PLUTON_VERSION } from '../version.ts'
 import { safeResolvePath, protectedWorkspaceSegment } from './security.ts'
+import { buildRunActivity } from './activity.ts'
 import { pickNativeFolder } from './folder-picker.ts'
 import { describeWorkspace, resolveWorkspaceRoot } from './workspace.ts'
 import type { ServerEventBroadcaster } from './events.ts'
@@ -48,7 +49,10 @@ import { PlutonToolBridge, toolBridgeLimitsFromRuntime } from '../tools/bridge.t
 import { ToolHttpServer } from '../tools/http-transport.ts'
 import { bridgeEndpointOf } from '../tools/http-transport.ts'
 import { isSupervisorStale, wakeSupervisor } from '../orchestrator/supervisor.ts'
+import { WorkerMessageBus } from '../orchestrator/messages.ts'
+import { WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { TaskGraph } from '../orchestrator/task-graph.ts'
+import { buildTaskDetail } from './task-detail.ts'
 import type {
   HealthResponse,
   McpServerStatus,
@@ -638,6 +642,126 @@ export class ApiRouter {
         return true
       }
 
+      // 10b. Run activity (durable-event progress feed; seq-resumable)
+      const activityMatch = pathname.match(/^\/api\/runs\/([^/]+)\/activity$/)
+      if (activityMatch && method === 'GET') {
+        const runId = activityMatch[1]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const rawAfter = Number(parsedUrl.searchParams.get('afterSeq') ?? '0')
+        const afterSeq = Number.isFinite(rawAfter) && rawAfter > 0 ? Math.floor(rawAfter) : 0
+        const rawLimit = Number(parsedUrl.searchParams.get('limit') ?? '200')
+        const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 200
+        // `tail=1` selects the newest window (initial page load). An explicit
+        // cursor is always forward-only, so reconnect recovery never skips a
+        // gap by jumping to the tail.
+        const tail = afterSeq === 0 && parsedUrl.searchParams.get('tail') === '1'
+        const events = tail
+          ? this.ctx.store.listEvents(runId, { limit }).slice().reverse()
+          : this.ctx.store.listEventsSince(runId, afterSeq, limit)
+        const activity = buildRunActivity(this.ctx.store, events)
+        const latestSeq = events.length > 0 ? events[events.length - 1]!.seq : afterSeq
+        this.sendJson(res, 200, {
+          ok: true,
+          activity: { runId, activity, latestSeq },
+        })
+        return true
+      }
+
+      // 10c. Worker detail (authoritative task view for the inspector modal)
+      const taskDetailMatch = pathname.match(/^\/api\/runs\/([^/]+)\/tasks\/([^/]+)\/detail$/)
+      if (taskDetailMatch && method === 'GET') {
+        const runId = taskDetailMatch[1]!
+        const taskId = taskDetailMatch[2]!
+        const detail = await buildTaskDetail(this.ctx.store, runId, taskId, {
+          workspacesRoot: workspaceDir(this.ctx.loaded.rootDir),
+        })
+        if (detail === null) {
+          this.sendJson(res, 404, { ok: false, error: `task '${taskId}' not found in run '${runId}'` })
+          return true
+        }
+        this.sendJson(res, 200, { ok: true, detail })
+        return true
+      }
+
+      // 10d. Operator → worker message (durable, delivered at the worker's
+      // next `ship.inbox` call). Read-only for the task: this never cancels it.
+      const taskMessageMatch = pathname.match(/^\/api\/runs\/([^/]+)\/tasks\/([^/]+)\/message$/)
+      if (taskMessageMatch && method === 'POST') {
+        const runId = taskMessageMatch[1]!
+        const taskId = taskMessageMatch[2]!
+        const run = this.ctx.store.getRunOrNull(runId)
+        if (!run) {
+          this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
+          return true
+        }
+        const task = this.ctx.store.getTaskOrNull(taskId)
+        if (task === null || task.runId !== runId) {
+          this.sendJson(res, 404, { ok: false, error: `task '${taskId}' not found in run '${runId}'` })
+          return true
+        }
+        if (task.assigneeShipId === null) {
+          this.sendJson(res, 409, { ok: false, error: 'task has no assignee Ship to message' })
+          return true
+        }
+        const assigneeShipId = task.assigneeShipId
+        const assignee = this.ctx.store.getShip(assigneeShipId)
+        if (assignee === null || !assignee.enabled) {
+          this.sendJson(res, 409, { ok: false, error: 'task assignee Ship is not enabled' })
+          return true
+        }
+        const payload = await this.readJsonBody<{ body?: string }>(req)
+        const body = typeof payload.body === 'string' ? payload.body : ''
+        const bus = new WorkerMessageBus({
+          store: this.ctx.store,
+          projectId: this.ctx.projectId,
+          runId,
+          wakeups: new WakeupRegistry(),
+        })
+        try {
+          const message = bus.sendOperator({
+            recipientShipId: assigneeShipId,
+            recipientTaskId: task.id,
+            body,
+          })
+          // The bus persisted the durable `worker.message` event: publish the
+          // live frame without a second write.
+          this.ctx.broadcaster.broadcastWorkerEvent(
+            {
+              type: 'worker.message',
+              runId,
+              taskId: message.recipientTaskId ?? message.recipientShipId,
+              role: 'worker',
+              shipName: message.recipientLabel,
+              payload: {
+                messageId: message.id,
+                seq: message.seq,
+                senderShipId: message.senderShipId,
+                senderLabel: message.senderLabel,
+                senderTaskId: message.senderTaskId,
+                recipientShipId: message.recipientShipId,
+                recipientLabel: message.recipientLabel,
+                recipientTaskId: message.recipientTaskId,
+                kind: message.kind,
+                body: message.body,
+                replyTo: message.replyTo,
+                createdAt: message.createdAt,
+              },
+            },
+            this.ctx.store,
+            this.ctx.projectId,
+            { persist: false },
+          )
+          this.sendJson(res, 200, { ok: true, message })
+        } finally {
+          bus.close()
+        }
+        return true
+      }
+
       // 11. Approvals list
       if (pathname === '/api/approvals' && method === 'GET') {
         // Shared sweep: flips overdue records, appends approval.expired events
@@ -1224,6 +1348,13 @@ export class ApiRouter {
     return {
       onWorkerEvent: (event) => {
         this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId)
+      },
+      onWorkerMessage: (event) => {
+        // The bus already appended the durable `worker.message` event: publish
+        // the live frame without persisting a duplicate.
+        this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId, {
+          persist: false,
+        })
       },
     }
   }

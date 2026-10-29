@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
 import { admitTask } from '../../src/orchestrator/task-graph.ts'
+import { WorkerMessageBus } from '../../src/orchestrator/messages.ts'
+import { WakeupRegistry } from '../../src/orchestrator/wakeups.ts'
 import { checkServerHealth, readServerInstance } from '../../src/server/instance.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
 
@@ -610,6 +612,329 @@ describe('Pluton application server REST & SSE API', () => {
         }
         expect(wsData.workspace.activeRun?.id).toBe(run.id)
         expect(wsData.workspace.activeRun?.state).toBe('active')
+      } finally {
+        store.close()
+      }
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('serves a seq-resumable run activity feed from the durable event log', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const loaded = loadConfig(rootDir)
+      const { store, projectId } = bootstrapStore(loaded)
+      try {
+        const run = store.createRun({
+          projectId,
+          goal: 'activity endpoint test',
+          origin: 'cli',
+          requestedBy: 'operator',
+          acceptanceCriteria: [],
+          managerMuseId: 'supervisor',
+          budget: {
+            maxConcurrentWorkers: 2,
+            maxTasks: 10,
+            maxDelegationDepth: 2,
+            maxRunMinutes: 10,
+            defaultTaskMinutes: 5,
+          },
+        })
+        store.setRunState(run.id, 'active')
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          type: 'run.started',
+          payload: { goal: 'activity endpoint test' },
+        })
+        const task = admitTask(
+          store,
+          {
+            runId: run.id,
+            parentTaskId: null,
+            title: 'inspect the parser',
+            brief: 'find the real behaviour',
+            acceptanceCriteria: [],
+            assigneeMuseId: 'supervisor',
+          },
+          { maxChildrenPerTask: 5 },
+        )
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'worker.started',
+          payload: { role: 'supervisor', shipName: 'Supervisor' },
+        })
+
+        const firstRes = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}/activity`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(firstRes.status).toBe(200)
+        const first = (await firstRes.json()) as {
+          ok: boolean
+          activity: { runId: string; latestSeq: number; activity: Array<{ seq: number; type: string; text: string }> }
+        }
+        expect(first.ok).toBe(true)
+        expect(first.activity.runId).toBe(run.id)
+        expect(first.activity.activity.map((item) => item.type)).toEqual([
+          'run.started',
+          'task.admitted',
+          'worker.started',
+        ])
+        expect(first.activity.activity[1]!.text).toContain('inspect the parser')
+
+        // Resume past the page: nothing new yet.
+        const idleRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/activity?afterSeq=${String(first.activity.latestSeq)}`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        const idle = (await idleRes.json()) as { activity: { latestSeq: number; activity: unknown[] } }
+        expect(idle.activity.activity).toHaveLength(0)
+        expect(idle.activity.latestSeq).toBe(first.activity.latestSeq)
+
+        // A later durable event is returned exactly once from the cursor.
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'worker.completed',
+          payload: { role: 'supervisor', shipName: 'Supervisor', summary: 'parser inspected' },
+        })
+        const nextRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/activity?afterSeq=${String(first.activity.latestSeq)}`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        const next = (await nextRes.json()) as {
+          activity: { latestSeq: number; activity: Array<{ seq: number; type: string; text: string; detail?: string }> }
+        }
+        expect(next.activity.activity.map((item) => item.type)).toEqual(['worker.completed'])
+        expect(next.activity.activity[0]!.seq).toBeGreaterThan(first.activity.latestSeq)
+        expect(next.activity.activity[0]!.detail).toBe('parser inspected')
+
+        // Initial page load asks for the newest window, not the oldest 200.
+        const tailRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/activity?tail=1&limit=2`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        const tail = (await tailRes.json()) as {
+          activity: { latestSeq: number; activity: Array<{ seq: number; type: string }> }
+        }
+        expect(tail.activity.activity.map((item) => item.type)).toEqual(['worker.started', 'worker.completed'])
+        expect(tail.activity.latestSeq).toBe(next.activity.latestSeq)
+
+        const missing = await fetch(`http://127.0.0.1:${server.port}/api/runs/run_missing/activity`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(missing.status).toBe(404)
+      } finally {
+        store.close()
+      }
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('serves authoritative worker detail and accepts an operator message without cancelling the task', async () => {
+    const { rootDir, appServer } = setupTestProject()
+    const server = await appServer
+    try {
+      const loaded = loadConfig(rootDir)
+      const { store, projectId } = bootstrapStore(loaded)
+      try {
+        const run = store.createRun({
+          projectId,
+          goal: 'worker detail endpoint test',
+          origin: 'cli',
+          requestedBy: 'operator',
+          acceptanceCriteria: [],
+          managerMuseId: 'supervisor',
+          budget: {
+            maxConcurrentWorkers: 2,
+            maxTasks: 10,
+            maxDelegationDepth: 2,
+            maxRunMinutes: 10,
+            defaultTaskMinutes: 5,
+          },
+        })
+        store.setRunState(run.id, 'active')
+        const task = admitTask(
+          store,
+          {
+            runId: run.id,
+            parentTaskId: null,
+            title: 'implement the parser',
+            brief: 'parse the real format, not a guess',
+            acceptanceCriteria: ['parses valid input', 'rejects malformed input'],
+            assigneeMuseId: 'supervisor',
+            writeScope: ['src/parser.ts'],
+          },
+          { maxChildrenPerTask: 5 },
+        )
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'worker.started',
+          payload: { role: 'supervisor', shipName: 'Supervisor' },
+        })
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'worker.progress',
+          payload: { step: 'read src/parser.ts' },
+        })
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'task.retry_scheduled',
+          payload: { reason: 'tests failed' },
+        })
+        store.appendEvent({
+          projectId,
+          runId: run.id,
+          taskId: task.id,
+          type: 'worker.message',
+          payload: {
+            messageId: 'msg_detail_fixture',
+            senderShipId: 'supervisor',
+            senderLabel: 'Supervisor',
+            senderTaskId: null,
+            recipientShipId: task.assigneeShipId,
+            recipientLabel: 'Supervisor',
+            recipientTaskId: task.id,
+            kind: 'instruction',
+            body: 'focus on the parser',
+            replyTo: null,
+            createdAt: 1_700_000_000_000,
+          },
+        })
+
+        const detailRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/tasks/${task.id}/detail`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        expect(detailRes.status).toBe(200)
+        const detailBody = (await detailRes.json()) as {
+          ok: boolean
+          detail: {
+            task: { id: string; title: string; state: string; assigneeShipId: string | null; writeScope: string[] }
+            acceptanceCriteria: string[]
+            toolCalls: Array<{ step: string }>
+            messages: Array<{ id: string; direction: string; body: string; kind: string }>
+            retries: { retryScheduled: number }
+            activity: Array<{ type: string }>
+            canMessage: boolean
+          }
+        }
+        expect(detailBody.ok).toBe(true)
+        expect(detailBody.detail.task.id).toBe(task.id)
+        expect(detailBody.detail.task.title).toBe('implement the parser')
+        expect(detailBody.detail.task.writeScope).toEqual(['src/parser.ts'])
+        expect(detailBody.detail.acceptanceCriteria).toEqual(['parses valid input', 'rejects malformed input'])
+        expect(detailBody.detail.toolCalls.map((call) => call.step)).toEqual(['read src/parser.ts'])
+        expect(detailBody.detail.retries.retryScheduled).toBe(1)
+        expect(detailBody.detail.activity.map((item) => item.type)).toEqual(
+          expect.arrayContaining(['worker.started', 'worker.message']),
+        )
+        expect(detailBody.detail.messages).toHaveLength(1)
+        expect(detailBody.detail.messages[0]!.id).toBe('msg_detail_fixture')
+        expect(detailBody.detail.messages[0]!.direction).toBe('in')
+        expect(detailBody.detail.canMessage).toBe(true)
+
+        // A foreign task id in this run is a 404, never a fabricated view.
+        const missing = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/tasks/task_missing/detail`,
+          { headers: { 'x-pluton-token': server.token } },
+        )
+        expect(missing.status).toBe(404)
+
+        // Subscribe BEFORE the operator message: the frame is live-only, so a
+        // duplicate durable write would be visible as a second event below.
+        const sseRes = await fetch(`http://127.0.0.1:${server.port}/api/events`, {
+          headers: { 'x-pluton-token': server.token },
+        })
+        expect(sseRes.status).toBe(200)
+        const reader = sseRes.body!.getReader()
+        const readLoop = readSseFrames(
+          reader,
+          (frames) =>
+            frames.some(
+              (frame) =>
+                frame.type === 'worker.message' &&
+                (frame.payload as { body?: string } | undefined)?.body === 'please report the parser findings',
+            ),
+          10_000,
+        )
+
+        const messageRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/tasks/${task.id}/message`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+            body: JSON.stringify({ body: 'please report the parser findings' }),
+          },
+        )
+        expect(messageRes.status).toBe(200)
+        const messageBody = (await messageRes.json()) as {
+          ok: boolean
+          message: { id: string; kind: string; senderLabel: string; recipientTaskId: string | null; body: string }
+        }
+        expect(messageBody.message.kind).toBe('instruction')
+        expect(messageBody.message.senderLabel).toBe('operator')
+        expect(messageBody.message.recipientTaskId).toBe(task.id)
+        expect(messageBody.message.body).toBe('please report the parser findings')
+
+        const { frames, timedOut } = await readLoop
+        expect(timedOut, `no live worker.message frame; got ${JSON.stringify(frames)}`).toBe(false)
+        await reader.cancel()
+
+        // Exactly one durable message event: the live frame persisted nothing.
+        const messageEvents = store.listEvents(run.id, { type: 'worker.message', limit: 20 })
+        expect(messageEvents.filter((e) => (e.payload as { messageId?: string }).messageId === messageBody.message.id)).toHaveLength(1)
+
+        // A worker bus on the same run (another process) sees it from the log.
+        const bus = new WorkerMessageBus({
+          store,
+          projectId,
+          runId: run.id,
+          wakeups: new WakeupRegistry(),
+        })
+        try {
+          const delivered = await bus.inbox({
+            recipientShipId: task.assigneeShipId!,
+            taskId: task.id,
+            waitMs: 0,
+          })
+          expect(delivered.map((m) => m.body)).toEqual([
+            'focus on the parser',
+            'please report the parser findings',
+          ])
+          // At-most-once: the durable ack suppresses redelivery.
+          const again = await bus.inbox({
+            recipientShipId: task.assigneeShipId!,
+            taskId: task.id,
+            waitMs: 0,
+          })
+          expect(again).toEqual([])
+        } finally {
+          bus.close()
+        }
+
+        // Empty body is a validation failure, not a blank instruction.
+        const emptyRes = await fetch(
+          `http://127.0.0.1:${server.port}/api/runs/${run.id}/tasks/${task.id}/message`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-pluton-token': server.token },
+            body: JSON.stringify({ body: '   ' }),
+          },
+        )
+        expect(emptyRes.status).toBe(400)
       } finally {
         store.close()
       }

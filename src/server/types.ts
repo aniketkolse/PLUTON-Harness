@@ -121,6 +121,123 @@ export interface RunDetailView {
   supervisorStale: boolean
 }
 
+export type RunActivityTone = 'info' | 'success' | 'warning' | 'error' | 'message'
+
+/**
+ * One concise, user-facing progress item in the main conversation. Derived
+ * from a durable event; `seq` is the event seq, so reconnects can resume with
+ * `afterSeq` and the client can dedupe without a second progress state.
+ */
+export interface RunActivityItem {
+  seq: number
+  /** Durable event id. */
+  id: string
+  runId: string
+  taskId: string | null
+  type: string
+  /** ISO timestamp of the durable event. */
+  at: string
+  actor: 'supervisor' | 'worker' | 'system'
+  actorLabel: string
+  text: string
+  tone: RunActivityTone
+  detail?: string
+}
+
+export interface RunActivityView {
+  runId: string
+  /** Oldest first. */
+  activity: RunActivityItem[]
+  /** Highest seq returned (0 when none); resume from here. */
+  latestSeq: number
+}
+
+/** One worker message as shown in the task detail view. */
+export interface TaskDetailMessage {
+  id: string
+  seq: number
+  /** Relative to the task being viewed. */
+  direction: 'in' | 'out'
+  senderShipId: string | null
+  senderLabel: string
+  senderTaskId: string | null
+  recipientShipId: string
+  recipientLabel: string
+  recipientTaskId: string | null
+  kind: string
+  body: string
+  replyTo: string | null
+  createdAt: number
+}
+
+export interface TaskDetailToolCall {
+  seq: number
+  at: string
+  step: string
+  isError: boolean
+}
+
+export interface TaskDetailCheck {
+  name: string
+  status: string
+  exitCode: number | null
+  durationMs: number | null
+  attempt: number
+  note: string | null
+}
+
+/** Authoritative per-task detail for the worker inspector modal. */
+export interface TaskDetailView {
+  runId: string
+  runState: string
+  task: {
+    id: string
+    title: string
+    brief: string
+    state: string
+    attempt: number
+    parentTaskId: string | null
+    assigneeShipId: string | null
+    assigneeName: string | null
+    role: string | null
+    engine: string | null
+    model: string | null
+    workspaceId: string | null
+    workspacePath: string | null
+    writeScope: string[]
+    dependsOn: string[]
+    createdAt: string
+    startedAt: string | null
+    completedAt: string | null
+  }
+  acceptanceCriteria: string[]
+  activity: RunActivityItem[]
+  supervisorActivity: RunActivityItem[]
+  messages: TaskDetailMessage[]
+  toolCalls: TaskDetailToolCall[]
+  files: {
+    changed: string[]
+    untracked: string[]
+    truncated: boolean
+  }
+  verification: {
+    verdict: string | null
+    checks: TaskDetailCheck[]
+    criteria: JsonValue | null
+    tamper: JsonValue | null
+    evidence: JsonValue | null
+  }
+  retries: {
+    attempts: number
+    retryScheduled: number
+    revisions: number
+    leaseBlockers: number
+  }
+  result: JsonValue | null
+  failure: JsonValue | null
+  canMessage: boolean
+}
+
 export const WORKER_EVENT_TYPES = [
   'worker.created',
   'worker.started',
@@ -131,6 +248,7 @@ export const WORKER_EVENT_TYPES = [
   'worker.completed',
   'worker.failed',
   'worker.cancelled',
+  'worker.message',
 ] as const
 
 export type WorkerEventType = (typeof WORKER_EVENT_TYPES)[number]
@@ -159,6 +277,7 @@ export type ServerSSEEvent =
   | { type: 'approval_decided'; approval: ApprovalRecord }
   | { type: 'run_state'; runId: string; state: string; goal: string; error?: string; summary?: string }
   | { type: 'task_state'; taskId: string; runId: string; state: string; title: string }
+  | { type: 'run_activity'; activity: RunActivityItem }
   | { type: 'workspace_changed'; sessionId: string; workspaceRoot: string | null }
   | { type: 'heartbeat'; timestamp: number }
   | WorkerSSEEvent

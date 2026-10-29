@@ -123,7 +123,12 @@ export class ServerEventBroadcaster extends EventEmitter {
     }
   }
 
-  broadcastWorkerEvent(event: WorkerSSEEvent, store?: Store, projectId?: string): void {
+  broadcastWorkerEvent(
+    event: WorkerSSEEvent,
+    store?: Store,
+    projectId?: string,
+    opts?: { persist?: boolean },
+  ): void {
     const timestamp = event.timestamp ?? Date.now()
     const sanitizedPayload = sanitizeWorkerPayload(event.payload)
     const finalEvent: WorkerSSEEvent = {
@@ -154,7 +159,7 @@ export class ServerEventBroadcaster extends EventEmitter {
       effectiveProjectId = 'default'
     }
 
-    if (effectiveStore && typeof effectiveStore.appendEvent === 'function') {
+    if (opts?.persist !== false && effectiveStore && typeof effectiveStore.appendEvent === 'function') {
       try {
         effectiveStore.appendEvent({
           projectId: effectiveProjectId,
@@ -165,6 +170,7 @@ export class ServerEventBroadcaster extends EventEmitter {
           type: finalEvent.type,
           payload: {
             role: finalEvent.role,
+            ...(finalEvent.shipName !== undefined ? { shipName: finalEvent.shipName } : {}),
             ...(finalEvent.model !== undefined ? { model: finalEvent.model } : {}),
             ...(finalEvent.workspace !== undefined ? { workspace: finalEvent.workspace } : {}),
             ...(finalEvent.payload !== undefined ? { payload: finalEvent.payload } : {}),

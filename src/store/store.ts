@@ -1650,6 +1650,19 @@ export class Store {
     return row?.seq ?? 0
   }
 
+  /** One run's events strictly after `afterSeq`, oldest first (activity recovery). */
+  listEventsSince(runId: string, afterSeq: number, limit = 200, type?: string): EventRecord[] {
+    const rows =
+      type === undefined
+        ? (this.db
+            .prepare('SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?')
+            .all(runId, afterSeq, limit) as Row[])
+        : (this.db
+            .prepare('SELECT * FROM events WHERE run_id = ? AND seq > ? AND type = ? ORDER BY seq ASC LIMIT ?')
+            .all(runId, afterSeq, type, limit) as Row[])
+    return rows.map(rowToEvent)
+  }
+
   /** One run's most recent events, newest first (readers look back from now). */
   listEvents(runId: string, opts: { type?: string; limit?: number } = {}): EventRecord[] {
     const limit = opts.limit ?? 50

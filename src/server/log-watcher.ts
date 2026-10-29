@@ -13,8 +13,10 @@
  * carrying that entity's final state.
  */
 
+import type { EventRecord } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
 import { stripControlChars } from '../util/sanitize.ts'
+import { ActivityMapper } from './activity.ts'
 import type { ServerEventBroadcaster } from './events.ts'
 import type { ServerSSEEvent } from './types.ts'
 
@@ -94,12 +96,14 @@ export class ServerLogWatcher {
     // the collapse-to-final-state contract is unchanged.
     const runIds = new Set<string>()
     const taskIds = new Set<string>()
+    const scanned: EventRecord[] = []
     for (let batch = 0; batch < MAX_BATCHES_PER_POLL; batch += 1) {
       const events = this.store.eventsSince(this.projectId, this.cursor, BATCH_LIMIT)
       for (const event of events) {
         // The cursor advances past every event read, mapped or not, so an
         // unmappable event can never wedge the watcher on a stalled backlog.
         this.cursor = event.seq
+        scanned.push(event)
         if (event.type.startsWith('run.') && event.runId !== null) {
           runIds.add(event.runId)
         } else if (event.type.startsWith('task.') && event.taskId !== null) {
@@ -169,5 +173,23 @@ export class ServerLogWatcher {
       }
     }
     for (const frame of frames.values()) this.broadcaster.broadcast(frame)
+
+    // Activity frames are one-per-durable-event (stable seq), never collapsed:
+    // the SPA dedupes by seq and uses the same mapper for REST recovery.
+    // A dangling run id (deleted history, foreign project) maps to nothing: the
+    // conversation feed never invents a run that the store cannot serve.
+    const mapper = new ActivityMapper(this.store)
+    const runExists = new Map<string, boolean>()
+    for (const event of scanned) {
+      if (event.runId === null) continue
+      let exists = runExists.get(event.runId)
+      if (exists === undefined) {
+        exists = this.store.getRunOrNull(event.runId) !== null
+        runExists.set(event.runId, exists)
+      }
+      if (!exists) continue
+      const activity = mapper.map(event)
+      if (activity !== null) this.broadcaster.broadcast({ type: 'run_activity', activity })
+    }
   }
 }

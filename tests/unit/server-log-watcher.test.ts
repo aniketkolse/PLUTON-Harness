@@ -112,6 +112,15 @@ function emitted(fake: FakeBroadcaster): ServerSSEEvent[] {
   return fake.broadcast.mock.calls.map((call) => call[0] as ServerSSEEvent)
 }
 
+/** State frames only: activity frames are asserted by the dedicated tests below. */
+function stateFrames(fake: FakeBroadcaster): ServerSSEEvent[] {
+  return emitted(fake).filter((frame) => frame.type !== 'run_activity')
+}
+
+function activityFrames(fake: FakeBroadcaster): ServerSSEEvent[] {
+  return emitted(fake).filter((frame) => frame.type === 'run_activity')
+}
+
 function makeWatcher(
   fixture: Fixture,
   fake: FakeBroadcaster,
@@ -155,7 +164,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         { type: 'run_state', runId: fixture.runId, state: 'active', goal: RUN_GOAL },
       ])
     } finally {
@@ -181,7 +190,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         {
           type: 'task_state',
           taskId: fixture.taskId,
@@ -222,7 +231,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         expect.objectContaining({
           type: 'approval_requested',
           approval: expect.objectContaining({ id: approval.id, action: 'qa.question' }),
@@ -289,13 +298,13 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
         payload: { state: 'completed', outcome: 'success' },
       })
       watcher.pollOnce()
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         { type: 'run_state', runId: fixture.runId, state: 'completed', goal: RUN_GOAL },
       ])
 
       // Idempotent: a second poll with no new events emits nothing again.
       watcher.pollOnce()
-      expect(fake.broadcast).toHaveBeenCalledTimes(1)
+      expect(stateFrames(fake)).toHaveLength(1)
     } finally {
       fixture.store.close()
     }
@@ -334,7 +343,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
         payload: { goal: RUN_GOAL },
       })
       watcher.pollOnce()
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         { type: 'run_state', runId: fixture.runId, state: 'active', goal: RUN_GOAL },
       ])
     } finally {
@@ -368,7 +377,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         {
           type: 'task_state',
           taskId: fixture.taskId,
@@ -410,7 +419,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         {
           type: 'task_state',
           taskId: fixture.taskId,
@@ -451,7 +460,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
 
       watcher.pollOnce()
 
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         {
           type: 'task_state',
           taskId: fixture.taskId,
@@ -498,7 +507,7 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
       // The cursor advanced with every batch read: the next tick delivers the
       // single frame.
       watcher.pollOnce()
-      expect(emitted(fake)).toEqual([
+      expect(stateFrames(fake)).toEqual([
         {
           type: 'task_state',
           taskId: fixture.taskId,
@@ -511,6 +520,109 @@ describe('ServerLogWatcher (CS-8: live orchestration state over SSE)', () => {
       // …and the cursor is fully advanced: a third pass is silent again.
       watcher.pollOnce()
       expect(fake.broadcast).toHaveBeenCalledTimes(1)
+    } finally {
+      fixture.store.close()
+    }
+  })
+
+  it('emits one seq-stable run_activity frame per meaningful durable event and skips chatter', () => {
+    const fixture = createFixture()
+    try {
+      const fake: FakeBroadcaster = { broadcast: vi.fn() }
+      const watcher = makeWatcher(fixture, fake)
+
+      // Delegation: a second task that depends on the fixture task.
+      admitTask(
+        fixture.store,
+        {
+          runId: fixture.runId,
+          parentTaskId: null,
+          title: 'dependent verification',
+          brief: 'verify the first task',
+          acceptanceCriteria: [],
+          assigneeMuseId: 'supervisor',
+          dependsOn: [fixture.taskId],
+        },
+        { maxChildrenPerTask: 5 },
+      )
+      fixture.store.appendEvent({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        taskId: fixture.taskId,
+        type: 'worker.message',
+        payload: {
+          senderLabel: 'Coder X',
+          recipientLabel: 'Reviewer Z',
+          kind: 'contract',
+          body: 'export readConfig(path: string): Config',
+        },
+      })
+      fixture.store.appendEvent({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        taskId: fixture.taskId,
+        type: 'token.usage',
+        payload: { inputTokens: 20, outputTokens: 5 },
+      })
+      fixture.store.appendEvent({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        taskId: fixture.taskId,
+        type: 'worker.failed',
+        payload: { role: 'coder', shipName: 'Coder X', error: 'tests failed' },
+      })
+
+      watcher.pollOnce()
+
+      const frames = activityFrames(fake)
+      expect(frames).toHaveLength(3)
+      const items = frames.map(
+        (frame) =>
+          (frame as { activity: { seq: number; type: string; text: string; actorLabel: string } }).activity,
+      )
+      expect(items.map((item) => item.type)).toEqual([
+        'task.admitted',
+        'worker.message',
+        'worker.failed',
+      ])
+      // Durable seq is the resume/dedupe key: strictly increasing, never reused.
+      expect(items[0]!.seq).toBeGreaterThan(0)
+      expect(items[1]!.seq).toBeGreaterThan(items[0]!.seq)
+      expect(items[2]!.seq).toBeGreaterThan(items[1]!.seq)
+      expect(items[0]!.text).toContain('delegated')
+      expect(items[0]!.text).toContain('dependent verification')
+      // The actor label names the sender; the text names only the recipient, so
+      // an identity is never shown twice in one row.
+      expect(items[1]!.actorLabel).toBe('Coder X')
+      expect(items[1]!.text).toContain('Reviewer Z')
+      expect(items[1]!.text).not.toContain('Coder X')
+      expect(items[1]!.text).toContain('interface contract')
+      expect(items[2]!.text).toContain('failed')
+      expect(items[2]!.text).toContain('tests failed')
+
+      // A second poll with no new events cannot duplicate activity.
+      watcher.pollOnce()
+      expect(activityFrames(fake)).toHaveLength(3)
+    } finally {
+      fixture.store.close()
+    }
+  })
+
+  it('does not emit activity for a dangling run id', () => {
+    const fixture = createFixture()
+    try {
+      const fake: FakeBroadcaster = { broadcast: vi.fn() }
+      const watcher = makeWatcher(fixture, fake)
+      fixture.store.appendEvent({
+        projectId: fixture.projectId,
+        runId: 'run_does_not_exist',
+        type: 'run.finished',
+        payload: { state: 'completed' },
+      })
+
+      watcher.pollOnce()
+
+      expect(fake.broadcast).not.toHaveBeenCalled()
     } finally {
       fixture.store.close()
     }
