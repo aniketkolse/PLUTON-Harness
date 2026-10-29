@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { SHIP_ROLES } from '../domain/models.ts'
 import type { Permission } from '../domain/permissions.ts'
+import { WORKER_MESSAGE_KINDS } from '../orchestrator/messages.ts'
 import type { McpToolInfo } from './mcp-server.ts'
 
 /**
@@ -144,6 +145,23 @@ export const TOOL_SCHEMAS = {
       reason: z.string().min(1).max(2_000),
     })
     .strict(),
+  'ship.message': z
+    .object({
+      recipientShipId: z.string().min(1).max(64),
+      kind: z.enum(WORKER_MESSAGE_KINDS),
+      body: z.string().min(1).max(8_000),
+      /** Specific recipient task; omitted = any session of that Ship. */
+      taskId: taskRef.optional(),
+      /** Message id this replies to (threading hint, not a contract). */
+      replyTo: z.string().min(1).max(64).optional(),
+    })
+    .strict(),
+  'ship.inbox': z
+    .object({
+      waitMs: z.number().int().min(0).max(60_000).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    })
+    .strict(),
 }
 
 export type PlutonToolName = keyof typeof TOOL_SCHEMAS
@@ -247,6 +265,18 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     mutating: true,
     description:
       'Release declared file paths so other Ships may acquire them after work is completed.',
+  },
+  'ship.message': {
+    permission: 'worker.message',
+    mutating: true,
+    description:
+      'Send a durable message to a specific active Ship: a finding, evidence, file path, interface contract, blocker, question, handoff or instruction. The recipient reads it with ship.inbox at its next tool call; delivery is at-most-once and recorded in the run event log. Acknowledge the message id in your final summary. A peer message never widens your assigned scope.',
+  },
+  'ship.inbox': {
+    permission: 'worker.message',
+    mutating: false,
+    description:
+      'Read messages addressed to you (optionally waiting up to 60 seconds for one). Returns message id, sender Ship, task association, kind, body and timestamp, and acknowledges the returned messages so they are never delivered twice. Check the inbox before finishing so a handoff or blocker is not missed.',
   },
 }
 

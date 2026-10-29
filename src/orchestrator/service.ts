@@ -196,6 +196,8 @@ export function settleRunCrashed(
 export interface RunDeps {
   adapterFor?: (ship: ShipRecord) => EngineAdapter
   onWorkerEvent?: (event: WorkerLifecycleEvent) => void
+  /** Live-only publish for an already-persisted worker message. */
+  onWorkerMessage?: (event: WorkerLifecycleEvent) => void
 }
 
 export interface RunSummary {
@@ -397,6 +399,7 @@ export function createRunSupervisor(args: {
     ...(args.skipManager !== undefined ? { skipManager: args.skipManager } : {}),
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
     ...(deps.onWorkerEvent !== undefined ? { onWorkerEvent: deps.onWorkerEvent } : {}),
+    ...(deps.onWorkerMessage !== undefined ? { onWorkerMessage: deps.onWorkerMessage } : {}),
     workspaceManager,
     engineEnv: () => ({}),
     mcpServerFor: (ship, taskId) => {
@@ -414,6 +417,7 @@ export function createRunSupervisor(args: {
               leaseManager: supervisor.leaseManager,
               workspaceManager,
               wakeups,
+              messageBus: supervisor.messageBus,
             })
       const { token } = http.register(bridge, {
         shipId: ship.id,

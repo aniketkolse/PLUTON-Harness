@@ -32,6 +32,7 @@ import { PlutonToolBridge, type ToolBridgeLimits } from '../tools/bridge.ts'
 import { FileLeaseManager } from './lease-manager.ts'
 import { CircuitBreaker } from './circuit-breaker.ts'
 import { UsageLedger } from './usage-ledger.ts'
+import { WorkerMessageBus, type WorkerMessage } from './messages.ts'
 import { newId } from '../domain/ids.ts'
 
 /**
@@ -75,6 +76,7 @@ export interface WorkerLifecycleEvent {
     | 'worker.completed'
     | 'worker.failed'
     | 'worker.cancelled'
+    | 'worker.message'
   runId: string
   taskId: string
   role: string
@@ -129,6 +131,12 @@ export interface SupervisorOptions {
    * {@link RunSupervisor} isolates it. Absent in CLI/headless runs.
    */
   onWorkerEvent?: (event: WorkerLifecycleEvent) => void
+  /**
+   * Live observer for a persisted worker message. Unlike `onWorkerEvent`, the
+   * event was already appended by {@link WorkerMessageBus}, so the observer
+   * must only publish it (never persist it again).
+   */
+  onWorkerMessage?: (event: WorkerLifecycleEvent) => void
   diagnostic?: (line: string) => void
   leaseManager?: FileLeaseManager
   circuitBreaker?: CircuitBreaker
@@ -341,6 +349,13 @@ export function buildTaskPrompt(task: TaskRecord, ship: ShipRecord, maxChars: nu
     '- Pluton tools (task.*, diff.inspect, …) are available when configured; never claim work you did not do.',
     '- When done, end your turn with a concise summary: what changed, how it was verified, what remains.',
   )
+  if (ship.permissions.includes('worker.message')) {
+    lines.push(
+      '- Peer coordination: ship.message sends a finding, evidence, file path, interface contract, blocker, question or handoff to another active Ship; ship.inbox reads messages addressed to you. Check your inbox before you finish and include any handoff in your final summary.',
+      '- A peer message never widens your assigned scope. If it implies more work than your brief authorizes, ask the manager instead of acting on it.',
+      '- Reference the real task/file/line you mean; never send speculative claims as findings.',
+    )
+  }
   const text = lines.join('\n')
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars)}\n[truncated by Pluton: prompt exceeded max_prompt_chars]`
@@ -376,6 +391,16 @@ export function buildManagerPrompt(
     "- A task in 'verifying' has finished its work and awaits the operator's verification gate — report it as awaiting verification; never keep waiting for it to become completed.",
     '- Finish by collecting the settled tasks with task.get_result.',
     '- Never claim a result that is not backed by real task records or execution output.',
+    '',
+    'Parallel delegation:',
+    '- Pluton dispatches every ready task concurrently up to runtime.max_concurrent_workers; a task whose dependsOn are unfinished waits. Use that: independent workstreams should be separate tasks, not one large task.',
+    '- Split only where parallelism is real. Small or strictly sequential work stays one task; never invent busywork to look concurrent.',
+    '- Give each task a distinct, self-contained scope and acceptance criteria that can be judged on their own evidence. State the inputs the assignee may rely on.',
+    '- Assign independent workstreams to different Ships of the right role (for example two Researchers for independent investigations, two Coders for separate modules).',
+    '- Express real ordering with dependsOn. Never leave an implicit ordering only in prose.',
+    '- Give each coding task an explicit writeScope; tasks that must edit the same files either run sequentially through dependsOn or are coordinated before writing.',
+    '- When one task needs another worker’s findings or interface contract, instruct it to use ship.message / ship.inbox to exchange them directly, and to report the handoff to you.',
+    '- You own reconciliation: compare independent findings, resolve disagreements from evidence, and never present one worker’s unverified claim as consensus.',
     '',
     'Response Format Contract:',
     'Format your final report following this exact structure:',
@@ -434,6 +459,9 @@ export class RunSupervisor {
   private readonly now: () => number
   private readonly diagnostic: (line: string) => void
   private readonly onWorkerEvent: ((event: WorkerLifecycleEvent) => void) | null
+  private readonly onWorkerMessage: ((event: WorkerLifecycleEvent) => void) | null
+  /** Durable, at-most-once worker-to-worker message channel for this run. */
+  readonly messageBus: WorkerMessageBus
   readonly leaseManager: FileLeaseManager
   readonly circuitBreaker: CircuitBreaker
   readonly usageLedger: UsageLedger
@@ -490,6 +518,15 @@ export class RunSupervisor {
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})
     this.onWorkerEvent = opts.onWorkerEvent ?? null
+    this.onWorkerMessage = opts.onWorkerMessage ?? null
+    this.messageBus = new WorkerMessageBus({
+      store: this.store,
+      projectId: this.projectId,
+      runId: this.runId,
+      wakeups: this.wakeups,
+      now: this.now,
+      ...(this.onWorkerMessage !== null ? { onMessage: (message) => this.emitWorkerMessage(message) } : {}),
+    })
     this.leaseManager = opts.leaseManager ?? new FileLeaseManager()
     this.circuitBreaker = opts.circuitBreaker ?? new CircuitBreaker()
     this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
@@ -515,6 +552,7 @@ export class RunSupervisor {
         leaseManager: this.leaseManager,
         workspaceManager: this.workspaceManager ?? undefined,
         wakeups: this.wakeups,
+        messageBus: this.messageBus,
         now: this.now,
       })
     }
@@ -654,6 +692,40 @@ export class RunSupervisor {
       this.diagnostic(
         `worker event '${event.type}' for task ${event.taskId} failed: ${e instanceof Error ? e.message : String(e)}`,
       )
+    }
+  }
+
+  /**
+   * Publish a message that {@link WorkerMessageBus} already persisted. The
+   * observer is live-only: persisting here again would double the history.
+   */
+  private emitWorkerMessage(message: WorkerMessage): void {
+    if (this.onWorkerMessage === null) return
+    const event: WorkerLifecycleEvent = {
+      type: 'worker.message',
+      runId: this.runId,
+      taskId: message.senderTaskId ?? message.recipientTaskId ?? 'manager',
+      role: 'worker',
+      shipName: message.senderLabel,
+      payload: {
+        messageId: message.id,
+        seq: message.seq,
+        senderShipId: message.senderShipId,
+        senderLabel: message.senderLabel,
+        senderTaskId: message.senderTaskId,
+        recipientShipId: message.recipientShipId,
+        recipientLabel: message.recipientLabel,
+        recipientTaskId: message.recipientTaskId,
+        kind: message.kind,
+        body: message.body,
+        replyTo: message.replyTo,
+        createdAt: message.createdAt,
+      },
+    }
+    try {
+      this.onWorkerMessage(event)
+    } catch (e) {
+      this.diagnostic(`worker message ${message.id} publish failed: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 

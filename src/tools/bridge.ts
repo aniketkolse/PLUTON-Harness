@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { InternalError, NotFoundError, PolicyDeniedError, PlutonError } from '../domain/errors.ts'
 import type { JsonValue } from '../domain/models.ts'
 import type { Store } from '../store/store.ts'
+import type { WorkerMessageBus } from '../orchestrator/messages.ts'
 import { WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { FileLeaseManager } from '../orchestrator/lease-manager.ts'
 import type { GitWorkspaceManager } from '../workspace/manager.ts'
@@ -118,6 +119,8 @@ export interface PlutonToolBridgeOptions {
   workspaceManager?: GitWorkspaceManager
   /** Shared per-run registry; the runtime notifies it when tasks reach terminal states. */
   wakeups?: WakeupRegistry
+  /** Direct worker-to-worker messaging bus for this run (absent = tool not usable). */
+  messageBus?: WorkerMessageBus
   now?: () => number
   /** Injected by pluton chat: create + drive a supervised run in the background. Required when runId is null/omitted. */
   startRun?: (input: { goal: string; acceptance: string[]; requestId?: string }) => Promise<{ runId: string }>
@@ -238,6 +241,7 @@ export class PlutonToolBridge implements McpToolHost {
         leaseManager: opts.leaseManager,
         workspaceManager: opts.workspaceManager,
         wakeups: opts.wakeups ?? new WakeupRegistry(),
+        messageBus: opts.messageBus,
         now: this.now,
       }
     }

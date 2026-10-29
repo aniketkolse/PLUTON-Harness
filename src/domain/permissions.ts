@@ -33,6 +33,7 @@ export const PERMISSIONS = [
   'approvals.list',
   'scope.declare',
   'scope.release',
+  'worker.message',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
@@ -78,10 +79,29 @@ export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<ShipRole, readonly Permis
     'approvals.list',
     'scope.declare',
     'scope.release',
+    'worker.message',
   ],
-  researcher: ['project.read', 'research.report', 'diff.inspect'],
-  coder: ['project.read', 'project.write', 'tests.run', 'diff.inspect', 'verification.report', 'scope.declare', 'scope.release'],
-  tester: ['project.read', 'tests.run', 'diff.inspect', 'verification.report', 'verification.run', 'scope.declare', 'scope.release'],
-  reviewer: ['project.read', 'diff.inspect', 'tests.run', 'review.report'],
+  researcher: ['project.read', 'research.report', 'diff.inspect', 'worker.message'],
+  coder: [
+    'project.read',
+    'project.write',
+    'tests.run',
+    'diff.inspect',
+    'verification.report',
+    'scope.declare',
+    'scope.release',
+    'worker.message',
+  ],
+  tester: [
+    'project.read',
+    'tests.run',
+    'diff.inspect',
+    'verification.report',
+    'verification.run',
+    'scope.declare',
+    'scope.release',
+    'worker.message',
+  ],
+  reviewer: ['project.read', 'diff.inspect', 'tests.run', 'review.report', 'worker.message'],
   custom: ['project.read'],
 }

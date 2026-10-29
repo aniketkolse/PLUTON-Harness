@@ -4,6 +4,7 @@ import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyD
 import type { JsonValue, ShipRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
+import type { WorkerMessage, WorkerMessageBus } from '../orchestrator/messages.ts'
 import { wakeupChannelFor, type WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { Store } from '../store/store.ts'
 import { firstLine } from '../util/exec.ts'
@@ -36,6 +37,8 @@ export interface ToolEnv {
   callerTaskId: string | null
   limits: ToolBridgeLimits
   wakeups: WakeupRegistry
+  /** Direct worker-to-worker messaging for this run; absent in runtimes without it. */
+  messageBus?: WorkerMessageBus
   now: () => number
   leaseManager?: FileLeaseManager
   /**
@@ -1006,4 +1009,63 @@ export const TOOL_HANDLERS: ToolHandlers = {
     })
     return { status: 'released', released }
   },
+
+  'ship.message': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['ship.message'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    const recipient = resolveShip(env, a.recipientShipId)
+    const message = env.messageBus.send({
+      senderShipId: env.callerShipId,
+      senderTaskId: env.callerTaskId,
+      recipientShipId: recipient.id,
+      recipientTaskId: a.taskId ?? null,
+      kind: a.kind,
+      body: a.body,
+      replyTo: a.replyTo ?? null,
+    })
+    return { message: publicMessage(message) }
+  },
+
+  'ship.inbox': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['ship.inbox'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    const messages = await env.messageBus.inbox({
+      recipientShipId: env.callerShipId,
+      taskId: env.callerTaskId,
+      limit: a.limit ?? 20,
+      waitMs: a.waitMs ?? 0,
+      ...(env.signal !== undefined ? { signal: env.signal } : {}),
+    })
+    return {
+      messages: messages.map(publicMessage),
+      count: messages.length,
+      note:
+        messages.length === 0
+          ? 'no undelivered messages'
+          : 'these messages are acknowledged and will not be delivered again',
+    }
+  },
+}
+
+/** The wire shape returned to an engine or the detail UI (no internal fields). */
+function publicMessage(message: WorkerMessage): Record<string, JsonValue> {
+  return {
+    id: message.id,
+    seq: message.seq,
+    runId: message.runId,
+    senderShipId: message.senderShipId,
+    senderLabel: message.senderLabel,
+    senderTaskId: message.senderTaskId,
+    recipientShipId: message.recipientShipId,
+    recipientLabel: message.recipientLabel,
+    recipientTaskId: message.recipientTaskId,
+    kind: message.kind,
+    body: message.body,
+    replyTo: message.replyTo,
+    createdAt: message.createdAt,
+  }
 }

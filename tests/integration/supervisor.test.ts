@@ -32,7 +32,7 @@ import { MockEngineAdapter, type MockScriptStep } from '../../src/engines/mock/a
 import { OpenCodeEngineAdapter } from '../../src/engines/opencode/adapter.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import type { FileLeaseManager } from '../../src/orchestrator/lease-manager.ts'
-import { MAX_RESULT_TEXT_CHARS, RunSupervisor, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
+import { MAX_RESULT_TEXT_CHARS, RunSupervisor, buildManagerPrompt, type WorkerLifecycleEvent } from '../../src/orchestrator/supervisor.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { migrate } from '../../src/store/migrations.ts'
 import { Store } from '../../src/store/store.ts'
@@ -1017,6 +1017,78 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     // claim from `verifying`, throw, and fail the task through the outer catch.
     expect(world.store.getTask(task.id).state).toBe('verifying')
     expect(eventCount(world.store, world.runId, 'task.failed')).toBe(0)
+  })
+
+  it('manager prompt demands real parallel decomposition with dependencies and write scopes', () => {
+    const world = makeWorld()
+    const manager = world.store.getShip('manager')
+    expect(manager).not.toBeNull()
+    const prompt = buildManagerPrompt('goal', manager!, world.store.listShips(), [], 60_000)
+    expect(prompt).toContain('Parallel delegation:')
+    expect(prompt).toContain('dependsOn')
+    expect(prompt).toContain('writeScope')
+    expect(prompt).toContain('ship.message')
+    expect(prompt).toContain('Split only where parallelism is real')
+  })
+
+  it('exposes direct messaging on the manager bridge and delivers it to a worker task', async () => {
+    const world = makeWorld()
+    const task = world.store.createTask({
+      runId: world.runId,
+      title: 'message target',
+      brief: 'do it well',
+      acceptanceCriteria: ['done'],
+      assigneeMuseId: 'worker-a',
+    })
+    world.store.setTaskState(task.id, 'queued')
+    world.store.setTaskState(task.id, 'admitted')
+    world.store.setTaskState(task.id, 'running')
+
+    const res = await world.supervisor.managerBridge().call('ship.message', {
+      recipientShipId: 'worker-a',
+      kind: 'handoff',
+      body: 'Interface contract: export readConfig(path): Config',
+      taskId: task.id,
+    })
+    expect(res.ok).toBe(true)
+
+    const delivered = await world.supervisor.messageBus.inbox({
+      recipientShipId: 'worker-a',
+      taskId: task.id,
+    })
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.senderShipId).toBe('manager')
+    expect(delivered[0]!.body).toContain('readConfig')
+    expect(world.store.listEvents(world.runId, { type: 'worker.message', limit: 10 })).toHaveLength(1)
+  })
+
+  it('runs independent tasks on two Ships concurrently', async () => {
+    const world = makeWorld({
+      maxConcurrentWorkers: 2,
+      managerTools: async (bridge) => {
+        await createViaBridge(bridge, { title: 'independent A', assigneeMuseId: 'worker-a' })
+        await createViaBridge(bridge, { title: 'independent B', assigneeMuseId: 'worker-b' })
+      },
+      // Each scripted turn is long enough that a serial dispatcher could not
+      // start the second prompt until the first had finished.
+      workerScripts: {
+        'worker-a': [{ delayMs: 600, outcome: 'success' }],
+        'worker-b': [{ delayMs: 600, outcome: 'success' }],
+      },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+    await world.settleTools()
+
+    expect(out.state).toBe('completed')
+    const a = world.workerPrompts.find((p) => p.muse === 'worker-a')
+    const b = world.workerPrompts.find((p) => p.muse === 'worker-b')
+    expect(a).toBeDefined()
+    expect(b).toBeDefined()
+    // Both engines were in flight at once: the second prompt starts while the
+    // first is still inside its 600 ms scripted turn.
+    expect(Math.abs((a?.at ?? 0) - (b?.at ?? 0))).toBeLessThan(500)
+    expect(eventCount(world.store, world.runId, 'task.started')).toBe(2)
   })
 
   it('records a late worker result as discarded when the task already settled', async () => {

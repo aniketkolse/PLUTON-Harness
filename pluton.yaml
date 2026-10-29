@@ -50,7 +50,7 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [project.read, project.write, tests.run, research.report, review.report, verification.report, task.create, task.delegate, task.inspect, task.cancel, task.request_revision, result.collect, diff.inspect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list, scope.declare, scope.release]
+    permissions: [project.read, project.write, tests.run, research.report, review.report, verification.report, task.create, task.delegate, task.inspect, task.cancel, task.request_revision, result.collect, diff.inspect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list, scope.declare, scope.release, worker.message]
     approval_mode: ask-for-sensitive-actions
 
   researcher:
@@ -60,7 +60,7 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/researcher.md
     workspace_policy: read-only
-    permissions: [project.read, research.report, diff.inspect]
+    permissions: [project.read, research.report, diff.inspect, worker.message]
     approval_mode: ask-for-sensitive-actions
 
   # Legacy Ship id kept for compatibility; this is the second researcher.
@@ -71,7 +71,7 @@ ships:
     model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/researcher.md
     workspace_policy: read-only
-    permissions: [project.read, research.report, diff.inspect]
+    permissions: [project.read, research.report, diff.inspect, worker.message]
     approval_mode: ask-for-sensitive-actions
 
   # Legacy Ship id kept for compatibility; this is the first coder.
@@ -82,7 +82,7 @@ ships:
     model: opencode/glm-5.3-flash-free
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report, worker.message]
 
   # Every Ship owns its own model; changing one never rewrites another.
   coder-z:
@@ -92,7 +92,7 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report]
+    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report, worker.message]
 
   qa:
     display_name: QA
@@ -101,7 +101,7 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/qa.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run]
+    permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run, worker.message]
 
   reviewer:
     display_name: Reviewer
@@ -110,5 +110,5 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/reviewer.md
     workspace_policy: read-only
-    permissions: [project.read, diff.inspect, tests.run, review.report]
+    permissions: [project.read, diff.inspect, tests.run, review.report, worker.message]
     approval_mode: ask-for-sensitive-actions
