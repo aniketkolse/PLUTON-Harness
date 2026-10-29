@@ -168,8 +168,10 @@ describe('Session-scoped workspaces and picker API', () => {
     const loaded = loadConfig(configPath)
     const { store, projectId } = bootstrapStore(loaded)
 
-    // Create an external workspace directory with its own files
-    const extDir = mkdtempSync(join(tmpdir(), 'pluton-ext-ws-'))
+    // Create an external workspace directory with its own files. Canonicalize
+    // it so the server's returned root matches on macOS (/var vs /private/var)
+    // and Windows runners (8.3 RUNNER~1 vs the long profile name).
+    const extDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-ext-ws-')))
     tmpDirs.push(extDir)
     writeFileSync(join(extDir, 'external.txt'), 'external workspace content\n', 'utf8')
     mkdirSync(join(extDir, 'sub'), { recursive: true })
@@ -259,7 +261,7 @@ describe('Session-scoped workspaces and picker API', () => {
     expect(outsideRes.status).toBe(403)
 
     // 9. PATCH /api/sessions/:id switches workspace
-    const secondExtDir = mkdtempSync(join(tmpdir(), 'pluton-ext-ws2-'))
+    const secondExtDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pluton-ext-ws2-')))
     tmpDirs.push(secondExtDir)
     writeFileSync(join(secondExtDir, 'second.txt'), 'second ws content\n', 'utf8')
 
