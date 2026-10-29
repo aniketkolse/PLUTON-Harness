@@ -294,7 +294,13 @@ describe('native capability detection', () => {
     expect(caps.pidNamespaces).toBe(true)
   })
 
-  it('falls back to namespace probing when no helper is available', () => {
+  it('reports no namespace capabilities when probing is denied without a helper', () => {
+    spawnSyncMock.mockReturnValue({
+      error: Object.assign(new Error('unshare unavailable'), { code: 'EPERM' }),
+      status: null,
+      stdout: '',
+      stderr: '',
+    })
     const caps = detectCapabilities({ platform: 'linux', arch: 'x64', root: makeRoot() })
     expect(caps.helper.available).toBe(false)
     expect(caps.landlockAbi).toBeNull()
@@ -302,6 +308,16 @@ describe('native capability detection', () => {
     expect(caps.mountNamespaces).toBe(false)
     expect(caps.networkNamespaces).toBe(false)
     expect(caps.pidNamespaces).toBe(false)
+  })
+
+  it('reports namespace capabilities proven by the fallback probe without a helper', () => {
+    const caps = detectCapabilities({ platform: 'linux', arch: 'x64', root: makeRoot() })
+    expect(caps.helper.available).toBe(false)
+    expect(caps.landlockAbi).toBeNull()
+    expect(caps.userNamespaces).toBe(true)
+    expect(caps.mountNamespaces).toBe(true)
+    expect(caps.networkNamespaces).toBe(true)
+    expect(caps.pidNamespaces).toBe(true)
   })
 
   it('rejects an unsupported platform instead of guessing', () => {

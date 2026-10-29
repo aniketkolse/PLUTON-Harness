@@ -166,8 +166,10 @@ export function verifyHelper(options?: {
   return { available: true, version: manifest.version, sha256: actual }
 }
 
-function runUnshare(args: string[]): boolean {
-  if (process.platform !== 'linux') return false
+function runUnshare(platform: PlatformKey, args: string[]): boolean {
+  // Probe only when the requested platform is Linux. Using process.platform
+  // here made synthetic win32/darwin reports inherit the host's namespaces.
+  if (platform !== 'linux') return false
   const result = spawnSync('unshare', args, { stdio: 'ignore', timeout: 5_000 })
   return result.error === undefined && result.status === 0
 }
@@ -203,10 +205,10 @@ export function detectCapabilities(options?: {
     arch,
     kernelRelease,
     landlockAbi: probe?.abi ?? null,
-    userNamespaces: probe?.userNamespaces ?? runUnshare(['-Ur', 'true']),
-    mountNamespaces: probe?.mountNamespaces ?? runUnshare(['-Urm', 'true']),
-    networkNamespaces: probe?.networkNamespaces ?? runUnshare(['-Urn', 'true']),
-    pidNamespaces: probe?.pidNamespaces ?? runUnshare(['-Urp', 'true']),
+    userNamespaces: probe?.userNamespaces ?? runUnshare(platform, ['-Ur', 'true']),
+    mountNamespaces: probe?.mountNamespaces ?? runUnshare(platform, ['-Urm', 'true']),
+    networkNamespaces: probe?.networkNamespaces ?? runUnshare(platform, ['-Urn', 'true']),
+    pidNamespaces: probe?.pidNamespaces ?? runUnshare(platform, ['-Urp', 'true']),
     cgroupV2: linux && existsSync('/sys/fs/cgroup/cgroup.controllers'),
     helper,
     runtimeRoots: [...runtimeRoots],
