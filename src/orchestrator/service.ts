@@ -33,7 +33,12 @@ import { isPermission } from '../domain/permissions.ts'
 import { isTerminalRunState, TERMINAL_TASK_STATES, type RunState } from '../domain/state.ts'
 import type { EngineAdapter, McpServerSpec } from '../engines/contract/types.ts'
 import { settleApprovalWaiter } from '../engines/interactive-approval.ts'
-import { getEngineAdapter } from '../engines/registry.ts'
+import { getEngineAdapter, listEngineKinds } from '../engines/registry.ts'
+import { ModelRegistry } from '../engines/model-registry.ts'
+import { ModelDiscoveryService } from '../engines/model-discovery.ts'
+import { ModelHealthMonitor } from '../engines/model-health.ts'
+import type { ModelFallbackConfig } from '../engines/model-fallback.ts'
+import { resolveModelConfig } from '../config/model-config.ts'
 import { nativeAdapterFor } from '../execution/adapter.ts'
 import {
   appendExecutionEvent,
@@ -381,6 +386,28 @@ export function createRunSupervisor(args: {
   }
 
   const workspaceManager = new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) })
+
+  // PLUTON 3.3: wire model intelligence infrastructure into the supervisor.
+  const modelRegistry = new ModelRegistry()
+  const modelConfig = resolveModelConfig(ctx.loaded.config)
+  const discoveryEngines = listEngineKinds().map((f) => ({
+    engineKind: f.kind,
+    adapter: getEngineAdapter(f.kind),
+  }))
+  const discovery = new ModelDiscoveryService({
+    engines: discoveryEngines,
+    registry: modelRegistry,
+    refreshIntervalMs: (ctx.loaded.config.models && ctx.loaded.config.models.discovery) ? ctx.loaded.config.models.discovery.refreshIntervalMs : 0,
+  })
+  void discovery.refresh().catch(() => {})
+  const modelHealthMonitor = new ModelHealthMonitor({ registry: modelRegistry })
+  const modelFallbackConfig: ModelFallbackConfig = {
+    maxRetriesPerModel: 2,
+    cooldownMs: 300_000,
+    maxTotalFallbacks: 5,
+    now: Date.now,
+  }
+
   const supervisor = new RunSupervisor({
     store,
     projectId,
@@ -402,6 +429,11 @@ export function createRunSupervisor(args: {
     ...(deps.onWorkerMessage !== undefined ? { onWorkerMessage: deps.onWorkerMessage } : {}),
     workspaceManager,
     engineEnv: () => ({}),
+    modelRegistry,
+    modelConfig,
+    modelDiscovery: discovery,
+    modelHealthMonitor,
+    modelFallbackConfig,
     mcpServerFor: (ship, taskId) => {
       const bridge =
         taskId === null

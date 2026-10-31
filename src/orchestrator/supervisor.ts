@@ -7,7 +7,7 @@ import {
   OwnershipLostError,
   StateTransitionError,
 } from '../domain/errors.ts'
-import type { ApprovalRecord, JsonValue, ShipRecord, RunRecord, TaskRecord } from '../domain/models.ts'
+import type { ApprovalRecord, JsonValue, ShipRecord, RunRecord, TaskRecord, ShipRole } from '../domain/models.ts'
 import { engineAdapterForShip, type EngineIsolationFacts } from '../engines/approval.ts'
 import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'
@@ -23,6 +23,12 @@ import type {
   McpServerSpec,
   PromptRequest,
 } from '../engines/contract/types.ts'
+import { selectModel } from '../engines/model-selection.ts'
+import type { ResolvedModelConfig, ResolvedShipModelConfig } from '../config/model-config.ts'
+import { ModelRegistry } from '../engines/model-registry.ts'
+import { ModelDiscoveryService } from '../engines/model-discovery.ts'
+import { ModelHealthMonitor, classifyModelError, type ModelErrorContext, type ModelErrorClassification } from '../engines/model-health.ts'
+import { decideFallback, createFallbackState, type ModelFallbackConfig, type ModelFallbackState } from '../engines/model-fallback.ts'
 import { SESSION_BACKED_TASK_STATES, TERMINAL_TASK_STATES, isTerminal, type RunState, type TaskState } from '../domain/state.ts'
 import type { Store, SupervisorFence } from '../store/store.ts'
 import type { GitWorkspaceManager } from '../workspace/manager.ts'
@@ -146,6 +152,16 @@ export interface SupervisorOptions {
   projectRootDir?: string
   /** `git.protected_paths`: engine requests touching these ask the operator. */
   protectedPaths?: readonly string[]
+  /** Optional model registry for dynamic discovery. */
+  modelRegistry?: ModelRegistry
+  /** Optional resolved model configuration (pins, allowlists, preferences). */
+  modelConfig?: ResolvedModelConfig
+  /** Optional discovery service for live model inventory. */
+  modelDiscovery?: ModelDiscoveryService
+  /** Optional health monitor for error classification. */
+  modelHealthMonitor?: ModelHealthMonitor
+  /** Optional fallback config for model failure recovery. */
+  modelFallbackConfig?: ModelFallbackConfig
 }
 
 export interface RunOutcome {
@@ -452,6 +468,11 @@ export class RunSupervisor {
    * default path itself is testable without spawning engines.
    */
   readonly adapterFor: SupervisorAdapterFactory
+  private readonly modelRegistry: ModelRegistry | null
+  private readonly modelConfig: ResolvedModelConfig | null
+  private readonly modelDiscovery: ModelDiscoveryService | null
+  private readonly modelHealthMonitor: ModelHealthMonitor | null
+  private readonly modelFallbackConfig: ModelFallbackConfig | null
   private readonly workspaceManager: GitWorkspaceManager | null
   private readonly engineEnv: (ship: ShipRecord) => Record<string, string>
   private readonly mcpServerFor: (ship: ShipRecord, taskId: string | null) => McpServerSpec | null
@@ -514,6 +535,11 @@ export class RunSupervisor {
     this.workspaceManager = opts.workspaceManager ?? null
     this.engineEnv = opts.engineEnv ?? (() => ({}))
     this.mcpServerFor = opts.mcpServerFor ?? (() => null)
+    this.modelRegistry = opts.modelRegistry ?? null
+    this.modelConfig = opts.modelConfig ?? null
+    this.modelDiscovery = opts.modelDiscovery ?? null
+    this.modelHealthMonitor = opts.modelHealthMonitor ?? null
+    this.modelFallbackConfig = opts.modelFallbackConfig ?? null
     this.wakeups = opts.wakeups ?? new WakeupRegistry()
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})
@@ -1038,6 +1064,7 @@ export class RunSupervisor {
         this.failTask(task.id, { code: 'ship_unavailable', message: `assignee '${task.assigneeShipId}' is not an enabled Ship` })
         return
       }
+      const resolvedModel = resolveTaskModelFor(ship, task, this.modelRegistry, this.modelConfig, (line) => this.diagnostic(line))
       const claimed = store.setTaskStateIf(
         task.id,
         'queued',
@@ -1045,7 +1072,7 @@ export class RunSupervisor {
         {
           // Snapshot the assignment exactly as it is for THIS claim (retries
           // refresh it): later ship config edits must never rewrite history.
-          assignment: { shipId: ship.id, museId: ship.id, role: ship.role, engine: ship.engineKind, model: ship.model },
+          assignment: { shipId: ship.id, museId: ship.id, role: ship.role, engine: ship.engineKind, model: resolvedModel },
         },
         this.fence ?? undefined,
       )
@@ -1069,7 +1096,7 @@ export class RunSupervisor {
       const mcpSpec = this.mcpServerFor(ship, task.id)
       const instructions = this.instructionsFor(ship)
       const session = await adapter.startSession({
-        ship: { id: ship.id, slug: ship.slug, role: ship.role, model: ship.model },
+        ship: { id: ship.id, slug: ship.slug, role: ship.role, model: resolvedModel },
         workdir,
         env: this.engineEnv(ship),
         configDir: ship.engineHome,
@@ -1095,7 +1122,7 @@ export class RunSupervisor {
           taskId: task.id,
           role: ship.role,
           shipName: ship.displayName,
-          model: ship.model,
+          model: resolvedModel,
           workspace: workdir,
           payload: { step: `session started (${adapter.kind})` },
         })
@@ -1131,7 +1158,7 @@ export class RunSupervisor {
                 taskId: task.id,
                 role: ship.role,
                 shipName: ship.displayName,
-                model: ship.model,
+                model: resolvedModel,
                 workspace: workdir,
                 payload: { step: stripControlChars(label).slice(0, 300) },
               })
@@ -1148,12 +1175,150 @@ export class RunSupervisor {
         })
       }
 
-      // Result contract: metadata (`summary`/`outcome`/`engine`/`textChars`)
-      // PLUS the actual assistant answer body (`text`, bounded, with an honest
-      // truncation flag). Defect 2026-10-21 stored only the metadata here, so
-      // `task.get_result` could never return worker findings. `result_json` /
-      // `failure_json` are JSON TEXT columns — the extra keys are additive and
-      // old records without them keep reading as before.
+      // PLUTON 3.3: bounded model fallback. On model failure, classify the
+      // error, update health, and decide fallback via decideFallback(). If the
+      // decision is to switch, close the current session and start a new one
+      // with the replacement model, then re-run the prompt. The loop is bounded
+      // by modelFallbackConfig.maxTotalFallbacks to prevent endless switching.
+      // Only runs when registry and fallback config are available; otherwise
+      // falls through to the existing circuit breaker handling below.
+      if (this.modelRegistry !== null && this.modelFallbackConfig !== null) {
+        let currentModelId = resolvedModel
+        let fallbacksUsed = 0
+        let currentSession: EngineSession = session
+        const maxTotalFallbacks = this.modelFallbackConfig.maxTotalFallbacks
+
+        for (let fb = 0; fb <= maxTotalFallbacks; fb++) {
+          if (out.outcome !== 'failure') break
+
+          // Classify the error and update health monitor
+          const errorContext: ModelErrorContext = {
+            engineKind: adapter.kind,
+            modelId: currentModelId,
+            providerMessage: out.errorCode || out.summary || 'unknown error',
+            scopeHint: 'task',
+          }
+          const classification = classifyModelError(errorContext)
+          this.modelHealthMonitor?.recordFailure(errorContext, classification)
+
+          // Decide fallback via the bounded fallback engine
+          const fallbackState = createFallbackState(currentModelId)
+          fallbackState.fallbacksUsed = fallbacksUsed
+
+          const decision = decideFallback({
+            taskInput: {
+              task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
+              shipRole: ship.role as ShipRole,
+              hint: this.modelConfig?.ships[ship.id]?.taskHints,
+              costPreference: this.modelConfig?.ships[ship.id]?.preferences?.costPreference,
+              latencyPreference: this.modelConfig?.ships[ship.id]?.preferences?.latencyPreference,
+              maxCostUsdPerMillionTokens: this.modelConfig?.ships[ship.id]?.preferences?.maxCostUsdPerMillionTokens,
+              maxLatencyMs: this.modelConfig?.ships[ship.id]?.preferences?.maxLatencyMs,
+              minContextWindow: this.modelConfig?.ships[ship.id]?.preferences?.minContextWindow,
+              providerAllowlist: this.modelConfig?.ships[ship.id]?.providerAllowlist ?? [],
+              providerDenylist: this.modelConfig?.ships[ship.id]?.providerDenylist ?? [],
+            },
+            currentModelId,
+            error: classification,
+            bufferedEvents: [],
+            state: fallbackState,
+            registry: this.modelRegistry,
+            selector: selectModel,
+            healthMonitor: this.modelHealthMonitor ?? undefined,
+            config: this.modelFallbackConfig,
+          })
+
+          if (decision.action === 'switch' && decision.toModelId) {
+            currentModelId = decision.toModelId
+            fallbacksUsed = decision.fallbacksUsed
+            this.diagnostic(`task ${task.id}: ${decision.reason}`)
+
+            // Close the current session and start a new one with the replacement model
+            await currentSession.close().catch((e: unknown) => {
+              this.diagnostic(`task ${task.id}: fallback session close failed: ${e instanceof Error ? e.message : String(e)}`)
+            })
+
+            currentSession = await adapter.startSession({
+              ship: { id: ship.id, slug: ship.slug, role: ship.role, model: currentModelId },
+              workdir,
+              env: this.engineEnv(ship),
+              configDir: ship.engineHome,
+              ...(instructions !== undefined ? { instructions } : {}),
+              ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
+              approvals: this.approvalChannel(ship, task.id, workdir),
+            })
+            this.liveSessions.set(task.id, currentSession)
+
+            try {
+              // Only transition to 'running' if not already running (guards against
+              // re-entry on repeated fallback attempts)
+              const currentState = store.getTask(task.id).state
+              if (currentState !== 'running') {
+                store.setTaskState(
+                  task.id,
+                  'running',
+                  {
+                    workspaceId,
+                    engineSessionId: currentSession.info.nativeSessionId ?? currentSession.info.id,
+                  },
+                  this.fence ?? undefined,
+                )
+                this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId }, task.id)
+                this.emitWorkerEvent({
+                  type: 'worker.started',
+                  runId: this.runId,
+                  taskId: task.id,
+                  role: ship.role,
+                  shipName: ship.displayName,
+                  model: currentModelId,
+                  workspace: workdir,
+                  payload: { step: `model switched to ${currentModelId}` },
+                })
+              }
+
+              out = await this.runPrompt(
+                currentSession,
+                { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
+                {
+                  taskId: task.id,
+                  shipId: ship.id,
+                  onTool: (tool) => {
+                    if (tool.phase !== 'start') return
+                    const label =
+                      tool.summary !== undefined && tool.summary !== '' ? `${tool.name}: ${tool.summary}` : tool.name
+                    this.emitWorkerEvent({
+                      type: 'worker.progress',
+                      runId: this.runId,
+                      taskId: task.id,
+                      role: ship.role,
+                      shipName: ship.displayName,
+                      model: currentModelId,
+                      workspace: workdir,
+                      payload: { step: stripControlChars(label).slice(0, 300) },
+                    })
+                  },
+                },
+              )
+            } finally {
+              this.liveSessions.delete(task.id)
+              this.interruptSent.delete(task.id)
+              await currentSession.close().catch((e: unknown) => {
+                this.diagnostic(`task ${task.id}: fallback session close failed: ${e instanceof Error ? e.message : String(e)}`)
+              })
+            }
+
+            // If the fallback attempt also failed, loop again (bounded by maxTotalFallbacks)
+            // If it succeeded, break out to success handling below
+            continue
+          }
+
+          // retry-same, exhausted, unsafe, or no-action: fall through to
+          // existing circuit breaker / failure handling below
+          break
+        }
+      }
+
+      // Result contract
       const resultPayload: JsonValue = {
         summary: out.summary,
         outcome: out.outcome,
@@ -2097,4 +2262,34 @@ export class RunSupervisor {
 
   private managerOutcomeCache: PromptOutcome | null = null
   private managerErrorCache: string | null = null
+}
+
+export function resolveTaskModelFor(
+  ship: ShipRecord,
+  task: TaskRecord,
+  registry: ModelRegistry | null,
+  config: ResolvedModelConfig | null,
+  diagnostic?: (line: string) => void,
+): string {
+  const cfg = config?.ships[ship.id]
+  if (cfg?.pin) return cfg.pin
+  if (registry !== null) {
+    const outcome = selectModel(registry, {
+      task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
+      shipRole: ship.role as ShipRole,
+      hint: cfg?.taskHints,
+      costPreference: cfg?.preferences?.costPreference,
+      latencyPreference: cfg?.preferences?.latencyPreference,
+      maxCostUsdPerMillionTokens: cfg?.preferences?.maxCostUsdPerMillionTokens,
+      maxLatencyMs: cfg?.preferences?.maxLatencyMs,
+      minContextWindow: cfg?.preferences?.minContextWindow,
+      providerAllowlist: cfg?.providerAllowlist ?? [],
+      providerDenylist: cfg?.providerDenylist ?? [],
+    })
+    if (outcome.selection !== null) return outcome.selection.modelId
+    diagnostic?.(
+      `task ${task.id}: no eligible model from registry; falling back to ship.model '${ship.model}'`
+    )
+  }
+  return ship.model
 }
