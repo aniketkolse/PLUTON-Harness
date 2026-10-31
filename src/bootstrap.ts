@@ -50,7 +50,7 @@ export function shipSpecs(loaded: LoadedConfig): ShipSyncSpec[] {
     displayName: m.display_name,
     role: m.role,
     engineKind: m.engine,
-    model: m.model,
+    model: m.model ?? '',
     instructionsFile: m.instructions_file ?? null,
     workspacePolicy: m.workspace_policy ?? ROLE_DEFAULT_WORKSPACE_POLICIES[m.role],
     permissions: m.permissions ?? (ROLE_DEFAULT_PERMISSIONS[m.role] ? [...ROLE_DEFAULT_PERMISSIONS[m.role]] : []),

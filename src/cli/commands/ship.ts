@@ -30,7 +30,7 @@ export function listShips(config: PlutonConfig): ShipListEntry[] {
       displayName: m.display_name,
       role: m.role,
       engine: m.engine,
-      model: m.model,
+      model: m.model ?? '',
       workspacePolicy: m.workspace_policy,
       approvalMode: m.approval_mode,
       permissions: m.permissions ?? [],

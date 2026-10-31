@@ -25,8 +25,31 @@ export const shipConfigSchema = z
     display_name: z.string().min(1),
     role: z.enum(SHIP_ROLES),
     engine: z.string().min(1),
-    /** Exact provider-qualified model id; validated against the engine when discovery is possible. */
-    model: z.string().min(1),
+    /** Exact provider-qualified model id. When omitted, automatic model selection is used.
+     * Validated against the engine when discovery is possible. */
+    model: z.string().min(1).optional(),
+    /** Optional task-level hints used for automatic model selection. */
+    model_requirements: z
+      .object({
+        taskType: z.enum(['research', 'coding', 'testing', 'simple', 'planning']).optional(),
+        requiredCapabilities: z.array(z.enum(['research', 'coding', 'testing', 'simple'])).optional(),
+        requiresToolCalling: z.boolean().optional(),
+        requiresMultimodal: z.boolean().optional(),
+        minContextWindow: z.number().int().min(1).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Optional selection preferences for automatic model selection. */
+    model_preferences: z
+      .object({
+        costPreference: z.enum(['low', 'balanced', 'indifferent']).optional(),
+        latencyPreference: z.enum(['low', 'balanced', 'indifferent']).optional(),
+        maxCostUsdPerMillionTokens: z.number().positive().optional(),
+        maxLatencyMs: z.number().int().min(1).optional(),
+        minContextWindow: z.number().int().min(1).optional(),
+      })
+      .strict()
+      .optional(),
     instructions_file: z.string().min(1).optional(),
     workspace_policy: z.enum(WORKSPACE_POLICIES).default('isolated-task-checkout'),
     permissions: z.array(z.enum(PERMISSIONS)).min(0).optional(),
@@ -237,6 +260,48 @@ export const gitConfigSchema = z
   .strict()
   .prefault({})
 
+export const modelDiscoveryConfigSchema = z
+  .object({
+    refreshIntervalMs: z.number().int().min(0).default(0),
+    providers: z
+      .object({
+        allowlist: z.array(z.string().min(1)).default([]),
+        denylist: z.array(z.string().min(1)).default([]),
+      })
+      .strict()
+      .prefault({}),
+  })
+  .strict()
+  .prefault({})
+
+export const modelSelectionConfigSchema = z
+  .object({
+    taskFit: z.record(z.string(), z.array(z.enum(['research', 'coding', 'testing', 'simple']))).optional(),
+    costPreference: z.enum(['low', 'balanced', 'indifferent']).default('balanced'),
+    latencyPreference: z.enum(['low', 'balanced', 'indifferent']).default('balanced'),
+  })
+  .strict()
+  .prefault({})
+
+export const modelFallbackConfigSchema = z
+  .object({
+    maxRetriesPerModel: z.number().int().min(0).max(10).default(2),
+    cooldownMs: z.number().int().min(0).default(300_000),
+    maxTotalFallbacks: z.number().int().min(0).max(100).default(5),
+    scope: z.enum(['task', 'provider', 'global']).default('task'),
+  })
+  .strict()
+  .prefault({})
+
+export const modelsConfigSchema = z
+  .object({
+    discovery: modelDiscoveryConfigSchema.optional(),
+    selection: modelSelectionConfigSchema.optional(),
+    fallback: modelFallbackConfigSchema.optional(),
+  })
+  .strict()
+  .prefault({})
+
 export const projectConfigSchema = z
   .object({
     name: z.string().min(1),
@@ -259,6 +324,8 @@ export const plutonConfigSchema = z.preprocess(
       ships: z.record(z.string().regex(SHIP_ID_RE, 'ship ids are lowercase slugs: a-z, 0-9, -'), shipConfigSchema).default({}),
       /** @deprecated Use `ships`; kept for backward compatibility with code referencing config.muses. */
       muses: z.record(z.string().regex(SHIP_ID_RE, 'ship ids are lowercase slugs: a-z, 0-9, -'), shipConfigSchema).default({}),
+    /** Model intelligence configuration (optional; defaults preserve current behavior). */
+    models: modelsConfigSchema.optional(),
     })
     .strict()
     // Deliberate guard: refuse configs without a manager — a run cannot start.
