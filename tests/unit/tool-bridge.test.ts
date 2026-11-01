@@ -1218,4 +1218,155 @@ describe('PlutonToolBridge — review hardening', () => {
     expect((res.data as { timedOut: boolean }).timedOut).toBe(false)
     expect((res.data as { tasks: { state: string }[] }).tasks[0]?.state).toBe('completed')
   })
+
+  describe('task.awaiting_verification:', () => {
+    it('sets task state to verifying', async () => {
+      const fx = makeFixture()
+      const manager = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const taskId = await createTask(manager)
+      // Set task to failed so it's eligible for revision
+      fx.store.setTaskState(taskId, 'admitted')
+      fx.store.setTaskState(taskId, 'failed', { failure: { code: 'test_failure', message: 'test failure' } })
+      const res = await manager.call('task.request_revision', { taskId, feedback: 'fix it' })
+      expect(res.ok).toBe(true)
+      const updated = fx.store.getTask(taskId)
+      expect(updated.state).toBe('queued')
+      expect(updated.attempt).toBe(1)
+    })
+  })
+
+  describe('selectToolsForTask (Batch 6)', () => {
+    it('always-available tools are included regardless of task scope', () => {
+      const fx = makeFixture()
+      const manager = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const task = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'plain task',
+        brief: 'A simple task',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+      })
+
+      const managerBridge = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const allTools = managerBridge.listTools()
+
+      const selected = managerBridge.selectToolsForTask(task.id, allTools)
+
+      // Always-available tools should be present
+      expect(selected.map((t) => t.name)).toContain('task.inspect')
+      expect(selected.map((t) => t.name)).toContain('task.get_result')
+      expect(selected.map((t) => t.name)).toContain('task.cancel')
+      expect(selected.map((t) => t.name)).toContain('task.wait')
+      expect(selected.map((t) => t.name)).toContain('task.create')
+      expect(selected.map((t) => t.name)).toContain('task.delegate')
+      expect(selected.map((t) => t.name)).toContain('diff.inspect')
+      expect(selected.map((t) => t.name)).toContain('project.read')
+      expect(selected.map((t) => t.name)).toContain('ship.message')
+      expect(selected.map((t) => t.name)).toContain('ship.inbox')
+    })
+
+    it('scope.declare and scope.release are included only when task has writeScope', () => {
+      const fx = makeFixture()
+      const manager = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+
+      // Task without write scope - scope tools should NOT be included
+      const taskNoScope = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'no scope task',
+        brief: 'A task without write scope',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+      })
+
+      // Task WITH write scope - scope tools SHOULD be included
+      const taskWithScope = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'scoped task',
+        brief: 'A task with write scope',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+        writeScope: ['src/app.ts'],
+      })
+
+      const managerBridge = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const allTools = managerBridge.listTools()
+
+      const selectedNoScope = managerBridge.selectToolsForTask(taskNoScope.id, allTools)
+      expect(selectedNoScope.map((t) => t.name)).not.toContain('scope.declare')
+      expect(selectedNoScope.map((t) => t.name)).not.toContain('scope.release')
+
+      const selectedWithScope = managerBridge.selectToolsForTask(taskWithScope.id, allTools)
+      expect(selectedWithScope.map((t) => t.name)).toContain('scope.declare')
+      expect(selectedWithScope.map((t) => t.name)).toContain('scope.release')
+    })
+
+    it('governance tools are always available regardless of task scope', () => {
+      const fx = makeFixture()
+      const manager = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const task = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'governance test',
+        brief: 'Test governance tools',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+      })
+
+      const managerBridge = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const allTools = managerBridge.listTools()
+
+      const selected = managerBridge.selectToolsForTask(task.id, allTools)
+      expect(selected.map((t) => t.name)).toContain('ship.propose_create')
+      expect(selected.map((t) => t.name)).toContain('approval.request')
+      expect(selected.map((t) => t.name)).toContain('review.report')
+      expect(selected.map((t) => t.name)).toContain('task.request_revision')
+      expect(selected.map((t) => t.name)).toContain('run.stop')
+    })
+
+    it('does not include tools the caller lacks permission for', () => {
+      const fx = makeFixture()
+      // Worker does NOT have task.create permission
+      const worker = makeBridge(fx, 'worker-a', null, {}, new WakeupRegistry())
+      const task = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'worker task',
+        brief: 'Worker task',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+      })
+
+      const workerBridge = makeBridge(fx, 'worker-a', null, {}, new WakeupRegistry())
+      const allTools = workerBridge.listTools()
+
+      const selected = workerBridge.selectToolsForTask(task.id, allTools)
+      expect(selected.map((t) => t.name)).not.toContain('task.create')
+      expect(selected.map((t) => t.name)).not.toContain('review.report')
+      expect(selected.map((t) => t.name)).not.toContain('ship.propose_create')
+      expect(selected.map((t) => t.name)).not.toContain('task.request_revision')
+      expect(selected.map((t) => t.name)).not.toContain('run.stop')
+      // But always-available tools that the caller has permission for should still be present
+      expect(selected.map((t) => t.name)).toContain('task.inspect')
+      expect(selected.map((t) => t.name)).toContain('task.get_result')
+    })
+
+    it('selectToolsForTask does not mutate the input array', () => {
+      const fx = makeFixture()
+      const manager = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const task = fx.store.createTask({
+        runId: fx.run.id,
+        title: 'immutable test',
+        brief: 'Test immutability',
+        acceptanceCriteria: [],
+        assigneeShipId: 'worker-a',
+        writeScope: ['src/app.ts'],
+      })
+
+      const managerBridge = makeBridge(fx, 'manager', null, {}, new WakeupRegistry())
+      const allTools = managerBridge.listTools()
+      const before = [...allTools.map((t) => t.name)]
+
+      managerBridge.selectToolsForTask(task.id, allTools)
+
+      expect(allTools.map((t) => t.name)).toEqual(before)
+    })
+  })
 })

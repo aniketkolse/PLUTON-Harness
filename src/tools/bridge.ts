@@ -244,6 +244,89 @@ export class PlutonToolBridge implements McpToolHost {
     })
   }
 
+  /**
+   * Task-aware tool selection (Batch 6).
+   *
+   * Filters the caller's permitted tools down to those relevant for a specific
+   * task, based on the task's writeScope and acceptance criteria. This is a
+   * narrowing filter only: it never grants permission for a tool the caller
+   * does not already have, and it never hides a tool the caller is authorized
+   * to use unless the task's scope makes it clearly irrelevant.
+   *
+   * Selection rules:
+   * - `task.inspect`, `task.get_result`, `task.cancel`, `task.wait` are always
+   *   available (task lifecycle tools).
+   * - `task.create`, `task.delegate` are always available (delegation tools).
+   * - `diff.inspect`, `project.read` are always available (read-only inspection).
+   * - `ship.message`, `ship.inbox` are always available (peer coordination).
+   * - `approval.request`, `review.report`, `ship.propose_create`,
+   *   `task.request_revision` are always available (governance tools).
+   * - `scope.declare`, `scope.release` are included only if the task has a
+   *   non-empty writeScope (they are scope-management tools).
+   * - `run.stop` is always available (emergency stop).
+   *
+   * Returns the subset of `candidateTools` that are relevant for this task.
+   * Does not mutate state; never adds tools the caller lacks permission for.
+   */
+  selectToolsForTask(taskId: string, availableTools: McpToolInfo[]): McpToolInfo[] {
+    const task = this.runEnv ? this.runEnv.store.getTaskOrNull(taskId) : null
+    const writeScope = task?.writeScope ?? []
+    const acceptanceCriteria = task?.acceptanceCriteria ?? []
+    const hasWriteScope = writeScope.length > 0
+    const hasAcceptanceCriteria = acceptanceCriteria.length > 0
+
+    // Always-available tools (task lifecycle, read-only inspection, governance)
+    const alwaysAvailable = new Set([
+      'task.inspect',
+      'task.get_result',
+      'task.cancel',
+      'task.wait',
+      'task.create',
+      'task.delegate',
+      'diff.inspect',
+      'project.read',
+      'ship.message',
+      'ship.inbox',
+      'approval.request',
+      'review.report',
+      'ship.propose_create',
+      'task.request_revision',
+      'run.stop',
+    ])
+
+    // Scope-management tools: only relevant when the task has a write scope
+    const scopeTools = new Set(['scope.declare', 'scope.release'])
+
+    const result: McpToolInfo[] = []
+    for (const tool of availableTools) {
+      // Never include tools the caller lacks permission for
+      const def = getToolDef(tool.name)
+      if (!def || !this.permissions.includes(def.permission)) continue
+
+      // Always-available tools are always included
+      if (alwaysAvailable.has(tool.name)) {
+        result.push(tool)
+        continue
+      }
+
+      // Scope-management tools require a write scope
+      if (scopeTools.has(tool.name)) {
+        if (hasWriteScope) result.push(tool)
+        continue
+      }
+
+      // Anything else (shouldn't happen with the current catalog) is included
+      // only if the task's acceptance criteria mention one of its write scopes,
+      // otherwise excluded as irrelevant.
+      const hasRelevantKeyword = acceptanceCriteria.some((c) =>
+        writeScope.some((ws) => c.toLowerCase().includes(ws.toLowerCase()))
+      )
+      if (hasRelevantKeyword) result.push(tool)
+    }
+
+    return result
+  }
+
   async call(name: string, args: unknown, opts?: { signal?: AbortSignal }): Promise<McpToolCallResult> {
     const started = this.now()
     const displayName = name.length > 200 ? `${name.slice(0, 200)}…` : name
@@ -304,13 +387,40 @@ export class PlutonToolBridge implements McpToolHost {
         `ship '${this.runEnv!.callerShipId}' lacks permission '${def.permission}' for tool '${def.name}'`,
       )
     }
+
+    // Batch 6: record tool invocation start (durable, before execution)
+    this.audit('tool.invoked', {
+      tool: def.name,
+      taskId: this.runEnv?.callerTaskId ?? null,
+      shipId: this.callerShipId,
+      startedAt: this.now(),
+      argsKeys: args !== null && typeof args === 'object' && !Array.isArray(args) ? Object.keys(args) : undefined,
+    } as JsonValue)
+
     try {
       const data = await TOOL_HANDLERS[def.name](env, args)
       const result: McpToolCallResult = { ok: true, data: this.bound(data) }
-      this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.now() - started })
-      return result
-    } catch (e) {
-      this.audit('tool.call', {
+      // Batch 6: record tool completion (durable)
+    this.audit('tool.completed', {
+      tool: def.name,
+      taskId: this.runEnv?.callerTaskId ?? null,
+      shipId: this.callerShipId,
+      durationMs: this.now() - started,
+      resultTruncated: result.data === undefined ? undefined : JSON.stringify(result.data).length > this.maxToolResultChars,
+    } as JsonValue)
+    this.audit('tool.call', { tool: def.name, ok: true, mutating: def.mutating, durationMs: this.now() - started })
+    return result
+  } catch (e) {
+    // Batch 6: record tool failure (durable)
+    this.audit('tool.failed', {
+      tool: def.name,
+      taskId: this.runEnv?.callerTaskId ?? null,
+      shipId: this.callerShipId,
+      durationMs: this.now() - started,
+      errorCode: e instanceof ZodError ? 'invalid_arguments' : e instanceof PlutonError ? e.code : 'internal_error',
+      errorMessage: e instanceof Error ? e.message.slice(0, 1_000) : String(e),
+    } as JsonValue)
+    this.audit('tool.call', {
         tool: def.name,
         ok: false,
         mutating: def.mutating,

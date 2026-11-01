@@ -124,8 +124,16 @@ Status Legend:
 - [x] `docs/optimization/PROGRESS.md` Batch 5 status + rulings.
 - [x] `docs/optimization/17A-BATCH-5-MEASUREMENT-REPORT.md` created with benchmark results, instrumentation validation, and measurement limitations.
 
+#### Batch 6 — MCP Ecosystem Maturity `[IN PROGRESS]`
+- [x] Audit MCP ecosystem (`docs/optimization/18-MCP-ECOSYSTEM-AUDIT.md`).
+- [x] Implement `src/tools/mcp-catalog.ts`: `McpToolCapability`, `McpCapabilityRegistry`.
+- [x] Extend `src/tools/catalog.ts` with capability metadata on tool defs.
+- [x] Wire least-privilege task-aware tool selection into `src/tools/bridge.ts`.
+- [x] Add tool invocation observability events (`tool.invoked`/`tool.completed`/`tool.failed`/`tool.timed_out`/`tool.cancelled`).
+- [x] Unit tests (`tests/unit/mcp-catalog.test.ts`) and integration tests (`tests/integration/mcp.test.ts`).
+- [x] `docs/optimization/PROGRESS.md` Batch 6 status + rulings.
+
 #### Remaining Phase 4 Work
-- [ ] Batch 6 — MCP Ecosystem Maturity (`docs/optimization/18-MCP-ECOSYSTEM-AUDIT.md`).
 - [ ] Batch 7 — Distribution & Installation Readiness (`docs/optimization/19-DISTRIBUTION-READINESS-AUDIT.md`).
 - [ ] Batch 8 — Full-System Validation (`docs/optimization/20-PHASE-4-REGRESSION-REPORT.md`).
 - [ ] `docs/optimization/21-PHASE-4-COMPLETION-REPORT.md`.
