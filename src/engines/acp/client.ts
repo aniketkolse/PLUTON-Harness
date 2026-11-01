@@ -145,10 +145,12 @@ export class AcpClient {
 
   private cleanupChild(): void {
     if (this.child) {
-      try {
-        this.child.kill('SIGKILL')
-      } catch {
-        // ignore
+      if (this.exitInfo === null) {
+        try {
+          this.child.kill('SIGKILL')
+        } catch {
+          // ignore
+        }
       }
       this.child = null
     }
@@ -315,6 +317,7 @@ export class AcpClient {
       await this.raceExit(graceMs)
     }
     if (this.state !== 'dead') this.dieNow(new EngineProtocolError('acp client closed'))
+    this.cleanupChild()
   }
 
   private async raceExit(graceMs: number): Promise<void> {

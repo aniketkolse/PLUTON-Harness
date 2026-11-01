@@ -52,9 +52,18 @@ export interface ToolHttpServerOptions {
   maxRequestBytes?: number
   /** Diagnostics sink. Defaults to process.stderr.write (never stdout). */
   diagnosticSink?: McpDiagnosticSink
+  /** Global maximum concurrent requests being processed. Default 64. */
+  maxConcurrentRequests?: number
+  /** Maximum concurrent requests being processed per session. Default 8. */
+  maxConcurrentRequestsPerSession?: number
+  /** Maximum queued requests waiting for a concurrency slot. Default 16. */
+  maxQueueDepth?: number
 }
 
 export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
+export const DEFAULT_MAX_CONCURRENT_REQUESTS = 64
+export const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_SESSION = 8
+export const DEFAULT_MAX_QUEUE_DEPTH = 16
 
 /**
  * The bridge endpoint pair a `restricted` native session needs: the AF_UNIX
@@ -79,6 +88,15 @@ export const DRAIN_GRACE_MS = 5_000
 interface RegisteredSession {
   server: McpStdioServer
   spec: ToolHttpSessionSpec
+  activeRequests: number
+}
+
+interface QueuedRequest {
+  token: string
+  session: RegisteredSession
+  signal: AbortSignal
+  onAbort: () => void
+  run: () => void
 }
 
 export class ToolHttpServer {
@@ -92,6 +110,11 @@ export class ToolHttpServer {
   private readonly serverVersion: string | undefined
   private readonly requestedUnixPath: string | null
   private readonly wantUnixSocket: boolean
+  private readonly maxConcurrentRequests: number
+  private readonly maxConcurrentRequestsPerSession: number
+  private readonly maxQueueDepth: number
+  private activeGlobalCount = 0
+  private readonly queue: QueuedRequest[] = []
   private unixHttp: Server | null = null
   private boundPort: number | null = null
   private boundUnixPath: string | null = null
@@ -111,6 +134,9 @@ export class ToolHttpServer {
     this.serverVersion = opts.serverVersion
     this.requestedUnixPath = opts.unixPath ?? null
     this.wantUnixSocket = opts.unixSocket ?? false
+    this.maxConcurrentRequests = opts.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS
+    this.maxConcurrentRequestsPerSession = opts.maxConcurrentRequestsPerSession ?? DEFAULT_MAX_CONCURRENT_REQUESTS_PER_SESSION
+    this.maxQueueDepth = opts.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH
     this.http = this.createHttpServer()
   }
 
@@ -140,13 +166,41 @@ export class ToolHttpServer {
         diagnosticSink: this.diagnosticSink,
       }),
       spec,
+      activeRequests: 0,
     })
     return { token }
   }
 
   /** Drop a session's token (e.g. when its task finishes). Returns false when unknown. */
   unregister(token: string): boolean {
-    return this.sessions.delete(token)
+    const removed = this.sessions.delete(token)
+    this.cancelQueuedForToken(token)
+    return removed
+  }
+
+  /** Unregister all sessions matching a predicate (e.g. by taskId or runId). */
+  unregisterMatching(predicate: (spec: ToolHttpSessionSpec) => boolean): number {
+    let count = 0
+    for (const [token, session] of this.sessions) {
+      if (predicate(session.spec)) {
+        this.sessions.delete(token)
+        this.cancelQueuedForToken(token)
+        count++
+      }
+    }
+    return count
+  }
+
+  private cancelQueuedForToken(token: string): void {
+    for (let i = 0; i < this.queue.length; i++) {
+      const item = this.queue[i]!
+      if (item.token === token) {
+        this.queue.splice(i, 1)
+        item.signal.removeEventListener('abort', item.onAbort)
+        item.onAbort()
+        i--
+      }
+    }
   }
 
   sessionCount(): number {
@@ -231,6 +285,10 @@ export class ToolHttpServer {
     //    instead of outliving the store (host-mode smoke: a pending task.wait
     //    touched the closed database at process shutdown).
     this.shutdown.abort()
+    for (const item of this.queue.splice(0)) {
+      item.signal.removeEventListener('abort', item.onAbort)
+      item.onAbort()
+    }
     const unix = this.unixHttp
     this.unixHttp = null
     const unixPath = this.boundUnixPath
@@ -287,11 +345,14 @@ export class ToolHttpServer {
    * Signal handed to one request's tool call: fires when that client goes away
    * or when the server shuts down, whichever happens first.
    */
-  private requestSignal(res: ServerResponse): AbortSignal {
+  private requestSignal(req: IncomingMessage, res: ServerResponse): AbortSignal {
     const closed = new AbortController()
-    res.once('close', () => {
+    const onAbort = (): void => {
       closed.abort()
-    })
+    }
+    req.once('close', onAbort)
+    res.once('close', onAbort)
+    req.socket?.once('close', onAbort)
     return AbortSignal.any([this.shutdown.signal, closed.signal])
   }
 
@@ -321,11 +382,92 @@ export class ToolHttpServer {
       total += buf.length
       if (total > this.maxRequestBytes) {
         tooLarge = true
+        if (total > this.maxRequestBytes * 2) {
+          req.resume()
+          break
+        }
         continue // keep draining so the 413 can actually be delivered
       }
       chunks.push(buf)
     }
     return tooLarge ? null : Buffer.concat(chunks).toString('utf8')
+  }
+
+  private acquireSlot(token: string, session: RegisteredSession, signal: AbortSignal): Promise<() => void> {
+    if (signal.aborted) {
+      return Promise.reject(new Error('aborted'))
+    }
+    if (
+      this.activeGlobalCount < this.maxConcurrentRequests &&
+      session.activeRequests < this.maxConcurrentRequestsPerSession
+    ) {
+      this.activeGlobalCount++
+      session.activeRequests++
+      return Promise.resolve(() => {
+        session.activeRequests--
+        this.activeGlobalCount--
+        this.drainQueue()
+      })
+    }
+
+    if (this.queue.length >= this.maxQueueDepth) {
+      const err = new Error('capacity_exhausted')
+      ;(err as { code?: string }).code = 'CAPACITY_EXHAUSTED'
+      return Promise.reject(err)
+    }
+
+    return new Promise<() => void>((resolve, reject) => {
+      const item: QueuedRequest = {
+        token,
+        session,
+        signal,
+        onAbort: () => {
+          this.removeFromQueue(item)
+          reject(new Error('aborted'))
+        },
+        run: () => {
+          this.activeGlobalCount++
+          session.activeRequests++
+          signal.removeEventListener('abort', item.onAbort)
+          resolve(() => {
+            session.activeRequests--
+            this.activeGlobalCount--
+            this.drainQueue()
+          })
+        },
+      }
+      signal.addEventListener('abort', item.onAbort, { once: true })
+      this.queue.push(item)
+    })
+  }
+
+  private removeFromQueue(item: QueuedRequest): void {
+    const idx = this.queue.indexOf(item)
+    if (idx !== -1) {
+      this.queue.splice(idx, 1)
+    }
+  }
+
+  private drainQueue(): void {
+    if (this.queue.length === 0) return
+    if (this.activeGlobalCount >= this.maxConcurrentRequests) return
+
+    for (let i = 0; i < this.queue.length; i++) {
+      const item = this.queue[i]!
+      if (item.signal.aborted) {
+        this.queue.splice(i, 1)
+        item.signal.removeEventListener('abort', item.onAbort)
+        item.onAbort()
+        i--
+        continue
+      }
+      if (item.session.activeRequests < this.maxConcurrentRequestsPerSession) {
+        this.queue.splice(i, 1)
+        item.run()
+        if (this.activeGlobalCount >= this.maxConcurrentRequests) break
+        i--
+      }
+    }
   }
 
   private reply(res: ServerResponse, status: number, payload: unknown): void {
@@ -349,7 +491,7 @@ export class ToolHttpServer {
       }
       const token = this.bearerToken(req)
       const session = token === null ? null : this.sessionForToken(token)
-      if (session === null) {
+      if (session === null || token === null) {
         this.reply(res, 401, { error: 'unauthorized', message: 'missing or unknown bearer token' })
         return
       }
@@ -358,14 +500,33 @@ export class ToolHttpServer {
         this.reply(res, 413, { error: 'payload_too_large', message: `request exceeds ${String(this.maxRequestBytes)} bytes` })
         return
       }
-      const response = await session.server.handleLine(body, { signal: this.requestSignal(res) })
-      if (response === null) {
-        if (!res.destroyed && !res.writableEnded) res.writeHead(202).end() // notification accepted, no answer by design
+      const signal = this.requestSignal(req, res)
+      let releaseSlot: () => void
+      try {
+        releaseSlot = await this.acquireSlot(token, session, signal)
+      } catch (e) {
+        if ((e as { code?: string })?.code === 'CAPACITY_EXHAUSTED' || (e instanceof Error && e.message === 'capacity_exhausted')) {
+          this.reply(res, 429, { error: 'capacity_exhausted', message: 'tool bridge concurrency capacity exceeded' })
+          return
+        }
         return
       }
-      if (res.destroyed || res.writableEnded) return // handler outlived its client (shutdown/disconnect)
-      res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(response) })
-      res.end(response)
+      if (signal.aborted) {
+        releaseSlot()
+        return
+      }
+      try {
+        const response = await session.server.handleLine(body, { signal })
+        if (response === null) {
+          if (!res.destroyed && !res.writableEnded) res.writeHead(202).end() // notification accepted, no answer by design
+          return
+        }
+        if (res.destroyed || res.writableEnded) return // handler outlived its client (shutdown/disconnect)
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(response) })
+        res.end(response)
+      } finally {
+        releaseSlot()
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       this.diagnosticSink(`tool-http: request failed: ${message}`)

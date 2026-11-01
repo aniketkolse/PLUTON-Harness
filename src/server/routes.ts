@@ -1024,36 +1024,46 @@ export class ApiRouter {
 
         const modelsByEngine: Record<string, unknown[]> = {}
         for (const engineKind of engineKinds) {
+          const matchingShip = ships.find((m) => m.engineKind === engineKind)
+          const unavailableFor = (reason: string): unknown[] =>
+            matchingShip
+              ? [{ id: matchingShip.model, source: 'static', available: false, reason }]
+              : []
           try {
             const adapter = getEngineAdapter(engineKind)
+            let listed: unknown[]
             if (typeof adapter.listModelsWithAvailability === 'function') {
-              modelsByEngine[engineKind] = await adapter.listModelsWithAvailability()
+              listed = await adapter.listModelsWithAvailability()
             } else {
               const models = await adapter.listModels()
-              modelsByEngine[engineKind] = models.map((m) => ({
+              listed = models.map((m) => ({
                 ...m,
                 available: true,
               }))
             }
+            // An empty inventory falls back to the static Ship models for opencode so
+            // the UI and CLI show known model candidates with availability status.
+            modelsByEngine[engineKind] =
+              listed.length > 0
+                ? listed
+                : engineKind === 'opencode'
+                  ? SHIP_WORKER_MODELS.map((id) => ({
+                      id,
+                      source: 'catalog',
+                      available: false,
+                      reason: `engine '${engineKind}' reported no models`,
+                    }))
+                  : unavailableFor(`engine '${engineKind}' reported no models`)
           } catch (err) {
-            const matchingShip = ships.find((m) => m.engineKind === engineKind)
-            if (matchingShip) {
-              modelsByEngine[engineKind] = [
-                {
-                  id: matchingShip.model,
-                  source: 'static',
-                  available: false,
-                  reason: err instanceof Error ? err.message : String(err),
-                },
-              ]
-            } else if (engineKind === 'opencode') {
-              modelsByEngine[engineKind] = SHIP_WORKER_MODELS.map((id) => ({
-                id,
-                source: 'catalog',
-                available: false,
-                reason: err instanceof Error ? err.message : String(err),
-              }))
-            }
+            modelsByEngine[engineKind] =
+              engineKind === 'opencode'
+                ? SHIP_WORKER_MODELS.map((id) => ({
+                    id,
+                    source: 'catalog',
+                    available: false,
+                    reason: err instanceof Error ? err.message : String(err),
+                  }))
+                : unavailableFor(err instanceof Error ? err.message : String(err))
           }
         }
         if (this.customModels.length > 0) {

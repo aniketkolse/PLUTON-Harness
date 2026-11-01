@@ -26,10 +26,10 @@ import type {
   EngineModel,
   EngineSession,
   ModelAvailability,
-  PromptRequest,
   StartSessionRequest,
 } from '../contract/types.ts'
 import { OPENCODE_MISSING_FIX, assertNonEmptyModel, resolveOpenCodeBinary } from './discover.ts'
+import { classifyModelError } from '../model-health.ts'
 
 export { type ModelAvailability } from '../contract/types.ts'
 
@@ -151,9 +151,14 @@ export function buildEngineEnv(
   return { ...env, ...extra }
 }
 
+/**
+ * Compatibility helper for callers/tests that only need the usage-limit
+ * question. Classification lives in `model-health.ts` so the adapter and the
+ * supervisor can never disagree about what a provider error means.
+ */
 export function isModelLimitError(msg: string): boolean {
   if (!msg) return false
-  return /\b(free usage limit reached|connect a provider.*or switch models|quota exceeded|rate limit|resource[_\s]exhausted|too many requests)\b/i.test(msg)
+  return classifyModelError({ providerMessage: msg }).category === 'usage-limit'
 }
 
 export class OpenCodeEngineSession extends AcpEngineSessionBase {
@@ -161,11 +166,6 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
   private readonly approvalPolicy: OpenCodeApprovalPolicy
   private readonly adapter?: OpenCodeEngineAdapter
   private configOptions: unknown
-  readonly originalModel: string
-  private currentModel: string
-  private readonly exhaustedModels = new Set<string>()
-  private lastRefillCheck = 0
-  private initialInstructions: string | null
   /** Diagnostics: how many permission requests were answered and how. */
   approvalDecisions: Array<{ requestId: string; decision: string }> = []
 
@@ -193,34 +193,16 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
     this.approvalPolicy = args.approvalPolicy ?? 'deny'
     this.configOptions = args.configOptions
     this.adapter = args.adapter
-    this.originalModel = args.pinnedModel
-    this.currentModel = args.pinnedModel
-    this.initialInstructions = args.instructions
     this.setPendingInstructions(args.instructions)
   }
 
-  private selectFallbackModel(): string | null {
-    const opt = readModelOption(this.configOptions)
-    if (!opt) return null
-    const preferredOrder = [
-      'opencode/flint-40b-free',
-      'opencode/beam-free',
-      'opencode/nemotron-3.5-lightning-free',
-      'opencode/glm-5.3-flash-free',
-      'opencode/deepseek-v4.1-flash-free',
-      'opencode/mimo-v2.6-flash-free',
-      'opencode/big-pickle',
-      'opencode/nemotron-3.5-super-vl-free',
-    ]
-    const candidates = opt.values.filter(
-      (m) => m !== this.currentModel && !this.exhaustedModels.has(m),
-    )
-    for (const pref of preferredOrder) {
-      if (candidates.includes(pref)) return pref
-    }
-    return candidates[0] ?? null
-  }
-
+  /**
+   * Explicit model change on the live ACP session. This is only called by an
+   * operator-facing action; the adapter never switches models on its own and
+   * never chooses a replacement. Model failure recovery belongs to the
+   * supervisor's bounded fallback loop, which owns health state and safe
+   * replay decisions.
+   */
   async switchModel(targetModel: string): Promise<boolean> {
     if (!this.adapter) return false
     try {
@@ -231,88 +213,10 @@ export class OpenCodeEngineSession extends AcpEngineSessionBase {
         targetModel,
       )
       this.configOptions = updated
-      this.currentModel = targetModel
       this.pinnedModel = targetModel
       return true
     } catch {
       return false
-    }
-  }
-
-  override async *sendPrompt(req: PromptRequest): AsyncIterable<EngineEvent> {
-    if (this.currentModel !== this.originalModel && Date.now() - this.lastRefillCheck > 60_000) {
-      this.lastRefillCheck = Date.now()
-      const refilled = await this.switchModel(this.originalModel)
-      if (refilled) {
-        this.exhaustedModels.delete(this.originalModel)
-      }
-    }
-
-    while (true) {
-      let limitError: string | null = null
-      const buffer: EngineEvent[] = []
-      let success = false
-
-      for await (const ev of super.sendPrompt(req)) {
-        if (ev.kind === 'error' && isModelLimitError(ev.message)) {
-          limitError = ev.message
-        }
-        if (ev.kind === 'result' && ev.outcome === 'success') {
-          success = true
-        }
-        buffer.push(ev)
-      }
-
-      if (success || !limitError) {
-        for (const ev of buffer) yield ev
-        return
-      }
-
-      this.exhaustedModels.add(this.currentModel)
-      const candidate = this.selectFallbackModel()
-      if (!candidate) {
-        for (const ev of buffer) yield ev
-        return
-      }
-
-      if (this.permissionChannel && this.approvalPolicy === 'interactive') {
-        const decision = await this.permissionChannel.requestPermission({
-          requestId: newId('approval'),
-          description: `Model '${this.currentModel}' reached usage limit (${limitError}). Continue with switched model '${candidate}' or stop?`,
-          scope: { action: 'model_switch', from: this.currentModel, to: candidate, reason: limitError },
-        })
-        if (decision !== 'allow') {
-          yield {
-            kind: 'error',
-            code: 'engine_protocol_error',
-            message: `Operator stopped work: denied model switch to '${candidate}'`,
-          }
-          yield {
-            kind: 'result',
-            outcome: 'cancelled',
-            summary: `work stopped: model '${this.currentModel}' hit usage limit and switch to '${candidate}' was denied`,
-          }
-          return
-        }
-      }
-
-      const switched = await this.switchModel(candidate)
-      if (!switched) {
-        for (const ev of buffer) yield ev
-        return
-      }
-
-      if (this.initialInstructions) {
-        this.setPendingInstructions(this.initialInstructions)
-      }
-
-      yield { kind: 'status', status: 'busy' }
-      yield {
-        kind: 'text',
-        text: `\n[PLUTON model auto-switched to ${candidate}: ${this.originalModel} reached usage limit]\n`,
-      }
-
-      continue
     }
   }
 

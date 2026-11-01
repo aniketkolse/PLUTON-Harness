@@ -369,6 +369,7 @@ export interface SearchMessageResult {
   text: string
   snippet?: string
   createdAt: string
+  rank?: number
 }
 
 export interface SearchEventResult {
@@ -378,6 +379,7 @@ export interface SearchEventResult {
   seq: number
   snippet?: string
   createdAt: string
+  rank?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -1660,6 +1662,25 @@ export class Store {
         : (this.db
             .prepare('SELECT * FROM events WHERE run_id = ? AND seq > ? AND type = ? ORDER BY seq ASC LIMIT ?')
             .all(runId, afterSeq, type, limit) as Row[])
+    return rows.map(rowToEvent)
+  }
+
+  /**
+   * One task's events, oldest first. `limit` keeps the newest N rows of the
+   * selected types (bounded read for hot recovery paths); the result is
+   * re-ordered to chronological order so callers can fold it left-to-right.
+   */
+  listTaskEvents(taskId: string, opts: { types?: readonly string[]; limit?: number } = {}): EventRecord[] {
+    const limit = opts.limit ?? 200
+    const types = opts.types ?? []
+    const typeFilter = types.length > 0 ? ` AND type IN (${types.map(() => '?').join(', ')})` : ''
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM events WHERE task_id = ?${typeFilter} ORDER BY seq DESC LIMIT ?
+         ) ORDER BY seq ASC`,
+      )
+      .all(taskId, ...types, limit) as Row[]
     return rows.map(rowToEvent)
   }
 

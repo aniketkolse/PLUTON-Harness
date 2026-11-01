@@ -9,6 +9,7 @@ import type {
   TaskModelRequirements,
 } from './contract/types.ts'
 import { ModelRegistry, type ModelRegistryEntry } from './model-registry.ts'
+import { ModelPerformanceMonitor, performanceHealthAdjustment } from './model-performance.ts'
 
 /**
  * Capability-based model evaluation and task-aware selection (PLUTON 3.2, Phase 3).
@@ -35,6 +36,12 @@ export interface ModelSelectionInput {
   pinnedModelId?: string
   /** Engine adapter kind for the pin, when known. */
   pinnedEngineKind?: string
+  /**
+   * Restrict selection to one engine adapter kind. A Ship can only execute on
+   * its own engine, so candidates discovered from other adapters (including the
+   * dev-only mock engine) must never be selected for it.
+   */
+  engineKind?: string
   /** Provider restrictions from configuration. */
   providerAllowlist?: readonly string[]
   providerDenylist?: readonly string[]
@@ -51,6 +58,8 @@ export interface ModelSelectionInput {
   excludedModelIds?: readonly string[]
   /** Injectable clock for cooldown checks. */
   now?: () => number
+  /** Optional observed-performance monitor used as a bounded routing input. */
+  performance?: ModelPerformanceMonitor
 }
 
 export interface ModelCandidateExclusion {
@@ -99,6 +108,10 @@ export interface ModelCapabilityEvaluation {
   providerAllowed: boolean
   score: number
   breakdown: ModelScoreBreakdown
+  /** Whether observed performance influenced this evaluation. */
+  performanceApplied?: boolean
+  /** Bounded health adjustment applied ([-10, +10]); undefined when not applied. */
+  healthAdjustment?: number
 }
 
 export interface ModelSelectionOutcome {
@@ -109,6 +122,8 @@ export interface ModelSelectionOutcome {
   pinBlocked: { modelId: string; reason: string } | null
   evaluatedAt: string
   evaluations: ModelCapabilityEvaluation[]
+  /** Whether observed performance was applied to any candidate's health score. */
+  performanceApplied?: boolean
 }
 
 export interface TaskClassificationResult {
@@ -355,6 +370,7 @@ export function evaluateModel(
   requirements: TaskModelRequirements,
   restrictions: { allowlist: readonly string[]; denylist: readonly string[] },
   nowMs: number,
+  performance?: ModelPerformanceMonitor,
 ): ModelCapabilityEvaluation {
   // 1. Provider restrictions.
   const allowed = providerAllowed(entry, restrictions.allowlist, restrictions.denylist)
@@ -362,7 +378,7 @@ export function evaluateModel(
     return makeEvaluation(entry, requirements, false, {
       code: 'provider-restricted',
       reason: `provider '${entry.provider ?? '(unknown)'}' is not allowed by the configured restrictions`,
-    }, nowMs, allowed)
+    }, 0, false, nowMs, allowed)
   }
 
   // 2. Availability + cooldown.
@@ -371,13 +387,13 @@ export function evaluateModel(
     return makeEvaluation(entry, requirements, false, {
       code: 'unavailable',
       reason: availability.reason ?? `model '${entry.id}' is not available`,
-    }, nowMs, allowed)
+    }, 0, false, nowMs, allowed)
   }
   if (isTemporarilyIneligible(entry, nowMs)) {
     return makeEvaluation(entry, requirements, false, {
       code: 'temporarily-ineligible',
       reason: `model '${entry.id}' is in cooldown until ${entry.availability?.temporarilyIneligibleUntil}`,
-    }, nowMs, allowed)
+    }, 0, false, nowMs, allowed)
   }
 
   // 3. Hard required capabilities.
@@ -385,13 +401,13 @@ export function evaluateModel(
     return makeEvaluation(entry, requirements, false, {
       code: 'tool-calling-missing',
       reason: `model '${entry.id}' does not report tool/function-calling support`,
-    }, nowMs, allowed)
+    }, 0, false, nowMs, allowed)
   }
   if (requirements.requiresMultimodal && entry.multimodal !== true) {
     return makeEvaluation(entry, requirements, false, {
       code: 'multimodal-missing',
       reason: `model '${entry.id}' does not report multimodal support`,
-    }, nowMs, allowed)
+    }, 0, false, nowMs, allowed)
   }
   if (requirements.minContextWindow !== undefined) {
     if (typeof entry.contextWindow !== 'number' || entry.contextWindow < requirements.minContextWindow) {
@@ -401,7 +417,7 @@ export function evaluateModel(
           typeof entry.contextWindow !== 'number'
             ? `model '${entry.id}' has unknown context window (required ${requirements.minContextWindow})`
             : `model '${entry.id}' context window ${entry.contextWindow} < required ${requirements.minContextWindow}`,
-      }, nowMs, allowed)
+      }, 0, false, nowMs, allowed)
     }
   }
   if (requirements.requiredCapabilities && requirements.requiredCapabilities.length > 0) {
@@ -412,7 +428,7 @@ export function evaluateModel(
       return makeEvaluation(entry, requirements, false, {
         code: 'missing-capability',
         reason: `model '${entry.id}' lacks required capabilities ${requirements.requiredCapabilities.join(', ')}`,
-      }, nowMs, allowed)
+      }, 0, false, nowMs, allowed)
     }
   }
   // Hard cost ceiling.
@@ -425,7 +441,7 @@ export function evaluateModel(
           typeof cost !== 'number'
             ? `model '${entry.id}' has unknown cost (ceiling ${requirements.maxCostUsdPerMillionTokens})`
             : `model '${entry.id}' cost ${cost} > ceiling ${requirements.maxCostUsdPerMillionTokens}`,
-      }, nowMs, allowed)
+      }, 0, false, nowMs, allowed)
     }
   }
   // Hard latency ceiling.
@@ -438,12 +454,30 @@ export function evaluateModel(
           typeof latency !== 'number'
             ? `model '${entry.id}' has unknown latency (ceiling ${requirements.maxLatencyMs})`
             : `model '${entry.id}' latency ${latency} > ceiling ${requirements.maxLatencyMs}`,
-      }, nowMs, allowed)
+      }, 0, false, nowMs, allowed)
     }
   }
 
-  // Eligible: compute score.
-  return makeEvaluation(entry, requirements, true, undefined, nowMs, allowed)
+  // Eligible: compute score, applying bounded observed-performance adjustment.
+  let performanceAdjustment = 0
+  let performanceApplied = false
+  if (performance !== undefined) {
+    const summary = performance.summaryFor(entry.id, entry.engineKind)
+    if (summary.sampleCount > 0) {
+      performanceAdjustment = performanceHealthAdjustment(summary)
+      performanceApplied = true
+    }
+  }
+  return makeEvaluation(
+    entry,
+    requirements,
+    true,
+    undefined,
+    nowMs,
+    allowed,
+    performanceAdjustment,
+    performanceApplied,
+  )
 }
 
 function makeEvaluation(
@@ -453,6 +487,8 @@ function makeEvaluation(
   exclusion: Omit<ModelCandidateExclusion, 'engineKind' | 'modelId'> | undefined,
   nowMs: number,
   providerAllowed: boolean,
+  performanceAdjustment: number,
+  performanceApplied: boolean,
 ): ModelCapabilityEvaluation {
   const normalizedExclusion =
     exclusion === undefined
@@ -479,7 +515,7 @@ function makeEvaluation(
   const latencyStatus: CapabilityStatus =
     typeof entry.latencyMs === 'number' ? 'supported' : 'unknown'
 
-  const breakdown = computeScore(entry, requirements, eligible)
+  const breakdown = computeScore(entry, requirements, eligible, performanceAdjustment)
 
   return {
     engineKind: entry.engineKind,
@@ -493,6 +529,8 @@ function makeEvaluation(
     providerAllowed,
     score: eligible ? breakdown.total : 0,
     breakdown,
+    ...(performanceApplied ? { performanceApplied: true } : {}),
+    ...(performanceAdjustment !== 0 ? { healthAdjustment: performanceAdjustment } : {}),
   }
 }
 
@@ -500,6 +538,7 @@ function computeScore(
   entry: ModelRegistryEntry,
   requirements: TaskModelRequirements,
   eligible: boolean,
+  performanceAdjustment?: number,
 ): ModelScoreBreakdown {
   if (!eligible) {
     return { capabilityFit: 0, context: 0, health: 0, cost: 0, latency: 0, verified: 0, total: 0 }
@@ -553,6 +592,11 @@ function computeScore(
   if (typeof entry.latencyMs === 'number') verified += 1
   verified = Math.min(5, verified)
 
+  // Bounded observed-performance adjustment to health only (applied before total).
+  if (performanceAdjustment !== undefined && performanceAdjustment !== 0) {
+    health = Math.max(0, Math.min(20, health + performanceAdjustment))
+  }
+
   const total = capabilityFit + context + health + cost + latency + verified
   return { capabilityFit, context, health, cost, latency, verified, total }
 }
@@ -587,10 +631,19 @@ export function selectModel(
   const restrictions = { allowlist, denylist }
 
   const excludedSet = new Set(input.excludedModelIds ?? [])
-  const entries = registry.list().filter((entry) => !excludedSet.has(entry.id))
+  const performance = input.performance
+  const entries = registry
+    .list()
+    .filter((entry) => !excludedSet.has(entry.id))
+    .filter((entry) => input.engineKind === undefined || entry.engineKind === input.engineKind)
   const evaluations: ModelCapabilityEvaluation[] = entries.map((entry) =>
-    evaluateModel(entry, requirements, restrictions, nowMs),
+    evaluateModel(entry, requirements, restrictions, nowMs, performance),
   )
+
+  let performanceApplied = false
+  for (const ev of evaluations) {
+    if (ev.performanceApplied) performanceApplied = true
+  }
 
   const exclusions = evaluations
     .filter((ev) => !ev.eligible && ev.exclusion !== undefined)
@@ -687,5 +740,6 @@ export function selectModel(
     pinBlocked,
     evaluatedAt: nowIso,
     evaluations,
+    ...(performanceApplied ? { performanceApplied: true } : {}),
   }
 }

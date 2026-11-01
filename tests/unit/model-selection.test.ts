@@ -392,4 +392,28 @@ describe('selectModel', () => {
     expect(outcome.selection?.scoreBreakdown).toBeDefined()
     expect(outcome.selection?.scoreBreakdown?.total).toBe(outcome.selection?.score)
   })
+
+  it('never crosses engine boundaries when an engine kind is requested', () => {
+    const dev = 'mock/high-scoring-model'
+    const real = 'opencode/low-scoring-model'
+    const registry = new ModelRegistry()
+    // The dev-only entry has complete metadata and would outrank the real one.
+    registry.replaceEngineModels(
+      'mock',
+      [model(dev, { toolCalling: true, contextWindow: 128_000, capabilities: { taskFit: ['simple'] } })],
+      '2030-01-01T00:00:00.000Z',
+    )
+    registry.replaceEngineModels(
+      'opencode',
+      [model(real, { toolCalling: true, contextWindow: 8_000 })],
+      '2030-01-01T00:00:00.000Z',
+    )
+
+    const unrestricted = selectModel(registry, { task: { title: 'simple task' } })
+    expect(unrestricted.selection?.modelId).toBe(dev)
+
+    const restricted = selectModel(registry, { task: { title: 'simple task' }, engineKind: 'opencode' })
+    expect(restricted.selection?.modelId).toBe(real)
+    expect(restricted.candidatesConsidered).toBe(1)
+  })
 })

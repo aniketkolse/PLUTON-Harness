@@ -26,7 +26,7 @@ describe('opencode model limit detection & auto-switch', () => {
     expect(isModelLimitError('syntax error')).toBe(false)
   })
 
-  it('auto-switches to available fallback model when prompt hits free limit and retries successfully', async () => {
+  it('surfaces usage limit error as error and result events without silent auto-switch', async () => {
     const agent = new FakeAcpAgent()
     const scriptState = scriptOpencode(agent, {
       defaultModel: MODEL_A,
@@ -36,7 +36,7 @@ describe('opencode model limit detection & auto-switch', () => {
       ],
     })
 
-    // Custom behavior: MODEL_A fails with free limit error, MODEL_B succeeds
+    // Custom behavior: MODEL_A fails with free limit error
     const origOnMessage = agent.onMessage
     agent.onMessage = (msg, a) => {
       if (msg.method === 'session/prompt' && scriptState.currentModel === MODEL_A) {
@@ -58,20 +58,24 @@ describe('opencode model limit detection & auto-switch', () => {
       env: {},
       configDir: 'C:\\conf',
     })
+    expect(session).toBeInstanceOf(OpenCodeEngineSession)
+    if (!(session instanceof OpenCodeEngineSession)) throw new Error('expected an OpenCode engine session')
 
     expect(session.pinnedModel).toBe(MODEL_A)
     const events = await collect(session.sendPrompt({ text: 'Hello' }))
-    // Should have switched to MODEL_B and completed successfully
-    expect(session.pinnedModel).toBe(MODEL_B)
-    expect(scriptState.currentModel).toBe(MODEL_B)
-    const text = events.filter((e) => e.kind === 'text').map((e) => e.text).join('')
-    expect(text).toContain('switched to opencode/beam-free')
-    expect(events.at(-1)).toMatchObject({ kind: 'result', outcome: 'success' })
+
+    // The adapter must not silently auto-switch; the supervisor owns fallback decisions.
+    // The model stays pinned to MODEL_A and the usage limit error is surfaced.
+    expect(session.pinnedModel).toBe(MODEL_A)
+    expect(scriptState.currentModel).toBe(MODEL_A)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err).toBeDefined()
+    expect((err as any)?.message).toContain('Free usage limit reached')
 
     await session.close()
   })
 
-  it('asks operator when interactive permissionChannel is present and stops if operator denies', async () => {
+  it('supports explicit model switching on the session via switchModel', async () => {
     const agent = new FakeAcpAgent()
     const scriptState = scriptOpencode(agent, {
       defaultModel: MODEL_A,
@@ -81,44 +85,26 @@ describe('opencode model limit detection & auto-switch', () => {
       ],
     })
 
-    const origOnMessage = agent.onMessage
-    agent.onMessage = (msg, a) => {
-      if (msg.method === 'session/prompt' && scriptState.currentModel === MODEL_A) {
-        a.respondError(msg.id as number, -32603, 'Free usage limit reached. (code -32603)')
-        return true
-      }
-      return origOnMessage(msg, a)
-    }
-
     const spawn = fakeSpawn(() => agent)
     const adapter = new OpenCodeEngineAdapter({
       binaryPath: '/fake/opencode',
       spawnFn: spawn.spawnFn,
-      approvalPolicy: 'interactive',
     })
-
-    const askedRequests: EnginePermissionRequest[] = []
-    const fakeChannel: EnginePermissionChannel = {
-      async requestPermission(req) {
-        askedRequests.push(req)
-        return 'deny' // Operator denies switch
-      },
-      abort() {},
-    }
 
     const session = await adapter.startSession({
       muse: { id: 'worker-1', slug: 'worker-1', role: 'coder', model: MODEL_A },
       workdir: 'C:\\work',
       env: {},
       configDir: 'C:\\conf',
-      approvals: fakeChannel,
     })
+    expect(session).toBeInstanceOf(OpenCodeEngineSession)
+    if (!(session instanceof OpenCodeEngineSession)) throw new Error('expected an OpenCode engine session')
 
-    const events = await collect(session.sendPrompt({ text: 'Hello' }))
-    expect(askedRequests.length).toBe(1)
-    expect(askedRequests[0]!.description).toContain("Model 'opencode/deepseek-v4.1-flash-free' reached usage limit")
-    expect(session.pinnedModel).toBe(MODEL_A) // Not switched
-    expect(events.some((e) => e.kind === 'error' && /denied|stopped/i.test(e.message))).toBe(true)
+    expect(session.pinnedModel).toBe(MODEL_A)
+    const switched = await session.switchModel(MODEL_B)
+    expect(switched).toBe(true)
+    expect(session.pinnedModel).toBe(MODEL_B)
+    expect(scriptState.currentModel).toBe(MODEL_B)
 
     await session.close()
   })

@@ -1,0 +1,11 @@
+[
+  { "id": "simple-factual", "goal": "What is the default port?", "acceptance": ["answer"], "expectedComplexity": ["simple"], "expectedWorkers": [1, 1], "expectedCapabilities": ["research"] },
+  { "id": "multi-source-research", "goal": "Research and compare three database options, then summarize findings", "acceptance": ["comparison", "summary"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [1, 4], "expectedCapabilities": ["research"] },
+  { "id": "multi-stage-coding", "goal": "Implement a new endpoint and fix the bug, then add tests", "acceptance": ["endpoint", "tests pass"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [1, 4], "expectedCapabilities": ["coding", "testing"] },
+  { "id": "parallel-research", "goal": "Research module A and research module B and research module C independently", "acceptance": ["three reports"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [2, 4], "expectedCapabilities": ["research"] },
+  { "id": "dependency-heavy", "goal": "First design the schema, then implement the migration, then verify integration", "acceptance": ["schema", "migration", "integration"], "expectedComplexity": ["complex"], "expectedWorkers": [1, 3], "expectedCapabilities": ["planning", "coding", "testing"] },
+  { "id": "large-file-analysis", "goal": "Analyze the large codebase and document all entry points and dependencies", "acceptance": ["docs"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [1, 4], "expectedCapabilities": ["research"] },
+  { "id": "tool-intensive", "goal": "Run the test suite, inspect diffs, and verify all checks pass", "acceptance": ["tests pass"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [1, 4], "expectedCapabilities": ["testing"] },
+  { "id": "verify-and-correct", "goal": "Implement feature X and verify it, request changes if tests fail", "acceptance": ["feature", "tests"], "expectedComplexity": ["moderate", "complex"], "expectedWorkers": [1, 4], "expectedCapabilities": ["coding", "testing"] },
+  { "id": "ambiguous-small", "goal": "Do the thing", "acceptance": [], "expectedComplexity": ["simple", "moderate"], "expectedWorkers": [1, 2], "expectedCapabilities": ["research"] }
+]

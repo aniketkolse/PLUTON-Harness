@@ -390,17 +390,24 @@ export function createRunSupervisor(args: {
   // PLUTON 3.3: wire model intelligence infrastructure into the supervisor.
   const modelRegistry = new ModelRegistry()
   const modelConfig = resolveModelConfig(ctx.loaded.config)
-  const discoveryEngines = listEngineKinds().map((f) => ({
-    engineKind: f.kind,
-    adapter: getEngineAdapter(f.kind),
-  }))
+  // The mock adapter is registered for tests/dev, but production runs must
+  // never discover or select its models: a mock entry with otherwise-complete
+  // metadata would outrank real OpenCode models whose capability metadata is
+  // still unknown.
+  const discoveryEngines = listEngineKinds()
+    .filter((f) => f.devOnly !== true)
+    .map((f) => ({
+      engineKind: f.kind,
+      adapter: getEngineAdapter(f.kind),
+    }))
+  const modelHealthMonitor = new ModelHealthMonitor({ registry: modelRegistry })
   const discovery = new ModelDiscoveryService({
     engines: discoveryEngines,
     registry: modelRegistry,
+    healthMonitor: modelHealthMonitor,
     refreshIntervalMs: (ctx.loaded.config.models && ctx.loaded.config.models.discovery) ? ctx.loaded.config.models.discovery.refreshIntervalMs : 0,
   })
   void discovery.refresh().catch(() => {})
-  const modelHealthMonitor = new ModelHealthMonitor({ registry: modelRegistry })
   const modelFallbackConfig: ModelFallbackConfig = {
     maxRetriesPerModel: 2,
     cooldownMs: 300_000,
@@ -464,6 +471,9 @@ export function createRunSupervisor(args: {
         headers: { Authorization: `Bearer ${token}` },
       }
       return spec
+    },
+    onTaskTeardown: (taskId) => {
+      http.unregisterMatching((spec) => spec.taskId === taskId)
     },
     wakeups,
     diagnostic,

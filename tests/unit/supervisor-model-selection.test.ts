@@ -135,4 +135,28 @@ describe('resolveTaskModelFor (Phase 7)', () => {
     expect(r1).toBe(a)
     expect(r2).toBe(b)
   })
+
+  it('never selects a model discovered from another engine', () => {
+    const registry = new ModelRegistry()
+    // A dev-only mock entry with complete metadata outranks the real entry.
+    registry.replaceEngineModels('mock', [model('mock/dev-only', { contextWindow: 128_000 })], '2030-01-01T00:00:00.000Z')
+    registry.replaceEngineModels('opencode', [model('opencode/real-model', { contextWindow: 8_000 })], '2030-01-01T00:00:00.000Z')
+
+    const cfg = resolveModelConfig({
+      version: 1,
+      project: { name: 'p', repository: '.', default_branch: 'main', verification: [] },
+      runtime: {} as any,
+      sandbox: {} as any,
+      git: {} as any,
+      ships: { 'worker-a': { display_name: 'Worker A', role: 'coder', engine: 'opencode' } },
+    } as any)
+
+    const result = resolveTaskModelFor(
+      ship({ engineKind: 'opencode', model: 'opencode/configured' }),
+      task({ title: 'simple task' }),
+      registry,
+      cfg,
+    )
+    expect(result).toBe('opencode/real-model')
+  })
 })

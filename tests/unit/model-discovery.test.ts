@@ -6,6 +6,7 @@ import {
   registeredEngineModelDiscovery,
   type ModelDiscoveryTimers,
 } from '../../src/engines/model-discovery.ts'
+import { ModelHealthMonitor, classifyModelError } from '../../src/engines/model-health.ts'
 import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 
 /** Dynamically generated opaque ids: no real model names or versions. */
@@ -366,6 +367,16 @@ describe('ModelDiscoveryService', () => {
     expect(cleared).toBe(1)
   })
 
+  it('excludes dev-only engines from production discovery by default', () => {
+    registerBuiltinEngines()
+    const service = registeredEngineModelDiscovery()
+    expect(service.engineKinds).toContain('opencode')
+    expect(service.engineKinds).not.toContain('mock')
+
+    const optedIn = registeredEngineModelDiscovery({ includeDevOnly: true })
+    expect(optedIn.engineKinds).toContain('mock')
+  })
+
   it('composes discovery from the registered engine factories', async () => {
     registerBuiltinEngines()
     const service = registeredEngineModelDiscovery({ only: ['mock'] })
@@ -375,5 +386,41 @@ describe('ModelDiscoveryService', () => {
     expect(report.results).toHaveLength(1)
     expect(report.results[0]?.engineKind).toBe('mock')
     expect(report.results[0]?.ok).toBe(true)
+  })
+
+  it('recovers unavailable models in healthMonitor when successfully rediscovered', async () => {
+    const clock = fixedClock()
+    const m1 = modelId('m1')
+    const adapter = testAdapter('engine-recover', async () => [model(m1)])
+    const service = new ModelDiscoveryService({
+      engines: [{ engineKind: 'engine-recover', adapter }],
+      now: clock.now,
+    })
+    const healthMonitor = new ModelHealthMonitor({ registry: service.registry, now: clock.now })
+    const discoveryWithHealth = new ModelDiscoveryService({
+      engines: [{ engineKind: 'engine-recover', adapter }],
+      registry: service.registry,
+      healthMonitor,
+      now: clock.now,
+    })
+
+    // Populate registry first
+    await discoveryWithHealth.refresh()
+
+    // Mark model unavailable via auth/provider failure with 0 cooldown
+    const error = classifyModelError({
+      engineKind: 'engine-recover',
+      modelId: m1,
+      providerMessage: 'unauthorized: bad token',
+    })
+    healthMonitor.recordFailure(
+      { engineKind: 'engine-recover', modelId: m1, providerMessage: 'unauthorized: bad token' },
+      error,
+    )
+    expect(healthMonitor.getModelHealth('engine-recover', m1).state).toBe('unavailable')
+
+    // Rediscovery sees the engine respond with the model again
+    await discoveryWithHealth.refresh()
+    expect(healthMonitor.getModelHealth('engine-recover', m1).state).toBe('healthy')
   })
 })

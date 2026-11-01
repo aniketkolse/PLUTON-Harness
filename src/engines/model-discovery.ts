@@ -1,5 +1,6 @@
 import type { EngineAdapter, EngineModel } from './contract/types.ts'
 import { ModelRegistry, type ModelRegistryChange } from './model-registry.ts'
+import type { ModelHealthMonitor } from './model-health.ts'
 import { getEngineAdapter, listEngineKinds, type EngineCreateOptions } from './registry.ts'
 
 /**
@@ -29,6 +30,8 @@ export interface ModelDiscoveryOptions {
   engines: Iterable<ModelDiscoveryEngine>
   /** Registry to populate; a fresh one is created when omitted. */
   registry?: ModelRegistry
+  /** Health monitor to update when models recover on rediscovery; optional. */
+  healthMonitor?: ModelHealthMonitor
   /** Periodic refresh cadence in ms; 0 or omitted disables periodic refresh. */
   refreshIntervalMs?: number
   /** Injectable clock; defaults to `Date.now`. */
@@ -114,6 +117,7 @@ function validModels(models: unknown): { models: EngineModel[]; invalidCount: nu
 export class ModelDiscoveryService {
   readonly registry: ModelRegistry
   private readonly engines: ModelDiscoveryEngine[]
+  private readonly healthMonitor: ModelHealthMonitor | null
   private readonly intervalMs: number
   private readonly clock: () => number
   private readonly timers: ModelDiscoveryTimers
@@ -129,6 +133,7 @@ export class ModelDiscoveryService {
     }
     this.engines = [...byKind].map(([engineKind, adapter]) => ({ engineKind, adapter }))
     this.registry = options.registry ?? new ModelRegistry({ now: options.now })
+    this.healthMonitor = options.healthMonitor ?? null
     this.intervalMs = options.refreshIntervalMs ?? 0
     this.clock = options.now ?? Date.now
     this.timers = options.timers ?? DEFAULT_TIMERS
@@ -211,6 +216,17 @@ export class ModelDiscoveryService {
       if (ok) {
         try {
           applied = this.registry.replaceEngineModels(probe.engineKind, probe.models, probe.finishedAt)
+          if (this.healthMonitor !== null) {
+            for (const model of probe.models) {
+              const currentHealth = this.healthMonitor.getModelHealth(probe.engineKind, model.id)
+              if (currentHealth.state === 'unavailable') {
+                this.healthMonitor.recordSuccess({
+                  engineKind: probe.engineKind,
+                  modelId: model.id,
+                })
+              }
+            }
+          }
         } catch (applyError) {
           ok = false
           error = `registry update failed: ${errorText(applyError)}`
@@ -268,9 +284,16 @@ export class ModelDiscoveryService {
 export interface RegisteredModelDiscoveryOptions {
   /** Restrict discovery to these engine kinds; default: every registered engine. */
   only?: readonly string[]
+  /**
+   * Include engines registered as `devOnly` (the deterministic mock adapter).
+   * Default false: production selection must never see a dev-only model.
+   * Naming a dev-only kind explicitly in `only` opts it in for tests/tools.
+   */
+  includeDevOnly?: boolean
   /** Options threaded to real adapter factories (binary pinning, spawn fakes). */
   createOptions?: EngineCreateOptions
   registry?: ModelRegistry
+  healthMonitor?: ModelHealthMonitor
   refreshIntervalMs?: number
   now?: () => number
   timers?: ModelDiscoveryTimers
@@ -288,6 +311,12 @@ export function registeredEngineModelDiscovery(
   const allowed = only === undefined ? null : new Set(only)
   const engines = listEngineKinds()
     .filter((factory) => allowed === null || allowed.has(factory.kind))
+    .filter(
+      (factory) =>
+        factory.devOnly !== true ||
+        options.includeDevOnly === true ||
+        (allowed !== null && allowed.has(factory.kind)),
+    )
     .map((factory) => ({
       engineKind: factory.kind,
       adapter: getEngineAdapter(factory.kind, createOptions),

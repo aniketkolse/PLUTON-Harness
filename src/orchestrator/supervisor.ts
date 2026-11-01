@@ -23,10 +23,11 @@ import type {
   McpServerSpec,
   PromptRequest,
 } from '../engines/contract/types.ts'
-import { selectModel } from '../engines/model-selection.ts'
+import { selectModel, type ModelSelectionOutcome } from '../engines/model-selection.ts'
+import { ModelPerformanceMonitor } from '../engines/model-performance.ts'
 import type { ResolvedModelConfig, ResolvedShipModelConfig } from '../config/model-config.ts'
 import { ModelRegistry } from '../engines/model-registry.ts'
-import { ModelDiscoveryService } from '../engines/model-discovery.ts'
+import { ModelDiscoveryService, type ModelDiscoveryReport } from '../engines/model-discovery.ts'
 import { ModelHealthMonitor, classifyModelError, type ModelErrorContext, type ModelErrorClassification } from '../engines/model-health.ts'
 import { decideFallback, createFallbackState, type ModelFallbackConfig, type ModelFallbackState } from '../engines/model-fallback.ts'
 import { SESSION_BACKED_TASK_STATES, TERMINAL_TASK_STATES, isTerminal, type RunState, type TaskState } from '../domain/state.ts'
@@ -39,7 +40,11 @@ import { FileLeaseManager } from './lease-manager.ts'
 import { CircuitBreaker } from './circuit-breaker.ts'
 import { UsageLedger } from './usage-ledger.ts'
 import { WorkerMessageBus, type WorkerMessage } from './messages.ts'
+import { RecoveryManager, type RecoveryReport } from './recovery.ts'
+import { verificationRequiredForTask } from '../verify/strategy.ts'
+import { assessRun, assessmentToPromptSection, allocateWorkers, type TaskAssessment } from './task-assessment.ts'
 import { newId } from '../domain/ids.ts'
+import { buildSchedulePlan, scheduledDecision, readRunAssessment, type SchedulingDecision } from './scheduling-policy.ts'
 
 /**
  * Run supervisor (Phase 6, ADR-0006/0007).
@@ -162,6 +167,12 @@ export interface SupervisorOptions {
   modelHealthMonitor?: ModelHealthMonitor
   /** Optional fallback config for model failure recovery. */
   modelFallbackConfig?: ModelFallbackConfig
+  /** Optional lease time-to-live in seconds (undefined = no expiry). */
+  leaseTtlSeconds?: number
+  /** Optional observed-performance monitor used as a bounded routing input. */
+  modelPerformanceMonitor?: ModelPerformanceMonitor
+  /** Invoked when a task's engine sessions and workspace finish teardown. */
+  onTaskTeardown?: (taskId: string) => void
 }
 
 export interface RunOutcome {
@@ -202,6 +213,12 @@ interface PromptOutcome {
   text: string
   /** True when more text streamed than the host retains in `text`. */
   textTruncated: boolean
+  /**
+   * Tool events observed during this turn, in order. Replay safety is computed
+   * from this trace; an empty trace must mean "no tool ran", never "we did not
+   * look". The engine's per-turn event buffer already bounds its size.
+   */
+  toolTrace: EngineEvent[]
 }
 
 /**
@@ -342,7 +359,59 @@ function revisionFeedbackOf(task: TaskRecord): string | null {
   return typeof feedback === 'string' ? feedback : null
 }
 
-export function buildTaskPrompt(task: TaskRecord, ship: ShipRecord, maxChars: number): string {
+/**
+ * Durable context for an attempt that follows a crash: work the previous
+ * process already persisted is injected so the worker inspects it instead of
+ * repeating external side effects or minting duplicate child tasks. Reads the
+ * `task.recovered` row recovery wrote for exactly this attempt; malformed or
+ * absent data is null.
+ */
+function crashRecoveryNoteFor(store: Store, task: TaskRecord): string | null {
+  const events = store.listTaskEvents(task.id, { types: ['task.recovered'], limit: 100 })
+  let last: Record<string, JsonValue> | null = null
+  for (const event of events) {
+    const payload = jsonObject(event.payload)
+    if (payload === null || payload['attempt'] !== task.attempt) continue
+    last = payload
+  }
+  if (last === null) return null
+
+  const lines: string[] = []
+  const raw = last['completedTools']
+  if (Array.isArray(raw)) {
+    const tools = raw
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .slice(0, 12)
+    if (tools.length > 0) {
+      lines.push(
+        'Recovery context: a previous process died during this task. These tool calls already completed cleanly in this workspace; inspect their results instead of repeating side effects:',
+        ...tools.map((tool) => `- ${tool}`),
+      )
+    }
+  }
+
+  // Delegation is durable: a requeued parent must adopt its existing children
+  // (and their results) rather than re-delegating the same work. The ids are
+  // what `task.inspect`/`task.wait` take, so the worker can verify state.
+  const children = store.listTasks(task.runId).filter((candidate) => candidate.parentTaskId === task.id)
+  if (children.length > 0) {
+    lines.push(
+      'Existing child tasks created before the crash (inspect them; do not delegate duplicates):',
+      ...children
+        .slice(0, 20)
+        .map((child) => `- ${child.id} [${child.state}] ${child.title}${child.assigneeShipId !== null ? ` → ${child.assigneeShipId}` : ''}`),
+    )
+  }
+
+  return lines.length > 0 ? lines.join('\n') : null
+}
+
+export function buildTaskPrompt(
+  task: TaskRecord,
+  ship: ShipRecord,
+  maxChars: number,
+  recoveryNote?: string | null,
+): string {
   const lines = [
     `You are ${ship.displayName}, a ${ship.role} Ship of the Pluton-Harness control plane.`,
     '',
@@ -357,6 +426,9 @@ export function buildTaskPrompt(task: TaskRecord, ship: ShipRecord, maxChars: nu
   const revisionFeedback = revisionFeedbackOf(task)
   if (revisionFeedback !== null) {
     lines.push('', 'Revision feedback from the manager (address it in this attempt):', revisionFeedback)
+  }
+  if (recoveryNote !== undefined && recoveryNote !== null && recoveryNote !== '') {
+    lines.push('', recoveryNote)
   }
   lines.push(
     '',
@@ -377,12 +449,59 @@ export function buildTaskPrompt(task: TaskRecord, ship: ShipRecord, maxChars: nu
   return `${text.slice(0, maxChars)}\n[truncated by Pluton: prompt exceeded max_prompt_chars]`
 }
 
+export interface TaskRecoverySnapshot {
+  previousModelId: string
+  newModelId: string
+  failureReason: string
+  completedToolCalls: string[]
+  partialOutput?: string
+  workspace: string
+}
+
+export function buildTaskRecoveryPrompt(
+  task: TaskRecord,
+  ship: ShipRecord,
+  snapshot: TaskRecoverySnapshot,
+  maxChars: number,
+): string {
+  const basePrompt = buildTaskPrompt(task, ship, maxChars)
+  const lines = [
+    basePrompt,
+    '',
+    '---',
+    'TASK RECOVERY CONTEXT (previous model attempt failed):',
+    `- Switched from model '${snapshot.previousModelId}' to '${snapshot.newModelId}' due to: ${snapshot.failureReason}`,
+    `- Workspace directory: ${snapshot.workspace}`,
+  ]
+  if (snapshot.completedToolCalls.length > 0) {
+    lines.push(
+      '- The following operations already completed cleanly in this workspace; inspect their results rather than repeating side effects:',
+      ...snapshot.completedToolCalls.slice(-10).map((c) => `  * ${c}`),
+    )
+  }
+  if (snapshot.partialOutput && snapshot.partialOutput.trim().length > 0) {
+    lines.push(
+      '- Prior model progress summary before failure:',
+      snapshot.partialOutput.slice(0, 500),
+    )
+  }
+  lines.push(
+    '- Resume work from the current state of the workspace. Do not assume uncertain operations succeeded; inspect files first.',
+    '---',
+  )
+  const text = lines.join('\n')
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars)}\n[truncated by Pluton: recovery prompt exceeded max_prompt_chars]`
+}
+
 export function buildManagerPrompt(
   goal: string,
   managerShip: ShipRecord,
   ships: ShipRecord[],
   acceptanceCriteria: string[],
   maxChars: number,
+  existingTasks?: readonly TaskRecord[],
+  assessmentSection?: string,
 ): string {
   const team = ships.map((m) => `- ${m.slug} (${m.role}, engine ${m.engineKind}, model ${m.model}, workspace ${m.workspacePolicy})`)
   const lines = [
@@ -394,10 +513,28 @@ export function buildManagerPrompt(
   if (acceptanceCriteria.length > 0) {
     lines.push('', 'Acceptance criteria for the whole run:', ...acceptanceCriteria.map((c) => `- ${c}`))
   }
+  if (assessmentSection !== undefined && assessmentSection !== '') {
+    lines.push('', assessmentSection)
+  }
+  lines.push('', 'Team:', ...team)
+  if (existingTasks !== undefined && existingTasks.length > 0) {
+    // A restarted manager must adopt the durable plan, not mint a second one:
+    // these rows survived the previous process and are the authoritative work
+    // queue. Inspecting them first keeps recovery idempotent.
+    lines.push(
+      '',
+      'Durable tasks already created for this run (persisted across process restarts — resume them; never create duplicates for the same work):',
+      ...existingTasks
+        .slice(0, 100)
+        .map(
+          (t) =>
+            `- ${t.id} [${t.state}] ${t.title}${t.parentTaskId !== null ? ` (parent ${t.parentTaskId})` : ''}`,
+        ),
+      ...(existingTasks.length > 100 ? [`- … ${String(existingTasks.length - 100)} more task(s)`] : []),
+      'Inspect these records with task.inspect / task.get_result before planning any new work.',
+    )
+  }
   lines.push(
-    '',
-    'Team:',
-    ...team,
     '',
     'Rules:',
     '- Plan first: create tasks with task.create or perform direct research, coding, review, and verification within your declared permissions.',
@@ -481,6 +618,7 @@ export class RunSupervisor {
   private readonly diagnostic: (line: string) => void
   private readonly onWorkerEvent: ((event: WorkerLifecycleEvent) => void) | null
   private readonly onWorkerMessage: ((event: WorkerLifecycleEvent) => void) | null
+  private readonly onTaskTeardown: ((taskId: string) => void) | null
   /** Durable, at-most-once worker-to-worker message channel for this run. */
   readonly messageBus: WorkerMessageBus
   readonly leaseManager: FileLeaseManager
@@ -540,11 +678,13 @@ export class RunSupervisor {
     this.modelDiscovery = opts.modelDiscovery ?? null
     this.modelHealthMonitor = opts.modelHealthMonitor ?? null
     this.modelFallbackConfig = opts.modelFallbackConfig ?? null
+    this.modelPerformanceMonitor = opts.modelPerformanceMonitor ?? new ModelPerformanceMonitor()
     this.wakeups = opts.wakeups ?? new WakeupRegistry()
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})
     this.onWorkerEvent = opts.onWorkerEvent ?? null
     this.onWorkerMessage = opts.onWorkerMessage ?? null
+    this.onTaskTeardown = opts.onTaskTeardown ?? null
     this.messageBus = new WorkerMessageBus({
       store: this.store,
       projectId: this.projectId,
@@ -553,7 +693,9 @@ export class RunSupervisor {
       now: this.now,
       ...(this.onWorkerMessage !== null ? { onMessage: (message) => this.emitWorkerMessage(message) } : {}),
     })
-    this.leaseManager = opts.leaseManager ?? new FileLeaseManager()
+    this.leaseManager =
+      opts.leaseManager ??
+      new FileLeaseManager({ leaseTtlSeconds: opts.leaseTtlSeconds, now: this.now })
     this.circuitBreaker = opts.circuitBreaker ?? new CircuitBreaker()
     this.usageLedger = opts.usageLedger ?? new UsageLedger(opts.runId, undefined, opts.store)
     this.maxRetriesPerTask = opts.maxRetriesPerTask ?? 2
@@ -625,6 +767,13 @@ export class RunSupervisor {
   private notifySettled(task: TaskRecord): void {
     notifyTaskSettled(this.wakeups, this.runId, task, taskAncestorIds(this.store, task))
     this.emitSettledWorkerEvent(task)
+  }
+
+  /** Task duration in ms, computed from the `task.started` event's `startedAt`. Returns 0 when no start was recorded. */
+  private taskDurationMs(taskId: string): number {
+    const startedAt = this.taskStartTimes.get(taskId)
+    if (startedAt === undefined) return 0
+    return this.now() - startedAt
   }
 
   /** Role/model snapshot captured at claim time (never later ship config edits). */
@@ -781,11 +930,14 @@ export class RunSupervisor {
     context?: {
       taskId?: string
       shipId?: string
-      onTool?: (tool: { name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }) => void
+      /** Task attempt the turn belongs to (scopes durable tool checkpoints). */
+      attempt?: number
+      onTool?: (tool: { name: string; phase: 'start' | 'end'; callId?: string; summary?: string; isError?: boolean }) => void
     },
   ): Promise<PromptOutcome> {
     let result: { outcome: PromptOutcome['outcome']; summary?: string } | null = null
     let errorCode: string | null = null
+    const toolTrace: EngineEvent[] = []
     // The assistant's own answer: counted in full, retained up to
     // MAX_RESULT_TEXT_CHARS (defect 2026-10-21: only a char count was kept,
     // so the final answer and worker results were never durably storable).
@@ -846,6 +998,17 @@ export class RunSupervisor {
             }
           },
           onTool: (t) => {
+            toolTrace.push({
+              kind: 'tool',
+              name: t.name,
+              phase: t.phase,
+              ...(t.callId !== undefined ? { callId: t.callId } : {}),
+              ...(t.summary !== undefined ? { summary: t.summary } : {}),
+              ...(t.isError !== undefined ? { isError: t.isError } : {}),
+            })
+            if (context?.taskId !== undefined && context.attempt !== undefined) {
+              this.checkpointTool(context.taskId, context.attempt, t, context.shipId)
+            }
             context?.onTool?.(t)
           },
         })
@@ -867,6 +1030,7 @@ export class RunSupervisor {
         errorCode: 'prompt_timeout',
         textChars: answer.totalChars,
         ...answerBody,
+        toolTrace,
       }
     }
     if (result === null) {
@@ -876,6 +1040,7 @@ export class RunSupervisor {
         errorCode,
         textChars: answer.totalChars,
         ...answerBody,
+        toolTrace,
       }
     }
     const r: { outcome: PromptOutcome['outcome']; summary?: string } = result
@@ -885,6 +1050,45 @@ export class RunSupervisor {
       errorCode,
       textChars: answer.totalChars,
       ...answerBody,
+      toolTrace,
+    }
+  }
+
+  /**
+   * Durable checkpoint for one tool boundary. Recovery pairs starts with ends
+   * to decide whether an interrupted attempt has an unknown external outcome;
+   * summaries are bounded and control-stripped like every model-authored
+   * string. A checkpoint write failure never breaks a healthy turn.
+   */
+  private checkpointTool(
+    taskId: string,
+    attempt: number,
+    tool: { name: string; phase: 'start' | 'end'; callId?: string; summary?: string; isError?: boolean },
+    shipId?: string,
+  ): void {
+    const name = stripControlChars(tool.name).slice(0, 120)
+    const summary = tool.summary !== undefined ? stripControlChars(tool.summary).slice(0, 300) : null
+    try {
+      this.appendEvent(
+        tool.phase === 'start' ? 'task.tool_started' : 'task.tool_completed',
+        {
+          attempt,
+          name,
+          ...(tool.callId !== undefined ? { callId: stripControlChars(tool.callId).slice(0, 120) } : {}),
+          ...(summary !== null ? { summary } : {}),
+          ...(tool.isError !== undefined ? { isError: tool.isError } : {}),
+        },
+        taskId,
+        shipId,
+      )
+    } catch (e) {
+      if (e instanceof OwnershipLostError) {
+        this.markOwnershipLost('run ownership lost while writing a tool checkpoint')
+        return
+      }
+      this.diagnostic(
+        `task ${taskId}: tool checkpoint write failed: ${e instanceof Error ? e.message : String(e)}`,
+      )
     }
   }
 
@@ -896,7 +1100,7 @@ export class RunSupervisor {
       onError: (code: string) => void
       onApproval?: (a: { requestId: string; description: string }) => void
       onUsage?: (u: { inputTokens: number; outputTokens: number; costUsd: number }) => void
-      onTool?: (t: { name: string; phase: 'start' | 'end'; summary?: string; isError?: boolean }) => void
+      onTool?: (t: { name: string; phase: 'start' | 'end'; callId?: string; summary?: string; isError?: boolean }) => void
     },
   ): void {
     switch (ev.kind) {
@@ -907,6 +1111,7 @@ export class RunSupervisor {
         hooks.onTool?.({
           name: ev.name,
           phase: ev.phase,
+          ...(ev.callId !== undefined ? { callId: ev.callId } : {}),
           ...(ev.summary !== undefined ? { summary: ev.summary } : {}),
           ...(ev.isError !== undefined ? { isError: ev.isError } : {}),
         })
@@ -950,7 +1155,7 @@ export class RunSupervisor {
         this.diagnostic(`task ${taskId}: cannot record failure from state '${current.state}'`)
       }
       if (current.state === 'failed') {
-        this.appendEvent(eventType, { failure }, taskId)
+        this.appendEvent(eventType, { failure, durationMs: this.taskDurationMs(taskId) }, taskId)
         this.notifySettled(current)
       }
     } catch (e) {
@@ -1064,7 +1269,53 @@ export class RunSupervisor {
         this.failTask(task.id, { code: 'ship_unavailable', message: `assignee '${task.assigneeShipId}' is not an enabled Ship` })
         return
       }
-      const resolvedModel = resolveTaskModelFor(ship, task, this.modelRegistry, this.modelConfig, (line) => this.diagnostic(line))
+      // Batch 2: resolve the model through the capability-based selector and
+      // record the routing decision durably so it is explainable and auditable.
+      let resolvedModel: string
+      let modelSelectionOutcome: ModelSelectionOutcome | null = null
+      const cfg = this.modelConfig?.ships[ship.id]
+      if (cfg?.pin) {
+        resolvedModel = cfg.pin
+      } else if (this.modelRegistry !== null) {
+        modelSelectionOutcome = selectModel(this.modelRegistry, {
+          task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
+          shipRole: ship.role as ShipRole,
+          engineKind: ship.engineKind,
+          hint: cfg?.taskHints,
+          costPreference: cfg?.preferences?.costPreference,
+          latencyPreference: cfg?.preferences?.latencyPreference,
+          maxCostUsdPerMillionTokens: cfg?.preferences?.maxCostUsdPerMillionTokens,
+          maxLatencyMs: cfg?.preferences?.maxLatencyMs,
+          minContextWindow: cfg?.preferences?.minContextWindow,
+          providerAllowlist: cfg?.providerAllowlist ?? [],
+          providerDenylist: cfg?.providerDenylist ?? [],
+          performance: this.modelPerformanceMonitor,
+        })
+        if (modelSelectionOutcome.selection !== null) {
+          resolvedModel = modelSelectionOutcome.selection.modelId
+        } else {
+          this.diagnostic(
+            `task ${task.id}: no eligible model from registry; falling back to ship.model '${ship.model}'`,
+          )
+          resolvedModel = ship.model
+        }
+      } else {
+        resolvedModel = ship.model
+      }
+      this.appendEvent('run.model_selected', {
+        taskId: task.id,
+        shipId: ship.id,
+        engineKind: ship.engineKind,
+        resolvedModel,
+        selectionMode: modelSelectionOutcome === null
+          ? (cfg?.pin ? 'pinned' : 'ship_default')
+          : modelSelectionOutcome.selection?.selectionMode ?? null,
+        score: modelSelectionOutcome?.selection?.score ?? null,
+        candidatesConsidered: modelSelectionOutcome?.candidatesConsidered ?? null,
+        eligibleCount: modelSelectionOutcome?.eligibleCount ?? null,
+        performanceApplied: modelSelectionOutcome?.performanceApplied ?? false,
+        exclusions: (modelSelectionOutcome?.exclusions?.slice(0, 10) ?? []) as unknown as JsonValue,
+      }, task.id, ship.id)
       const claimed = store.setTaskStateIf(
         task.id,
         'queued',
@@ -1115,7 +1366,8 @@ export class RunSupervisor {
           },
           this.fence ?? undefined,
         )
-        this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId }, task.id)
+        this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId, startedAt: this.now() }, task.id)
+        this.taskStartTimes.set(task.id, this.now())
         this.emitWorkerEvent({
           type: 'worker.started',
           runId: this.runId,
@@ -1139,7 +1391,12 @@ export class RunSupervisor {
         throw e
       }
 
-      const promptText = buildTaskPrompt(task, ship, this.limits.maxBriefChars)
+      const promptText = buildTaskPrompt(
+        task,
+        ship,
+        this.limits.maxBriefChars,
+        crashRecoveryNoteFor(store, task),
+      )
       let out: PromptOutcome
       try {
         out = await this.runPrompt(
@@ -1148,6 +1405,7 @@ export class RunSupervisor {
           {
             taskId: task.id,
             shipId: ship.id,
+            attempt: task.attempt,
             onTool: (tool) => {
               if (tool.phase !== 'start') return
               const label =
@@ -1175,17 +1433,18 @@ export class RunSupervisor {
         })
       }
 
+      let currentModelId = resolvedModel
+
       // PLUTON 3.3: bounded model fallback. On model failure, classify the
       // error, update health, and decide fallback via decideFallback(). If the
       // decision is to switch, close the current session and start a new one
-      // with the replacement model, then re-run the prompt. The loop is bounded
-      // by modelFallbackConfig.maxTotalFallbacks to prevent endless switching.
-      // Only runs when registry and fallback config are available; otherwise
-      // falls through to the existing circuit breaker handling below.
+      // with the replacement model, using a structured recovery context snapshot
+      // so prior completed progress is preserved without unsafe replay. The
+      // loop is bounded by modelFallbackConfig.maxTotalFallbacks to prevent
+      // endless switching. State (exhaustedModels, retries, switch history) is
+      // maintained persistently across attempts.
       if (this.modelRegistry !== null && this.modelFallbackConfig !== null) {
-        let currentModelId = resolvedModel
-        let fallbacksUsed = 0
-        let currentSession: EngineSession = session
+        const fallbackState = createFallbackState(resolvedModel)
         const maxTotalFallbacks = this.modelFallbackConfig.maxTotalFallbacks
 
         for (let fb = 0; fb <= maxTotalFallbacks; fb++) {
@@ -1197,18 +1456,16 @@ export class RunSupervisor {
             modelId: currentModelId,
             providerMessage: out.errorCode || out.summary || 'unknown error',
             scopeHint: 'task',
+            taskId: task.id,
           }
           const classification = classifyModelError(errorContext)
           this.modelHealthMonitor?.recordFailure(errorContext, classification)
-
-          // Decide fallback via the bounded fallback engine
-          const fallbackState = createFallbackState(currentModelId)
-          fallbackState.fallbacksUsed = fallbacksUsed
 
           const decision = decideFallback({
             taskInput: {
               task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
               shipRole: ship.role as ShipRole,
+              engineKind: adapter.kind,
               hint: this.modelConfig?.ships[ship.id]?.taskHints,
               costPreference: this.modelConfig?.ships[ship.id]?.preferences?.costPreference,
               latencyPreference: this.modelConfig?.ships[ship.id]?.preferences?.latencyPreference,
@@ -1220,7 +1477,7 @@ export class RunSupervisor {
             },
             currentModelId,
             error: classification,
-            bufferedEvents: [],
+            bufferedEvents: out.toolTrace,
             state: fallbackState,
             registry: this.modelRegistry,
             selector: selectModel,
@@ -1228,17 +1485,35 @@ export class RunSupervisor {
             config: this.modelFallbackConfig,
           })
 
+          if (decision.action === 'unsafe') {
+            this.diagnostic(`task ${task.id}: ${decision.reason}; stopping fallback`)
+            break
+          }
+
           if (decision.action === 'switch' && decision.toModelId) {
+            const previousModelId = currentModelId
             currentModelId = decision.toModelId
-            fallbacksUsed = decision.fallbacksUsed
             this.diagnostic(`task ${task.id}: ${decision.reason}`)
 
-            // Close the current session and start a new one with the replacement model
-            await currentSession.close().catch((e: unknown) => {
-              this.diagnostic(`task ${task.id}: fallback session close failed: ${e instanceof Error ? e.message : String(e)}`)
-            })
+            const completedToolCalls = out.toolTrace
+              .filter((e): e is Extract<EngineEvent, { kind: 'tool' }> => e.kind === 'tool' && e.phase === 'end')
+              .map((e) => (e.summary !== undefined && e.summary !== '' ? `${e.name}: ${e.summary}` : e.name))
 
-            currentSession = await adapter.startSession({
+            const recoveryPrompt = buildTaskRecoveryPrompt(
+              task,
+              ship,
+              {
+                previousModelId,
+                newModelId: currentModelId,
+                failureReason: classification.reason,
+                completedToolCalls,
+                partialOutput: out.text,
+                workspace: workdir,
+              },
+              this.limits.maxBriefChars,
+            )
+
+            const fallbackSession = await adapter.startSession({
               ship: { id: ship.id, slug: ship.slug, role: ship.role, model: currentModelId },
               workdir,
               env: this.engineEnv(ship),
@@ -1247,7 +1522,7 @@ export class RunSupervisor {
               ...(mcpSpec !== null ? { mcpServers: [mcpSpec] } : {}),
               approvals: this.approvalChannel(ship, task.id, workdir),
             })
-            this.liveSessions.set(task.id, currentSession)
+            this.liveSessions.set(task.id, fallbackSession)
 
             try {
               // Only transition to 'running' if not already running (guards against
@@ -1259,11 +1534,12 @@ export class RunSupervisor {
                   'running',
                   {
                     workspaceId,
-                    engineSessionId: currentSession.info.nativeSessionId ?? currentSession.info.id,
+                    engineSessionId: fallbackSession.info.nativeSessionId ?? fallbackSession.info.id,
                   },
                   this.fence ?? undefined,
                 )
-                this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId }, task.id)
+                this.appendEvent('task.started', { shipId: ship.id, engine: adapter.kind, workspaceId, startedAt: this.now() }, task.id)
+        this.taskStartTimes.set(task.id, this.now())
                 this.emitWorkerEvent({
                   type: 'worker.started',
                   runId: this.runId,
@@ -1277,11 +1553,12 @@ export class RunSupervisor {
               }
 
               out = await this.runPrompt(
-                currentSession,
-                { text: promptText, timeoutMs: this.defaultTaskTimeoutMs },
+                fallbackSession,
+                { text: recoveryPrompt, timeoutMs: this.defaultTaskTimeoutMs },
                 {
                   taskId: task.id,
                   shipId: ship.id,
+                  attempt: task.attempt,
                   onTool: (tool) => {
                     if (tool.phase !== 'start') return
                     const label =
@@ -1302,13 +1579,20 @@ export class RunSupervisor {
             } finally {
               this.liveSessions.delete(task.id)
               this.interruptSent.delete(task.id)
-              await currentSession.close().catch((e: unknown) => {
+              await fallbackSession.close().catch((e: unknown) => {
                 this.diagnostic(`task ${task.id}: fallback session close failed: ${e instanceof Error ? e.message : String(e)}`)
               })
             }
 
-            // If the fallback attempt also failed, loop again (bounded by maxTotalFallbacks)
-            // If it succeeded, break out to success handling below
+            if (out.outcome === 'success') {
+              this.modelHealthMonitor?.recordSuccess({
+                engineKind: adapter.kind,
+                modelId: currentModelId,
+                taskId: task.id,
+              })
+              break
+            }
+
             continue
           }
 
@@ -1323,6 +1607,7 @@ export class RunSupervisor {
         summary: out.summary,
         outcome: out.outcome,
         engine: adapter.kind,
+        model: currentModelId,
         textChars: out.textChars,
         text: out.text,
         textTruncated: out.textTruncated,
@@ -1335,19 +1620,73 @@ export class RunSupervisor {
       store.setTaskStateIf(task.id, 'needs_approval', 'running', {}, this.fence ?? undefined)
       try {
         if (out.outcome === 'success') {
-          const verifying = store.setTaskState(task.id, 'verifying', { result: resultPayload }, this.fence ?? undefined)
-          if (this.verificationConfigured) {
+          this.modelHealthMonitor?.recordSuccess({
+            engineKind: adapter.kind,
+            modelId: currentModelId,
+            taskId: task.id,
+          })
+          // Batch 5: record an observed performance observation for the model
+          // that completed this task. Unknown performance stays undefined.
+          this.modelPerformanceMonitor.observe({
+            modelId: currentModelId,
+            engineKind: adapter.kind,
+            taskId: task.id,
+            category: 'success',
+          })
+          const perfSummary = this.modelPerformanceMonitor.summaryFor(currentModelId, adapter.kind)
+          if (perfSummary.sampleCount > 0) {
+            const rates: Record<string, number | undefined> = {
+              successRate: perfSummary.successCount / Math.max(1, perfSummary.sampleCount),
+              failureRate: perfSummary.failureCount / Math.max(1, perfSummary.sampleCount),
+            }
+            if (perfSummary.latencySampleCount > 0) {
+              rates.avgLatencyMs = perfSummary.latencySumMs / perfSummary.latencySampleCount
+            }
+            this.appendEvent(
+              'run.model_performance',
+              {
+                taskId: task.id,
+                shipId: ship.id,
+                engineKind: adapter.kind,
+                modelId: currentModelId,
+                summary: perfSummary as unknown as JsonValue,
+                rates,
+              } as unknown as JsonValue,
+              task.id,
+              ship.id,
+            )
+          }
+          const needsVerification =
+            this.verificationConfigured &&
+            verificationRequiredForTask(task, this.verificationConfigured)
+          if (needsVerification) {
+            const verifying = store.setTaskState(task.id, 'verifying', { result: resultPayload }, this.fence ?? undefined)
             this.appendEvent('task.awaiting_verification', { outcome: out.outcome }, task.id)
             this.notifySettled(verifying)
             return
           }
-          const done = store.setTaskState(task.id, 'completed', {}, this.fence ?? undefined)
-          this.appendEvent('task.completed', { outcome: out.outcome, summary: out.summary }, task.id)
+          const done = store.setTaskState(task.id, 'completed', { result: resultPayload }, this.fence ?? undefined)
+          this.appendEvent('task.completed', { outcome: out.outcome, summary: out.summary, durationMs: this.taskDurationMs(task.id) }, task.id)
+          // Batch 5: record task-level completion observation.
+          this.modelPerformanceMonitor.observe({
+            modelId: currentModelId,
+            engineKind: adapter.kind,
+            taskId: task.id,
+            category: 'completion',
+          })
           this.notifySettled(done)
           return
         }
         if (out.outcome === 'failure') {
           const retryDecision = this.circuitBreaker.recordFailure(task.id, resultPayload)
+          // Batch 5: record an observed failure observation for the model.
+          this.modelPerformanceMonitor.observe({
+            modelId: currentModelId,
+            engineKind: adapter.kind,
+            taskId: task.id,
+            category: 'failure',
+            detail: String(resultPayload.errorCode ?? out.summary ?? 'unknown failure'),
+          })
           if (retryDecision.shouldRetry && task.attempt < this.maxRetriesPerTask) {
             const retrying = store.setTaskState(
               task.id,
@@ -1385,7 +1724,7 @@ export class RunSupervisor {
           { failure: resultPayload },
           this.fence ?? undefined,
         )
-        this.appendEvent('task.unknown_outcome', { outcome: 'unknown', summary: out.summary }, task.id)
+        this.appendEvent('task.unknown_outcome', { outcome: 'unknown', summary: out.summary, durationMs: this.taskDurationMs(task.id) }, task.id)
         this.notifySettled(unknown)
       } catch (e) {
         if (!(e instanceof StateTransitionError)) throw e
@@ -1420,6 +1759,13 @@ export class RunSupervisor {
       // leaving a session no later tick should ever see again.
       this.liveSessions.delete(task.id)
       this.interruptSent.delete(task.id)
+      if (this.onTaskTeardown !== null) {
+        try {
+          this.onTaskTeardown(task.id)
+        } catch {
+          // Best effort unregister
+        }
+      }
       if (lostClaim) {
         // Only drop this process's in-memory hold: the winner's DB lease rows,
         // the `scope.released` event, and wakeups all belong to the winner.
@@ -1454,12 +1800,102 @@ export class RunSupervisor {
       this.circuitBreaker.reset()
       this.diagnostic(`circuit breaker reset for a manager-requested revision (was: ${tripReason})`)
     }
-    for (const task of this.store.listReadyTasks(this.runId)) {
-      // Same-tick repeats: a task already in flight must never be dispatched
-      // twice. The store CAS in executeTask is the hard guarantee; this keeps
-      // a repeated tick/wakeup from even trying to spawn a second executor.
+
+    // Batch 4: renew leases for all in-flight tasks so a long-running task keeps
+    // its write scope; leases of tasks that have gone silent expire at TTL.
+    for (const taskId of this.inFlight.keys()) this.leaseManager.renewScope(taskId)
+
+    // Batch 4: expire any stale leases left by a process that died mid-task.
+    const stalePaths = this.leaseManager.expireStaleLeases(this.runId)
+    for (const path of stalePaths) {
+      this.diagnostic(`lease expired for path '${path}' (TTL reached)`)
+    }
+
+    // Batch 3: build a deterministic scheduling plan from the ready tasks.
+    // `listReadyTasks()` already enforces DAG readiness (every dependency
+    // completed); the policy layer adds priority, allocation, and duplicate
+    // prevention on top without changing readiness semantics.
+    const readyTasks = this.store
+      .listReadyTasks(this.runId)
+      .filter((t) => !this.duplicateSuppressedTaskIds.has(t.id))
+    const edges = this.store.listEdges(this.runId)
+    const allTasks = this.store.listTasks(this.runId)
+    const statesById = new Map<string, TaskState>()
+    for (const t of allTasks) statesById.set(t.id, t.state)
+
+    const plan = buildSchedulePlan(
+      readyTasks,
+      edges,
+      statesById,
+      this.dispatchedTaskRecords,
+      this.managerAssessment,
+      this.maxConcurrentWorkers,
+      this.inFlight.size,
+      this.now,
+    )
+
+    // Emit once-only deferral / duplicate-suppression decisions so operators can
+    // reconstruct why a task ran when it did (or did not).
+    for (const d of plan.deferred) {
+      if (d.action !== 'deferred') continue
+      if (this.deferredTaskIds.has(d.taskId)) continue
+      this.deferredTaskIds.add(d.taskId)
+      this.appendEvent(
+        'task.deferred',
+        { taskId: d.taskId, reason: d.reason, workerCap: d.workerCap },
+        d.taskId,
+      )
+    }
+    for (const d of plan.duplicateSuppressed) {
+      if (this.duplicateSuppressedTaskIds.has(d.taskId)) continue
+      this.duplicateSuppressedTaskIds.add(d.taskId)
+      this.appendEvent(
+        'task.duplicate_suppressed',
+        { taskId: d.taskId, reason: d.reason, workerCap: d.workerCap },
+        d.taskId,
+      )
+    }
+
+    // Dispatch tasks in priority order, up to the adaptive worker cap. The hard
+    // concurrency cap (`maxConcurrentWorkers`) is an absolute backstop.
+    let dispatchedThisTick = 0
+    const hardCap = Math.max(1, this.maxConcurrentWorkers)
+    const workerCap = plan.allocation.workerCap
+
+    for (const taskId of plan.dispatchOrder) {
+      // Defensive re-check: state may have changed since the plan was built.
+      const task = this.store.getTaskOrNull(taskId)
+      if (task === null) continue
       if (this.inFlight.has(task.id)) continue
-      if (this.inFlight.size >= this.maxConcurrentWorkers) return
+      if (this.inFlight.size >= hardCap) {
+        this.appendEvent(
+          'task.deferred',
+          { taskId: task.id, reason: 'hard concurrency cap reached', workerCap },
+          task.id,
+        )
+        break
+      }
+      dispatchedThisTick += 1
+      if (dispatchedThisTick > workerCap) {
+        this.appendEvent(
+          'task.deferred',
+          { taskId: task.id, reason: 'assessment worker cap reached', workerCap },
+          task.id,
+        )
+        break
+      }
+
+      // A task that was previously deferred is now dispatching: clear its
+      // deferred marker so it can be re-flagged if deferred again later.
+      this.deferredTaskIds.delete(task.id)
+
+      // Batch 5: record queue wait time — how long the task spent ready but
+      // not yet dispatched. derived from task.createdAt (queuedAt) to now (dispatchedAt).
+      this.appendEvent(
+        'task.dequeued',
+        { taskId: task.id, queuedAt: task.createdAt, dispatchedAt: this.now() },
+        task.id,
+      )
 
       const writeScope = task.writeScope ?? []
       let hasConflict = false
@@ -1475,9 +1911,7 @@ export class RunSupervisor {
           break
         }
       }
-      if (hasConflict) {
-        continue
-      }
+      if (hasConflict) continue
 
       if (writeScope.length > 0) {
         const declared = this.leaseManager.declareScope(
@@ -1509,6 +1943,12 @@ export class RunSupervisor {
       promise.then(
         () => this.inFlight.delete(task.id),
         () => this.inFlight.delete(task.id),
+      )
+
+      this.appendEvent(
+        'task.scheduled',
+        { taskId: task.id, reason: plan.allocation.reason, workerCap },
+        task.id,
       )
     }
   }
@@ -1672,12 +2112,15 @@ export class RunSupervisor {
       workspace: this.rootDir,
       payload: { step: `session started (${adapter.kind})` },
     })
+    const existingTasks = this.store.listTasks(this.runId)
     const prompt = buildManagerPrompt(
       run.goal,
       ship,
       this.store.listShips().filter((m) => m.enabled),
       run.acceptanceCriteria,
       this.limits.maxBriefChars,
+      existingTasks.length > 0 ? existingTasks : undefined,
+      this.managerAssessmentSection ?? undefined,
     )
     try {
       const out = await this.runPrompt(
@@ -1881,6 +2324,31 @@ export class RunSupervisor {
    * records only. Every duty write carries the ownership fence; a takeover
    * turns the next tick into a read-only `superseded` outcome.
    */
+  /**
+   * Await one coalesced discovery pass with a hard bound. The discovery
+   * service owns adapter timeouts; this bound only protects run startup from a
+   * provider that never answers. A timeout is not fatal: selection falls back
+   * to the configured Ship model, exactly as it did before the registry existed.
+   */
+  private async awaitModelDiscovery(timeoutMs: number): Promise<ModelDiscoveryReport | null> {
+    if (this.modelDiscovery === null) return null
+    const pass = this.modelDiscovery.start().catch((error: unknown) => {
+      this.diagnostic(`model discovery failed: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    })
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const bound = new Promise<null>((resolve) => {
+      const handle = setTimeout(() => resolve(null), timeoutMs)
+      handle.unref?.()
+      timer = handle
+    })
+    try {
+      return await Promise.race([pass, bound])
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }
+
   async runToCompletion(): Promise<RunOutcome> {
     try {
       const started = this.now()
@@ -1947,53 +2415,56 @@ export class RunSupervisor {
       this.leaseManager.recoverLeases(activeRunning)
       this.store.reapOrphanedLeases(activeRunning, this.fence)
 
-      // Session-backed recovery: before the process died, every ACTIVELY_RUNNING
-      // state meant a live engine session for the task. A restarted process
-      // cannot resume any of them, so requeue is the only non-stranding recovery;
-      // an exhausted recovery attempt (maxRetriesPerTask) terminalizes as
-      // `unknown_outcome` — never success, never a silent strand. Skipped for a
-      // terminal startup: requeuing would mint misleading `task.recovered`
-      // events for a run that never started. Every write is a from-state CAS: a
-      // task the control plane already terminated (or moved) is the honest
-      // winner and is skipped without an event of our own.
+      // Startup recovery owns every interrupted-task decision. It classifies
+      // durable task state, verification evidence, pending approvals and tool
+      // checkpoints, writes only from-state CAS transitions, and returns a
+      // deterministic report. Skipped for a terminal startup: requeuing would
+      // mint misleading `task.recovered` events for a run that never started.
+      let recoveryReport: RecoveryReport | null = null
+      this.recoverySuppressedManager = false
       if (!startupTerminal) {
-        for (const t of this.store.listTasks(this.runId)) {
-          if (!ACTIVELY_RUNNING.has(t.state) || this.inFlight.has(t.id)) continue
-          if (t.attempt >= this.maxRetriesPerTask) {
-            const terminal = this.store.setTaskStateIf(
-              t.id,
-              t.state,
-              'unknown_outcome',
-              {
-                failure: {
-                  code: 'recovery_exhausted',
-                  message:
-                    `no recovery budget left: task was left in state '${t.state}' by a process that died ` +
-                    `(attempt ${t.attempt} of ${this.maxRetriesPerTask}); the engine session cannot be resumed`,
-                },
-              },
-              this.fence,
-            )
-            if (terminal === null) continue
-            this.appendEvent(
-              'task.recovery_exhausted',
-              { taskId: t.id, priorState: t.state, attempt: t.attempt },
-              t.id,
-            )
-            continue
-          }
-          const abandonedSessionId = t.engineSessionId
-          const requeued = this.store.setTaskStateIf(
-            t.id,
-            t.state,
-            'queued',
-            { attempt: t.attempt + 1, engineSessionId: null },
-            this.fence,
-          )
-          if (requeued === null) continue
-          this.appendEvent('task.recovered', { taskId: t.id, priorState: t.state, attempt: t.attempt + 1 }, t.id)
-          if (abandonedSessionId !== null) {
-            this.appendEvent('task.session_abandoned', { sessionId: abandonedSessionId }, t.id)
+        recoveryReport = new RecoveryManager({
+          store: this.store,
+          projectId: this.projectId,
+          runId: this.runId,
+          ...(this.fence !== null ? { fence: this.fence } : {}),
+          maxRetriesPerTask: this.maxRetriesPerTask,
+          now: this.now,
+          diagnostic: (line) => {
+            this.diagnostic(line)
+          },
+        }).recover()
+        this.recoverySuppressedManager = recoveryReport.suppressManager
+      }
+
+      // Batch 1: adaptive task assessment. Deterministic, recorded as durable
+      // evidence, injected into the manager prompt as a bounded signal. The same
+      // assessment is cached for the scheduler (Batch 3) as an advisory
+      // parallelism cap.
+      this.managerAssessment = null
+      this.managerAssessmentSection = null
+      if (!startupTerminal) {
+        const { assessment, allocation } = assessRun(run, this.maxConcurrentWorkers)
+        this.managerAssessment = assessment
+        this.managerAssessmentSection = assessmentToPromptSection(assessment, allocation)
+        this.appendEvent('run.assessed', { assessment, allocation } as unknown as JsonValue)
+      }
+
+      // Model discovery is built once per run process but was previously fired
+      // and forgotten (`void discovery.refresh()`), so the first tasks raced an
+      // empty registry and silently fell back to the Ship's configured model.
+      // Await the shared, coalesced pass before planning; a slow provider must
+      // not block the run forever, so the wait is bounded and failure is a
+      // diagnostic, not a startup failure.
+      if (!startupTerminal && this.modelDiscovery !== null) {
+        const report = await this.awaitModelDiscovery(10_000)
+        if (report === null) {
+          this.diagnostic('model discovery did not finish within 10000ms; continuing with the current registry')
+        } else {
+          for (const result of report.results) {
+            if (!result.ok) {
+              this.diagnostic(`model discovery failed for '${result.engineKind}': ${result.error ?? 'unknown error'}`)
+            }
           }
         }
       }
@@ -2003,7 +2474,7 @@ export class RunSupervisor {
       // A terminal startup skips the manager entirely: its run is over before a
       // manager session could do any honest work.
       const managerCompletion =
-        this.skipManager || startupTerminal
+        this.skipManager || startupTerminal || recoveryReport?.suppressManager === true
           ? Promise.resolve()
           : this.runManagerSession().then(
             (o) => {
@@ -2046,7 +2517,11 @@ export class RunSupervisor {
           break
         }
         this.dispatchReadyTasks()
-        const managerSettled = this.skipManager || managerOutcome !== null || managerError !== null
+        const managerSettled =
+          this.skipManager ||
+          recoveryReport?.suppressManager === true ||
+          managerOutcome !== null ||
+          managerError !== null
         if (this.allQuiescent(managerSettled)) break
         const remaining = deadline - this.now()
         if (remaining <= 0) {
@@ -2156,7 +2631,7 @@ export class RunSupervisor {
     } else if (managerError !== null) {
       outcome = 'failure'
       runState = 'failed'
-    } else if (this.skipManager || managerOutcome?.outcome === 'success') {
+    } else if (this.skipManager || this.recoverySuppressedManager || managerOutcome?.outcome === 'success') {
       if (anyBad) {
         outcome = 'failure'
         runState = 'failed' // durable records disagree with the "success" claim
@@ -2191,6 +2666,10 @@ export class RunSupervisor {
     let persistedSummary: string | undefined
     if (this.skipManager) {
       persistedSummary = managerSummary ?? undefined
+    } else if (this.recoverySuppressedManager) {
+      // Recovery opened no manager turn: never persist the synthetic
+      // "resumed worker dispatch" label over the run's real summary.
+      persistedSummary = undefined
     } else if (runState === 'completed' || runState === 'verifying') {
       persistedSummary = managerAnswer ?? undefined
     } else if (managerError !== null) {
@@ -2262,6 +2741,22 @@ export class RunSupervisor {
 
   private managerOutcomeCache: PromptOutcome | null = null
   private managerErrorCache: string | null = null
+  /** Recovery parked the run (verifying/awaiting operator); no manager turn ran. */
+  private recoverySuppressedManager = false
+  /** Batch 1: deterministic assessment injected into the manager prompt. */
+  private managerAssessmentSection: string | null = null
+  /** Batch 1: cached TaskAssessment used by the scheduler as an advisory cap. */
+  private managerAssessment: TaskAssessment | null = null
+  /** Batch 2: observed model-performance monitor used as a bounded routing input. */
+  private modelPerformanceMonitor: ModelPerformanceMonitor
+  /** Batch 3: task ids already deferred this run (avoid repeated task.deferred events). */
+  private deferredTaskIds = new Set<string>()
+  /** Batch 3: task ids already flagged as duplicate intent this run (avoid repeated events). */
+  private duplicateSuppressedTaskIds = new Set<string>()
+  /** Batch 3: tasks already dispatched this run, used for cross-tick duplicate-intent detection. */
+  private dispatchedTaskRecords: TaskRecord[] = []
+  /** Batch 5: task start timestamps, used to compute task duration in terminal events. */
+  private taskStartTimes = new Map<string, number>()
 }
 
 export function resolveTaskModelFor(
@@ -2277,6 +2772,7 @@ export function resolveTaskModelFor(
     const outcome = selectModel(registry, {
       task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
       shipRole: ship.role as ShipRole,
+      engineKind: ship.engineKind,
       hint: cfg?.taskHints,
       costPreference: cfg?.preferences?.costPreference,
       latencyPreference: cfg?.preferences?.latencyPreference,

@@ -79,23 +79,6 @@ export function toolBridgeLimitsFromRuntime(runtime: {
   }
 }
 
-export interface ToolBridgeLimits {
-  /** runtime.max_child_tasks_per_task */
-  maxChildrenPerTask: number
-  /** runtime bound for task briefs (chars). */
-  maxBriefChars: number
-  /** runtime.max_team_size */
-  maxTeamSize: number
-  /** Capped MCP response chars to keep model context sane. */
-  maxToolResultChars: number
-  /** Default wait timeout when caller passes no timeoutSeconds. */
-  defaultWaitSeconds: number
-  /** Internal poll heartbeat for sleep-based wait fallback. */
-  waitHeartbeatSeconds: number
-  /** TTL for created human approvals before expiry. */
-  approvalTtlMinutes: number
-}
-
 export interface PlutonToolBridgeOptions {
   store: Store
   projectId: string

@@ -1,6 +1,7 @@
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, StateTransitionError, ValidationError, WorkspaceError } from '../domain/errors.ts'
+import { applyTaskVerificationVerdict } from '../verify/runner.ts'
 import type { JsonValue, ShipRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
 import { TERMINAL_TASK_STATES, type RunState, type TaskState } from '../domain/state.ts'
 import { admitTask } from '../orchestrator/task-graph.ts'
@@ -704,6 +705,159 @@ export const TOOL_HANDLERS: ToolHandlers = {
     return { task: summarizeTask(updated) }
   },
 
+'review.report': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['review.report'].parse(args)
+    const task = visibleTask(env, a.taskId)
+    if (task.state !== 'verifying') {
+      throw new PolicyDeniedError(
+        `task '${task.id}' is ${task.state}; only a task in 'verifying' can be reviewed`,
+      )
+    }
+    // Anti-self-approval: the worker that did the work cannot be the one
+    // that certifies it. The supervisor also cannot certify a task it
+    // assigned to itself.
+    if (env.callerShipId === task.assigneeShipId) {
+      throw new PolicyDeniedError(
+        `reviewer '${env.callerShipId}' cannot review its own task '${task.id}' (anti-self-approval)`,
+      )
+    }
+    const assignment = (task.assignment !== null && typeof task.assignment === 'object' && !Array.isArray(task.assignment))
+      ? (task.assignment as Record<string, unknown>)
+      : null
+    const assignedShipId = assignment !== null && typeof assignment['shipId'] === 'string' ? assignment['shipId'] : null
+    if (assignedShipId !== null && env.callerShipId === assignedShipId) {
+      throw new PolicyDeniedError(
+        `reviewer '${env.callerShipId}' is the assignee of task '${task.id}'; a different Ship must review it`,
+      )
+    }
+
+    const verdict = a.verdict
+    const issues = a.issues ?? []
+
+    if (verdict === 'INSUFFICIENT_EVIDENCE') {
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: task.id,
+        shipId: env.callerShipId,
+        type: 'review.reported',
+        payload: {
+          verdict,
+          summary: a.summary,
+          issues,
+          reviewerShipId: env.callerShipId,
+          changesTaskState: false,
+        },
+      })
+      return { task: summarizeTask(task), verdict, changedState: false }
+    }
+
+    if (verdict === 'REJECT') {
+      const failed = env.store.setTaskState(task.id, 'failed', {
+        failure: { code: 'review_rejected', message: a.summary, issues, reviewerShipId: env.callerShipId },
+      })
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: task.id,
+        shipId: env.callerShipId,
+        type: 'review.reported',
+        payload: { verdict, summary: a.summary, issues, reviewerShipId: env.callerShipId, changesTaskState: true },
+      })
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: task.id,
+        type: 'task.failed',
+        payload: { via: 'review', summary: a.summary },
+      })
+      return { task: summarizeTask(failed), verdict, changedState: true }
+    }
+
+    if (verdict === 'REQUEST_CHANGES') {
+      const scheduled = env.store
+        .listEvents(env.runId, { type: 'review.reported', limit: 1_000 })
+        .filter((e) => e.taskId === task.id && (e.payload as Record<string, unknown>)?.['verdict'] === 'REQUEST_CHANGES')
+        .length
+      if (scheduled >= env.limits.maxRevisionsPerTask) {
+        throw new PolicyDeniedError(
+          `review revision cap reached for task '${task.id}': ${String(scheduled)} of ${String(env.limits.maxRevisionsPerTask)} already requested`,
+        )
+      }
+      const updated = env.store.setTaskStateIf(task.id, 'verifying', 'queued', {
+        attempt: task.attempt + 1,
+        failure: {
+          code: 'review_changes_requested',
+          feedback: a.summary,
+          issues,
+          requestedByShipId: env.callerShipId,
+          previousFailure: task.failure,
+        },
+      })
+      if (updated === null) {
+        throw new ConflictError(`task '${task.id}' state changed concurrently; re-inspect before reviewing`)
+      }
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: task.id,
+        shipId: env.callerShipId,
+        type: 'review.reported',
+        payload: { verdict, summary: a.summary, issues, reviewerShipId: env.callerShipId, changesTaskState: true },
+      })
+      env.store.appendEvent({
+        projectId: env.projectId,
+        runId: env.runId,
+        taskId: task.id,
+        type: 'task.revision_scheduled',
+        payload: { attempt: updated.attempt, via: 'review' },
+      })
+      env.wakeups.notify(wakeupChannelFor(null, env.runId), task.id, updated.state)
+      return { task: summarizeTask(updated), verdict, changedState: true }
+    }
+
+    // APPROVE: only when the durable evidence actually supports completion.
+    try {
+      const verdictResult = applyTaskVerificationVerdict(env.store, task.id, {
+        diffText: '',
+        changedFiles: [],
+      })
+      if (verdictResult.state !== 'completed') {
+        throw new ValidationError(`review approval cannot complete task '${task.id}': verification verdict was ${verdictResult.state}`)
+      }
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        env.store.appendEvent({
+          projectId: env.projectId,
+          runId: env.runId,
+          taskId: task.id,
+          shipId: env.callerShipId,
+          type: 'review.reported',
+          payload: {
+            verdict: 'INSUFFICIENT_EVIDENCE',
+            summary: `approval could not be applied: ${e.message}`,
+            issues,
+            reviewerShipId: env.callerShipId,
+            changesTaskState: false,
+            originalVerdict: 'APPROVE',
+          },
+        })
+        throw new PolicyDeniedError(
+          `review approval refused for task '${task.id}': ${e.message} (recorded as INSUFFICIENT_EVIDENCE)`,
+        )
+      }
+      throw e
+    }
+    env.store.appendEvent({
+      projectId: env.projectId,
+      runId: env.runId,
+      taskId: task.id,
+      shipId: env.callerShipId,
+      type: 'review.reported',
+      payload: { verdict, summary: a.summary, issues, reviewerShipId: env.callerShipId, changesTaskState: true },
+    })
+    return { task: summarizeTask(env.store.getTask(task.id)), verdict, changedState: true }
+  },
   'ship.propose_create': async (env, args): Promise<JsonValue> => {
     const a = TOOL_SCHEMAS['ship.propose_create'].parse(args)
     return proposeNewShip(env, { shipId: a.shipId, displayName: a.displayName, role: a.role, engine: a.engine, model: a.model, reason: a.reason }, false)

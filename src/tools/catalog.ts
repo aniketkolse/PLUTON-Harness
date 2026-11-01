@@ -93,6 +93,14 @@ export const TOOL_SCHEMAS = {
       feedback: z.string().min(1).max(2_000),
     })
     .strict(),
+  'review.report': z
+    .object({
+      taskId: taskRef,
+      verdict: z.enum(['APPROVE', 'REQUEST_CHANGES', 'REJECT', 'INSUFFICIENT_EVIDENCE']),
+      summary: z.string().min(1).max(4_000),
+      issues: z.array(z.string().min(1).max(2_000)).max(50).optional(),
+    })
+    .strict(),
   'ship.propose_create': z
     .object({
       shipId: z
@@ -235,6 +243,12 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     mutating: true,
     description:
       'File an approval request for a sensitive action and park the run in awaiting_approval where the state machine allows it. The request is durable; do not proceed as if approved.',
+  },
+  'review.report': {
+    permission: 'review.report',
+    mutating: true,
+    description:
+      'Record an independent review verdict for a task that is in `verifying`. Verdicts: APPROVE, REQUEST_CHANGES, REJECT, INSUFFICIENT_EVIDENCE. Anti-self-approval: the reviewer Ship cannot review its own task, and the supervisor cannot review a task it assigned to itself. A REQUEST_CHANGES verdict requeues the task for a bounded revision when the cap allows.',
   },
   'diff.inspect': {
     permission: 'diff.inspect',

@@ -19,7 +19,7 @@ export interface ShipInspectorItem {
 export interface TaskInspectorItem {
   id: string
   title: string
-  state: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'verifying'
+  state: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'verifying' | 'unknown_outcome'
   ownerShipSlug?: string
   /** @deprecated Use `ownerShipSlug`; kept for backward compatibility. */
   ownerMuseSlug?: string
@@ -129,6 +129,8 @@ export function renderOrchestraInspector(
       else if (t.state === 'verifying') stateBadge = theme.paint('warn', '[v]')
       else if (t.state === 'failed') stateBadge = theme.icon('cross')
       else if (t.state === 'blocked') stateBadge = '[!]'
+      else if (t.state === 'pending') stateBadge = theme.paint('dim', '[.]')
+      else if (t.state === 'unknown_outcome') stateBadge = theme.paint('error', '[?]')
 
       const ownerSlug = t.ownerShipSlug ?? t.ownerMuseSlug
       const owner = ownerSlug ? ` (${ownerSlug})` : ''

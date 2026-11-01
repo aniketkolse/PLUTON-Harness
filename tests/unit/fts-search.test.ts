@@ -198,4 +198,128 @@ describe('FTS5 Full-Text Search', () => {
     expect(store.searchEvents('    ')).toEqual([])
     expect(store.searchEvents('nonexistenttermxyz123')).toEqual([])
   })
+
+  it('safely handles adversarial query inputs and prevents FTS5/SQL injection', () => {
+    const project = store.ensureProject({ name: 'sec-test', rootPath: '/sec', configPath: '/sec/pluton.yaml', defaultBranch: 'main' })
+    seedShip(store, project.id)
+    const session = store.createChatSession({ projectId: project.id, title: 'Security Test', shipId: 'supervisor' })
+
+    store.appendChatMessage({
+      sessionId: session.id,
+      role: 'user',
+      text: 'Vulnerability assessment: injection attacks, buffer overflow, and token-leakage countermeasures.',
+    })
+
+    const maliciousQueries = [
+      "'; DROP TABLE chat_messages_fts; --",
+      "' OR 1=1 --",
+      '"unbalanced "quotes"""',
+      'AND OR NOT NEAR',
+      'column:injection (unclosed [paren',
+      '*** +++ --- ^^^ ~~~',
+      '<<< >>> ??? &&& ||| ///',
+      '🚀 🦊 💻 🛑',
+      '\0null\x00byte\x1fcontrol',
+      'a'.repeat(4000),
+      "MATCH 'malicious'",
+      'SELECT * FROM sqlite_master',
+      'UNION ALL SELECT 1, 2, 3, 4',
+      'k8s-pod_worker-0123',
+    ]
+
+    for (const q of maliciousQueries) {
+      expect(() => store.searchChatMessages(q)).not.toThrow()
+      expect(() => store.searchEvents(q)).not.toThrow()
+    }
+
+    // Verify virtual tables were NOT dropped or corrupted
+    const validHits = store.searchChatMessages('vulnerability countermeasures')
+    expect(validHits.length).toBe(1)
+    expect(validHits[0]?.text).toContain('Vulnerability assessment')
+  })
+
+  it('supports multilingual Unicode text across scripts (CJK, Cyrillic, Arabic, Accents)', () => {
+    const project = store.ensureProject({ name: 'i18n-test', rootPath: '/i18n', configPath: '/i18n/pluton.yaml', defaultBranch: 'main' })
+    seedShip(store, project.id)
+    const session = store.createChatSession({ projectId: project.id, title: 'i18n', shipId: 'supervisor' })
+
+    store.appendChatMessage({
+      sessionId: session.id,
+      role: 'user',
+      text: '多语言测试：自动化测试 验证记录。Тестирование системы прошло успешно. البحث باللغة العربية متاح.',
+    })
+
+    // Chinese token search
+    const cjkHits = store.searchChatMessages('自动化测试')
+    expect(cjkHits.length).toBe(1)
+    expect(cjkHits[0]?.text).toContain('自动化测试')
+
+    const cjkPrefixHits = store.searchChatMessages('多语言测试')
+    expect(cjkPrefixHits.length).toBe(1)
+
+    // Cyrillic search
+    const cyrillicHits = store.searchChatMessages('Тестирование')
+    expect(cyrillicHits.length).toBe(1)
+
+    // Arabic search
+    const arabicHits = store.searchChatMessages('العربية')
+    expect(arabicHits.length).toBe(1)
+  })
+
+  it('enforces limit clamping bounds and BM25 relevance ordering', () => {
+    const project = store.ensureProject({ name: 'limit-test', rootPath: '/limits', configPath: '/limits/pluton.yaml', defaultBranch: 'main' })
+    seedShip(store, project.id)
+    const session = store.createChatSession({ projectId: project.id, title: 'Limits', shipId: 'supervisor' })
+
+    for (let i = 1; i <= 15; i++) {
+      store.appendChatMessage({
+        sessionId: session.id,
+        role: 'user',
+        text: `Cluster node report #${i}: telemetry metric status healthy and operational.`,
+      })
+    }
+
+    // Negative or 0 limit clamps to 1
+    expect(store.searchChatMessages('telemetry', { limit: 0 })).toHaveLength(1)
+    expect(store.searchChatMessages('telemetry', { limit: -10 })).toHaveLength(1)
+
+    // Specific bounded limit
+    expect(store.searchChatMessages('telemetry', { limit: 5 })).toHaveLength(5)
+
+    // Oversized limit clamps to 1000 without throwing
+    const all = store.searchChatMessages('telemetry', { limit: 5000 })
+    expect(all.length).toBe(15)
+
+    // BM25 snippet validation
+    expect(all[0]?.snippet).toContain('[telemetry]')
+    expect(all[0]?.rank).toBeLessThanOrEqual(all[all.length - 1]?.rank ?? 0)
+  })
+
+  it('maintains FTS5 index consistency across direct UPDATE statements via au triggers', () => {
+    const project = store.ensureProject({ name: 'update-test', rootPath: '/upd', configPath: '/upd/pluton.yaml', defaultBranch: 'main' })
+    seedShip(store, project.id)
+    const session = store.createChatSession({ projectId: project.id, title: 'Update', shipId: 'supervisor' })
+
+    const msg = store.appendChatMessage({
+      sessionId: session.id,
+      role: 'user',
+      text: 'Initial phrase before modification: alpha beta gamma.',
+    })
+
+    expect(store.searchChatMessages('alpha beta')).toHaveLength(1)
+    expect(store.searchChatMessages('delta epsilon')).toHaveLength(0)
+
+    // Directly update message in chat_messages table
+    store.db.prepare('UPDATE chat_messages SET text = ? WHERE id = ?').run(
+      'Updated phrase after modification: delta epsilon zeta.',
+      msg.id,
+    )
+
+    // Old keywords no longer match
+    expect(store.searchChatMessages('alpha beta')).toHaveLength(0)
+    // New keywords match
+    const updatedHits = store.searchChatMessages('delta epsilon')
+    expect(updatedHits).toHaveLength(1)
+    expect(updatedHits[0]?.text).toContain('delta epsilon zeta')
+  })
 })

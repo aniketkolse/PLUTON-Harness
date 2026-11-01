@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { McpToolCallResult, McpToolHost, McpToolInfo } from '../../src/tools/mcp-server.ts'
-import { ToolHttpServer } from '../../src/tools/http-transport.ts'
+import { ToolHttpServer, type ToolHttpServerOptions } from '../../src/tools/http-transport.ts'
 
 /**
  * HTTP transport conformance: each engine session gets its own bearer token and
@@ -25,7 +25,7 @@ function stubHost(label: string): McpToolHost {
 
 async function startServer(
   registrations: { label: string; spec?: Partial<{ museId: string; taskId: string | null; runId: string }> }[] = [{ label: 'A' }],
-  opts: { maxRequestBytes?: number } = {},
+  opts: ToolHttpServerOptions = {},
 ): Promise<{ server: ToolHttpServer; url: string; tokens: string[] }> {
   const server = new ToolHttpServer({
     host: '127.0.0.1',
@@ -180,5 +180,173 @@ describe('ToolHttpServer', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(150) // it really waited for the 200 ms handler
     expect(Date.now() - started).toBeLessThan(4_000) // bounded by the drain grace, not the 30 s handler fallback
     await callPromise
+  })
+
+  it('enforces concurrency limits and queues requests up to maxQueueDepth', async () => {
+    let activeCalls = 0
+    let peakActive = 0
+    let releaseFirst: () => void = () => {}
+    const firstCallRunning = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+
+    const host: McpToolHost = {
+      listTools: (): McpToolInfo[] => [{ name: 'gate', description: 'gate', inputSchema: { type: 'object' } }],
+      call: async (_name: string, _args: unknown): Promise<McpToolCallResult> => {
+        activeCalls++
+        if (activeCalls > peakActive) peakActive = activeCalls
+        if (activeCalls === 1) {
+          await firstCallRunning
+        }
+        activeCalls--
+        return { ok: true, data: { done: true } }
+      },
+    }
+
+    const { server, url } = await startServer([], {
+      maxConcurrentRequests: 2,
+      maxConcurrentRequestsPerSession: 1,
+      maxQueueDepth: 2,
+    })
+    const { token } = server.register(host, { museId: 'muse-m', taskId: null, runId: 'run-1' })
+    await post(url, token, INITIALIZE)
+
+    // Call 1: starts and holds the only slot for this session
+    const p1 = post(url, token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'gate', arguments: {} } })
+
+    // Wait a brief moment to ensure Call 1 has begun executing
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(activeCalls).toBe(1)
+
+    // Call 2: should be queued because maxConcurrentRequestsPerSession is 1
+    const p2 = post(url, token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'gate', arguments: {} } })
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(activeCalls).toBe(1) // Still only 1 active call
+
+    // Now release the first call
+    releaseFirst()
+
+    const [res1, res2] = await Promise.all([p1, p2])
+    expect(res1.status).toBe(200)
+    expect(res2.status).toBe(200)
+    expect(peakActive).toBe(1) // Never exceeded 1 concurrent call for this session
+  })
+
+  it('rejects with 429 backpressure when queue capacity is exhausted', async () => {
+    let unblock: () => void = () => {}
+    const blocker = new Promise<void>((resolve) => {
+      unblock = resolve
+    })
+
+    const host: McpToolHost = {
+      listTools: (): McpToolInfo[] => [{ name: 'slow', description: 'slow', inputSchema: { type: 'object' } }],
+      call: async (): Promise<McpToolCallResult> => {
+        await blocker
+        return { ok: true, data: { ok: true } }
+      },
+    }
+
+    const server = new ToolHttpServer({
+      host: '127.0.0.1',
+      port: 0,
+      diagnosticSink: () => {},
+      maxConcurrentRequestsPerSession: 1,
+      maxQueueDepth: 1,
+    })
+    servers.push(server)
+    const { url } = await server.start()
+    const { token } = server.register(host, { museId: 'm1', taskId: null, runId: 'run-1' })
+    await post(url, token, INITIALIZE)
+
+    // Request 1: occupies the 1 running slot
+    const req1 = post(url, token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'slow', arguments: {} } })
+    await new Promise((r) => setTimeout(r, 40))
+
+    // Request 2: occupies the 1 queue slot
+    const req2 = post(url, token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'slow', arguments: {} } })
+    await new Promise((r) => setTimeout(r, 40))
+
+    // Request 3: capacity exhausted -> HTTP 429
+    const req3 = await post(url, token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'slow', arguments: {} } })
+    expect(req3.status).toBe(429)
+    const body3 = (await req3.json()) as { error: string }
+    expect(body3.error).toBe('capacity_exhausted')
+
+    unblock()
+    await Promise.all([req1, req2])
+  })
+
+  it('drops queued requests cleanly when aborted before running', async () => {
+    let unblockFirst: () => void = () => {}
+    const blocker = new Promise<void>((resolve) => {
+      unblockFirst = resolve
+    })
+
+    let queuedExecuted = false
+    const host: McpToolHost = {
+      listTools: (): McpToolInfo[] => [{ name: 'op', description: 'op', inputSchema: { type: 'object' } }],
+      call: async (_name, args: unknown): Promise<McpToolCallResult> => {
+        const id = (args as { id?: number })?.id
+        if (id === 1) {
+          await blocker
+          return { ok: true, data: { id: 1 } }
+        }
+        queuedExecuted = true
+        return { ok: true, data: { id } }
+      },
+    }
+
+    const server = new ToolHttpServer({
+      host: '127.0.0.1',
+      port: 0,
+      diagnosticSink: () => {},
+      maxConcurrentRequestsPerSession: 1,
+      maxQueueDepth: 2,
+    })
+    servers.push(server)
+    const { url } = await server.start()
+    const { token } = server.register(host, { museId: 'm1', taskId: null, runId: 'run-1' })
+    await post(url, token, INITIALIZE)
+
+    const r1 = post(url, token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'op', arguments: { id: 1 } } })
+    await new Promise((r) => setTimeout(r, 40))
+
+    // Enqueue request 2 with an AbortController and immediately abort it
+    const abortCtrl = new AbortController()
+    const r2 = fetch(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'op', arguments: { id: 2 } } }),
+      signal: abortCtrl.signal,
+    }).catch(() => null)
+
+    await new Promise((r) => setTimeout(r, 40))
+    abortCtrl.abort()
+    await new Promise((r) => setTimeout(r, 40))
+
+    unblockFirst()
+    await Promise.all([r1, r2])
+
+    expect(queuedExecuted).toBe(false)
+  })
+
+  it('unregisterMatching removes sessions matching predicate and leaves others intact', async () => {
+    const { server, url } = await startServer([])
+    const { token: t1 } = server.register(stubHost('task1'), { museId: 'm', taskId: 'task-1', runId: 'run-1' })
+    const { token: t2 } = server.register(stubHost('task2'), { museId: 'm', taskId: 'task-2', runId: 'run-1' })
+
+    expect(server.sessionCount()).toBe(2)
+    const unregisteredCount = server.unregisterMatching((spec) => spec.taskId === 'task-1')
+    expect(unregisteredCount).toBe(1)
+    expect(server.sessionCount()).toBe(1)
+
+    // t1 is gone (401)
+    const res1 = await post(url, t1, INITIALIZE)
+    expect(res1.status).toBe(401)
+
+    // t2 is intact (200)
+    const res2 = await post(url, t2, INITIALIZE)
+    expect(res2.status).toBe(200)
   })
 })

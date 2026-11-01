@@ -124,17 +124,47 @@ export function decideFallback(input: ModelFallbackInput): ModelFallbackDecision
 
   const excluded = new Set<string>([...state.exhaustedModels])
 
+  // The caller may pass either the raw error context (preferred: it carries
+  // engine/model/task identity) or a pre-computed classification. Health
+  // recording must keep that identity; recording everything under
+  // `engineKind: 'unknown'` makes cooldowns unusable.
+  const errorContext: ModelErrorContext | null = isClassification(input.error)
+    ? null
+    : (input.error as ModelErrorContext)
+  const healthContext = (reason: string): ModelErrorContext => ({
+    engineKind: errorContext?.engineKind ?? 'unknown',
+    modelId: state.currentModelId,
+    providerMessage: reason,
+    scopeHint: scope,
+    ...(errorContext?.provider !== undefined ? { provider: errorContext.provider } : {}),
+    ...(errorContext?.quotaScope !== undefined ? { quotaScope: errorContext.quotaScope } : {}),
+  })
+
+  // Replay safety comes before every retry/switch decision. A turn that left a
+  // tool call open may already have produced an external side effect; neither
+  // the same model nor a replacement may be asked to blindly repeat it.
+  if (!safeToReplay) {
+    state.state = 'degraded'
+    return {
+      action: 'unsafe',
+      fromModelId: state.currentModelId,
+      toModelId: null,
+      category,
+      scope,
+      allowed: false,
+      safeToReplay: false,
+      reason: `buffered turn has unresolved tool calls; manual intervention required before replaying`,
+      state: state.state,
+      fallbacksUsed: state.fallbacksUsed,
+      selection: null,
+      excludedModelIds: [...excluded, state.currentModelId],
+      decidedAt: nowIso,
+    }
+  }
+
   if (category === 'execution-error') {
     if (input.healthMonitor !== undefined) {
-      input.healthMonitor.recordFailure(
-        {
-          engineKind: 'unknown',
-          modelId: state.currentModelId,
-          providerMessage: classification.reason,
-          scopeHint: scope,
-        },
-        classification,
-      )
+      input.healthMonitor.recordFailure(healthContext(classification.reason), classification)
     }
     state.state = 'degraded'
     return {
@@ -179,15 +209,7 @@ export function decideFallback(input: ModelFallbackInput): ModelFallbackDecision
     state.retryCounts.set(state.currentModelId, retryCount + 1)
     state.state = 'degraded'
     if (input.healthMonitor !== undefined) {
-      input.healthMonitor.recordFailure(
-        {
-          engineKind: 'unknown',
-          modelId: state.currentModelId,
-          providerMessage: classification.reason,
-          scopeHint: scope,
-        },
-        classification,
-      )
+      input.healthMonitor.recordFailure(healthContext(classification.reason), classification)
     }
     return {
       action: 'retry-same',
@@ -210,15 +232,7 @@ export function decideFallback(input: ModelFallbackInput): ModelFallbackDecision
   const excludedList = [...excluded]
 
   if (input.healthMonitor !== undefined) {
-    input.healthMonitor.recordFailure(
-      {
-        engineKind: 'unknown',
-        modelId: state.currentModelId,
-        providerMessage: classification.reason,
-        scopeHint: scope,
-      },
-      classification,
-    )
+    input.healthMonitor.recordFailure(healthContext(classification.reason), classification)
   }
 
   const selectionOutcome = selector(registry, {
@@ -226,25 +240,6 @@ export function decideFallback(input: ModelFallbackInput): ModelFallbackDecision
     excludedModelIds: excludedList,
   })
   const candidate = selectionOutcome.selection
-
-  if (!safeToReplay) {
-    state.state = 'degraded'
-    return {
-      action: 'unsafe',
-      fromModelId: state.currentModelId,
-      toModelId: candidate?.modelId ?? null,
-      category,
-      scope,
-      allowed: false,
-      safeToReplay: false,
-      reason: `buffered turn has unresolved tool calls; manual intervention required before replaying`,
-      state: state.state,
-      fallbacksUsed: state.fallbacksUsed,
-      selection: candidate,
-      excludedModelIds: excludedList,
-      decidedAt: nowIso,
-    }
-  }
 
   if (candidate === null || candidate.modelId === state.currentModelId) {
     state.state = 'exhausted'

@@ -1031,6 +1031,33 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
     expect(prompt).toContain('Split only where parallelism is real')
   })
 
+  it('manager prompt adopts durable tasks after a restart instead of re-planning duplicates', () => {
+    const world = makeWorld()
+    const manager = world.store.getShip('manager')
+    const task = world.store.createTask({
+      runId: world.runId,
+      title: 'persisted task',
+      brief: 'do it well',
+      acceptanceCriteria: ['done'],
+      assigneeMuseId: 'worker-a',
+    })
+    world.store.setTaskState(task.id, 'queued')
+
+    const prompt = buildManagerPrompt(
+      'goal',
+      manager!,
+      world.store.listShips(),
+      [],
+      60_000,
+      world.store.listTasks(world.runId),
+    )
+
+    expect(prompt).toContain('Durable tasks already created for this run')
+    expect(prompt).toContain(`${task.id} [queued] persisted task`)
+    expect(prompt).toContain('never create duplicates')
+    expect(prompt).toContain('task.inspect / task.get_result')
+  })
+
   it('exposes direct messaging on the manager bridge and delivers it to a worker task', async () => {
     const world = makeWorld()
     const task = world.store.createTask({
@@ -1200,7 +1227,13 @@ describe('RunSupervisor — plan, dispatch, collect', () => {
  * stale per-task checkouts reattached or archived — never overwritten or
  * deleted — and dead sessions abandoned explicitly.
  */
-type StrandedState = 'admitted' | 'running' | 'waiting_for_children' | 'needs_input' | 'needs_approval'
+type StrandedState =
+  | 'admitted'
+  | 'running'
+  | 'waiting_for_children'
+  | 'needs_input'
+  | 'needs_approval'
+  | 'verifying'
 
 function seedTask(world: World, title: string): TaskRecord {
   return world.store.createTask({
@@ -1430,6 +1463,418 @@ describe('RunSupervisor — restart reconciliation', () => {
     // Nothing was archived: the path was already gone before this process ran.
     expect(existsSync(join(world.dir, '.pluton', 'workspaces-attic'))).toBe(false)
     expect(eventsOfType(world, 'task.workspace_archived')).toEqual([])
+  })
+
+  it('T8 leaves an interrupted verification visibly verifying when a check never finished', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R8'), 'verifying')
+    world.store.createVerificationCheck({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      attempt: seeded.attempt,
+      name: 'unit',
+      command: ['node', '-e', 'process.exit(0)'],
+      cwd: null,
+      workspaceId: null,
+      evidenceKind: 'non-git',
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('verifying')
+    expect(out.outcome).toBe('pending_verification')
+    expect(world.store.getTask(seeded.id).state).toBe('verifying')
+    expect(world.workerPrompts).toHaveLength(0)
+    expect(eventsOfType(world, 'recovery.verification_interrupted')).toEqual([
+      {
+        taskId: seeded.id,
+        payload: {
+          taskId: seeded.id,
+          priorState: 'verifying',
+          attempt: 0,
+          pendingCount: 1,
+          pendingChecks: ['unit'],
+        },
+      },
+    ])
+    expect(eventsOfType(world, 'task.completed')).toEqual([])
+  })
+
+  it('T9 applies a verdict from complete durable evidence after a crash mid-verification', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R9'), 'verifying')
+    const check = world.store.createVerificationCheck({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      attempt: seeded.attempt,
+      name: 'unit',
+      command: ['node', '-e', 'process.exit(0)'],
+      cwd: null,
+      workspaceId: null,
+      evidenceKind: 'non-git',
+    })
+    world.store.setVerificationCheckResult(check.id, {
+      status: 'passed',
+      exitCode: 0,
+      executor: 'host-test',
+    })
+    world.store.setVerificationCheckPostEvidence(check.id, {
+      postEvidenceKind: 'non-git',
+      postRevision: null,
+      postWorktreeDirty: null,
+      postWorktreeFingerprint: null,
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(out.outcome).toBe('success')
+    const settled = world.store.getTask(seeded.id)
+    expect(settled.state).toBe('completed')
+    expect(eventsOfType(world, 'recovery.verification_resumed')).toEqual([
+      {
+        taskId: seeded.id,
+        payload: {
+          taskId: seeded.id,
+          priorState: 'verifying',
+          attempt: 0,
+          verdict: 'completed',
+          passed: true,
+        },
+      },
+    ])
+    expect(eventsOfType(world, 'task.completed')).toEqual([
+      { taskId: seeded.id, payload: { via: 'verification', checks: 1, summary: '1/1 criteria verified independently' } },
+    ])
+  })
+
+  it('T10 refuses to replay a task whose tool start has no persisted result', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R10'), 'running')
+    world.store.appendEvent({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      type: 'task.tool_started',
+      payload: { attempt: seeded.attempt, callId: 'call-1', name: 'fs.write' },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('failed')
+    expect(out.outcome).toBe('failure')
+    const settled = world.store.getTask(seeded.id)
+    expect(settled.state).toBe('unknown_outcome')
+    expect(settled.failure).toMatchObject({ code: 'recovery_unknown_tool_outcome' })
+    // The whole point: no new engine turn replayed the unknown operation.
+    expect(world.workerPrompts.filter((p) => p.muse === 'worker-a')).toHaveLength(0)
+    expect(eventsOfType(world, 'task.recovered')).toEqual([])
+    expect(eventsOfType(world, 'task.recovery_unknown_outcome')).toEqual([
+      {
+        taskId: seeded.id,
+        payload: {
+          taskId: seeded.id,
+          priorState: 'running',
+          attempt: 0,
+          code: 'recovery_unknown_tool_outcome',
+        },
+      },
+    ])
+  })
+
+  it('T11 requeues after a persisted tool result and injects the completed-tool context', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R11'), 'running')
+    world.store.appendEvent({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      type: 'task.tool_started',
+      payload: { attempt: seeded.attempt, callId: 'call-1', name: 'fs.write' },
+    })
+    world.store.appendEvent({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      type: 'task.tool_completed',
+      payload: { attempt: seeded.attempt, callId: 'call-1', name: 'fs.write', summary: 'wrote 2 files' },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(world.store.getTask(seeded.id).state).toBe('completed')
+    expect(eventsOfType(world, 'task.recovered')).toEqual([
+      {
+        taskId: seeded.id,
+        payload: {
+          taskId: seeded.id,
+          priorState: 'running',
+          attempt: 1,
+          completedTools: ['fs.write: wrote 2 files'],
+        },
+      },
+    ])
+    const prompt = world.workerPrompts.find((p) => p.muse === 'worker-a')?.text ?? ''
+    expect(prompt).toContain('Recovery context')
+    expect(prompt).toContain('fs.write: wrote 2 files')
+  })
+
+  it('T12 expires a dead session pending approval, resumes the parked run and requeues the task', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R12'), 'needs_approval')
+    world.store.setRunState(world.runId, 'active')
+    world.store.setRunState(world.runId, 'awaiting_approval')
+    const approval = world.store.createApproval({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      requestedByShipId: 'worker-a',
+      action: 'engine.permission',
+      reason: 'edit src/app.ts',
+      scope: { path: 'src/app.ts' },
+    })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(world.store.getTask(seeded.id).state).toBe('completed')
+    expect(world.store.getApproval(approval.id)).toMatchObject({
+      status: 'expired',
+      decidedBy: 'pluton:recovery',
+    })
+    expect(eventsOfType(world, 'approval.expired')).toEqual([
+      {
+        taskId: seeded.id,
+        payload: { approvalId: approval.id, action: 'engine.permission', reason: 'supervisor_restart' },
+      },
+    ])
+    expect(eventsOfType(world, 'recovery.run_resumed')).toEqual([
+      { taskId: null, payload: { priorState: 'awaiting_approval', expiredApprovals: 1 } },
+    ])
+    expect(eventsOfType(world, 'task.recovered')).toEqual([
+      { taskId: seeded.id, payload: { taskId: seeded.id, priorState: 'needs_approval', attempt: 1 } },
+    ])
+  })
+
+  it('T13 treats a granted approval without a persisted result as an unknown outcome', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R13'), 'needs_approval')
+    const approval = world.store.createApproval({
+      projectId: world.projectId,
+      runId: world.runId,
+      taskId: seeded.id,
+      requestedByShipId: 'worker-a',
+      action: 'engine.permission',
+      reason: 'edit src/app.ts',
+      scope: { path: 'src/app.ts' },
+    })
+    world.store.setApprovalStatus(approval.id, 'approved', { decidedBy: 'operator' })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('failed')
+    const settled = world.store.getTask(seeded.id)
+    expect(settled.state).toBe('unknown_outcome')
+    expect(settled.failure).toMatchObject({ code: 'recovery_approval_unconfirmed' })
+    expect(world.workerPrompts).toHaveLength(0)
+    expect(eventsOfType(world, 'task.recovered')).toEqual([])
+  })
+
+  it('T14 never touches a task that was already terminal at restart', async () => {
+    const world = makeWorld({ runDeadlineMs: 2_000 })
+    const seeded = strandTask(world, seedTask(world, 'R14'), 'verifying')
+    world.store.setTaskState(seeded.id, 'completed')
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(world.store.getTask(seeded.id).state).toBe('completed')
+    expect(world.workerPrompts).toHaveLength(0)
+    expect(eventsOfType(world, 'task.recovered')).toEqual([])
+    expect(eventsOfType(world, 'task.recovery_unknown_outcome')).toEqual([])
+    expect(eventsOfType(world, 'recovery.verification_resumed')).toEqual([])
+  })
+
+  it('T15 recovers multiple stranded workers independently', async () => {
+    const world = makeWorld({ runDeadlineMs: 4_000, maxConcurrentWorkers: 2 })
+    const first = strandTask(world, seedTask(world, 'R15-a'), 'running')
+    const secondBase = world.store.createTask({
+      runId: world.runId,
+      title: 'R15-b',
+      brief: 'do it well',
+      acceptanceCriteria: ['done'],
+      assigneeMuseId: 'worker-b',
+    })
+    const second = strandTask(world, secondBase, 'running')
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(out.taskCounts).toMatchObject({ completed: 2 })
+    expect(world.store.getTask(first.id).state).toBe('completed')
+    expect(world.store.getTask(second.id).state).toBe('completed')
+    expect(eventsOfType(world, 'task.recovered').map((e) => e.taskId).sort()).toEqual(
+      [first.id, second.id].sort(),
+    )
+  })
+
+  it('T16 requeues a parent with its durable child context instead of blindly re-delegating', async () => {
+    const world = makeWorld({ runDeadlineMs: 4_000 })
+    const parent = strandTask(world, seedTask(world, 'R16-parent'), 'waiting_for_children')
+    const child = world.store.createTask({
+      runId: world.runId,
+      parentTaskId: parent.id,
+      title: 'R16-child',
+      brief: 'child work',
+      acceptanceCriteria: ['done'],
+      assigneeMuseId: 'worker-b',
+    })
+    world.store.setTaskState(child.id, 'queued')
+    world.store.setTaskState(child.id, 'admitted')
+    world.store.setTaskState(child.id, 'running')
+    world.store.setTaskState(child.id, 'completed', { result: { summary: 'child done' } })
+
+    const out = await world.supervisor.runToCompletion()
+
+    expect(out.state).toBe('completed')
+    expect(world.store.getTask(parent.id).state).toBe('completed')
+    expect(world.store.getTask(child.id).state).toBe('completed')
+    // The child was already settled; only the parent ran again.
+    expect(world.workerPrompts.filter((p) => p.muse === 'worker-b')).toHaveLength(0)
+    const prompt = world.workerPrompts.find((p) => p.muse === 'worker-a')?.text ?? ''
+    expect(prompt).toContain('Existing child tasks created before the crash')
+    expect(prompt).toContain(child.id)
+    expect(prompt).toContain('R16-child')
+    expect(prompt).toContain('[completed]')
+  })
+
+  describe('Scheduler policy (Phase 4 Batch 3)', () => {
+    it('dispatches ready tasks in dependency-criticality order (priority over FIFO)', async () => {
+      const world = makeWorld({ runDeadlineMs: 4_000, maxConcurrentWorkers: 2 })
+      // A blocks C and D; B blocks nothing; C and D depend on A.
+      const a = world.store.createTask({
+        runId: world.runId,
+        title: 'A blocks two dependents',
+        brief: 'a',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-a',
+      })
+      const b = world.store.createTask({
+        runId: world.runId,
+        title: 'B leaf task',
+        brief: 'b',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-b',
+      })
+      const c = world.store.createTask({
+        runId: world.runId,
+        title: 'C depends on A',
+        brief: 'c',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-a',
+      })
+      const d = world.store.createTask({
+        runId: world.runId,
+        title: 'D depends on A',
+        brief: 'd',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-b',
+      })
+      for (const t of [a, b, c, d]) world.store.setTaskState(t.id, 'queued')
+      world.store.addEdge(world.runId, c.id, a.id, 'depends_on')
+      world.store.addEdge(world.runId, d.id, a.id, 'depends_on')
+
+      const out = await world.supervisor.runToCompletion()
+      await world.settleTools()
+
+      expect(out.state).toBe('completed')
+      expect(world.store.getTask(a.id).state).toBe('completed')
+      expect(world.store.getTask(b.id).state).toBe('completed')
+      expect(world.store.getTask(c.id).state).toBe('completed')
+      expect(world.store.getTask(d.id).state).toBe('completed')
+
+      // A blocks more dependents (2) than B (0), so A is dispatched first even
+      // though B was created earlier / is a leaf.
+      const aPrompt = world.workerPrompts.find((p) => p.muse === 'worker-a')!
+      const bPrompt = world.workerPrompts.find((p) => p.muse === 'worker-b')!
+      expect(aPrompt).not.toBeNull()
+      expect(bPrompt).not.toBeNull()
+      expect(world.workerPrompts.indexOf(aPrompt)).toBeLessThan(world.workerPrompts.indexOf(bPrompt))
+    })
+
+    it('suppresses duplicate intent and leaves the duplicate queued', async () => {
+      const world = makeWorld({ runDeadlineMs: 1_500, maxConcurrentWorkers: 2 })
+      const base = world.store.createTask({
+        runId: world.runId,
+        title: 'Implement the login endpoint',
+        brief: 'Implement the login endpoint with validation',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-a',
+        writeScope: ['src/auth.ts'],
+      })
+      const dup = world.store.createTask({
+        runId: world.runId,
+        title: 'Implement the login endpoint',
+        brief: 'Implement the login endpoint with validation',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-a',
+        writeScope: ['src/auth.ts'],
+      })
+      world.store.setTaskState(base.id, 'queued')
+      world.store.setTaskState(dup.id, 'queued')
+
+      const out = await world.supervisor.runToCompletion()
+
+      // Exactly one of the duplicate pair is dispatched; the other is suppressed.
+      expect(world.workerPrompts.filter((p) => p.muse === 'worker-a')).toHaveLength(1)
+      const states = [world.store.getTask(base.id).state, world.store.getTask(dup.id).state]
+      expect(states.sort()).toEqual(['completed', 'queued'])
+
+      const suppressedIdx = states.indexOf('queued')
+      const suppressedId = suppressedIdx === 0 ? base.id : dup.id
+      const completedId = suppressedIdx === 0 ? dup.id : base.id
+
+      const dupEvents = eventsOfType(world, 'task.duplicate_suppressed')
+      expect(dupEvents.length).toBe(1)
+      expect(dupEvents[0]!.taskId).toBe(suppressedId)
+      expect(dupEvents[0]!.payload.reason).toContain('overlapping write scope')
+
+      // The completed task finished its work.
+      expect(world.store.getTask(completedId).state).toBe('completed')
+      // The suppressed task is not terminal: it remains visible for re-inspection.
+      expect(world.store.getTask(suppressedId).state).not.toBe('completed')
+    })
+
+    it('never exceeds maxConcurrentWorkers', async () => {
+      const world = makeWorld({ runDeadlineMs: 4_000, maxConcurrentWorkers: 1 })
+      const a = world.store.createTask({
+        runId: world.runId,
+        title: 'A',
+        brief: 'a',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-a',
+      })
+      const b = world.store.createTask({
+        runId: world.runId,
+        title: 'B',
+        brief: 'b',
+        acceptanceCriteria: ['done'],
+        assigneeMuseId: 'worker-b',
+      })
+      world.store.setTaskState(a.id, 'queued')
+      world.store.setTaskState(b.id, 'queued')
+
+      const out = await world.supervisor.runToCompletion()
+      await world.settleTools()
+
+      expect(out.state).toBe('completed')
+      // With maxConcurrentWorkers: 1, both tasks complete but never concurrently.
+      expect(world.store.getTask(a.id).state).toBe('completed')
+      expect(world.store.getTask(b.id).state).toBe('completed')
+    })
   })
 })
 

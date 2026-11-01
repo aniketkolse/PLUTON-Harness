@@ -251,6 +251,7 @@ describe('PlutonToolBridge — identity and permissions', () => {
       'task.get_result',
       'task.cancel',
       'task.request_revision',
+      'review.report',
       'ship.propose_create',
       'muse.propose_create',
       'approval.request',

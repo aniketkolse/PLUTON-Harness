@@ -213,10 +213,19 @@ export abstract class AcpEngineSessionBase implements EngineSession {
 
     yield { kind: 'status', status: 'busy' }
 
+    let normalCompletion = false
     try {
       for await (const event of queue) yield event
+      normalCompletion = true
     } finally {
       if (adapterTimer) clearTimeout(adapterTimer)
+      if (!normalCompletion && !this.closed && this.activeTurn) {
+        // Consumer exited early (e.g. break or throw in for-await). The engine
+        // turn is still running in the background; cancel it and poison the
+        // session so a new prompt cannot be interleaved.
+        void this.interrupt()
+        this.poisoned = new EngineProtocolError('turn consumer terminated early; session must not be reused')
+      }
       this.busy = false
       this.activeTurn = null
       // A dead transport can never deliver a permission answer: settle any
@@ -232,6 +241,14 @@ export abstract class AcpEngineSessionBase implements EngineSession {
       this.poisoned = err
       yield { kind: 'error', code: err.code, message: err.message }
       yield { kind: 'result', outcome: 'unknown', summary: 'event buffer overflow; session state unknown' }
+      return
+    }
+
+    if (turn.interrupted) {
+      const summary =
+        turn.resultSummary?.summary ??
+        (turn.timedOut ? 'prompt timed out; cancellation not acknowledged' : 'prompt interrupted by caller')
+      yield { kind: 'result', outcome: 'cancelled', summary }
       return
     }
 
@@ -270,6 +287,19 @@ export abstract class AcpEngineSessionBase implements EngineSession {
       // interrupt must not mask that with a second failure.
       if (!this.client.isDead) throw err
     }
+    if (turn && !turn.queue.isClosed) {
+      const graceTimer = setTimeout(() => {
+        if (!turn.queue.isClosed) {
+          turn.error = new EngineProtocolError(
+            `prompt was interrupted and the engine did not acknowledge session/cancel within ${this.cancelGraceMs}ms; session state is unknown`,
+            { details: { cancelGraceMs: this.cancelGraceMs } },
+          )
+          this.poisoned = turn.error
+          turn.queue.close()
+        }
+      }, this.cancelGraceMs)
+      graceTimer.unref?.()
+    }
   }
 
   /** Mark closed and release any active turn; subclasses handle engine cleanup. */
@@ -279,7 +309,10 @@ export abstract class AcpEngineSessionBase implements EngineSession {
     // TUI/SPA disconnect, engine shutdown or run cancellation: every pending
     // permission wait settles deny and its record is expired (no orphans).
     this.permissionChannel?.abort('session closed')
-    if (this.activeTurn) this.activeTurn.queue.close()
+    if (this.activeTurn) {
+      this.activeTurn.interrupted = true
+      this.activeTurn.queue.close()
+    }
   }
 
   abstract close(): Promise<void>
