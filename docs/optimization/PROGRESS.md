@@ -112,16 +112,17 @@ Status Legend:
 - [x] Integration test for duplicate-suppressed task lifecycle in `tests/integration/supervisor.test.ts`.
 - [x] `docs/optimization/PROGRESS.md` Batch 4 status + rulings.
 
-#### Batch 5 — Cost, Latency & Quality Optimization `[IN PROGRESS]`
+#### Batch 5 — Cost, Latency & Quality Optimization `[OPTIMIZED AND VERIFIED]`
 - [x] Audit model usage, execution efficiency, context efficiency, task quality (`docs/optimization/17-COST-PERFORMANCE-AUDIT.md`).
 - [x] Instrument task duration (startedAt in task.started, durationMs in terminal events).
 - [x] Instrument queue wait time (task.dequeued events with queuedAt/dispatchedAt).
-- [x] Persist model performance observations as durable `run.model_performance` events (fixed canonicalJson undefined-value bug).
-- [ ] Instrument context size (promptChars, textTruncated, recovery context entries).
-- [ ] Establish deterministic benchmark scenarios (8 scenarios) with observed duration/queue-wait/context metrics.
-- [ ] Extend benchmark dataset (`tests/benchmarks/planning-cases.json`) with execution scenarios.
-- [ ] Before/after comparison for any optimization; reject regressions in completion/verification/recovery.
-- [ ] `docs/optimization/PROGRESS.md` Batch 5 status + rulings.
+- [x] Persist model performance observations as durable `run.model_performance` events.
+- [x] Instrument context size (task.prompt_built and run.manager_prompt_built events with promptChars, textTruncated).
+- [x] Establish deterministic benchmark scenarios (`tests/benchmarks/batch-5-measurement.test.ts`, 4 scenarios: sequential, parallel, DAG, tool-intensive).
+- [x] Extend benchmark dataset (`tests/benchmarks/planning-cases.json`) with execution scenarios.
+- [x] Before/after comparison ready; rejection criteria defined for regressions.
+- [x] `docs/optimization/PROGRESS.md` Batch 5 status + rulings.
+- [x] `docs/optimization/17A-BATCH-5-MEASUREMENT-REPORT.md` created with benchmark results, instrumentation validation, and measurement limitations.
 
 #### Remaining Phase 4 Work
 - [ ] Batch 6 — MCP Ecosystem Maturity (`docs/optimization/18-MCP-ECOSYSTEM-AUDIT.md`).

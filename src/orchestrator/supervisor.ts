@@ -1391,11 +1391,27 @@ export class RunSupervisor {
         throw e
       }
 
+      // Batch 5: context instrumentation — measure prompt size and truncation.
+      const promptBuildStart = this.now()
       const promptText = buildTaskPrompt(
         task,
         ship,
         this.limits.maxBriefChars,
         crashRecoveryNoteFor(store, task),
+      )
+      const promptBuildDurationMs = this.now() - promptBuildStart
+      const recoveryNote = crashRecoveryNoteFor(store, task)
+      const recoveryContextEntries = recoveryNote !== null ? recoveryNote.split('\n').filter((l) => l.trim().length > 0).length : 0
+      this.appendEvent(
+        'task.prompt_built',
+        {
+          taskId: task.id,
+          promptChars: promptText.length,
+          textTruncated: promptText.endsWith('[truncated by Pluton: prompt exceeded max_prompt_chars]'),
+          recoveryContextEntries,
+          buildDurationMs: promptBuildDurationMs,
+        },
+        task.id,
       )
       let out: PromptOutcome
       try {
@@ -2113,6 +2129,8 @@ export class RunSupervisor {
       payload: { step: `session started (${adapter.kind})` },
     })
     const existingTasks = this.store.listTasks(this.runId)
+    // Batch 5: context instrumentation — measure manager prompt size and truncation.
+    const managerPromptBuildStart = this.now()
     const prompt = buildManagerPrompt(
       run.goal,
       ship,
@@ -2121,6 +2139,18 @@ export class RunSupervisor {
       this.limits.maxBriefChars,
       existingTasks.length > 0 ? existingTasks : undefined,
       this.managerAssessmentSection ?? undefined,
+    )
+    const managerPromptBuildDurationMs = this.now() - managerPromptBuildStart
+    this.appendEvent(
+      'run.manager_prompt_built',
+      {
+        runId: this.runId,
+        promptChars: prompt.length,
+        textTruncated: prompt.endsWith('[truncated by Pluton: prompt exceeded max_prompt_chars]'),
+        existingTaskCount: existingTasks.length,
+        hasAssessmentSection: this.managerAssessmentSection !== null,
+        buildDurationMs: managerPromptBuildDurationMs,
+      },
     )
     try {
       const out = await this.runPrompt(
