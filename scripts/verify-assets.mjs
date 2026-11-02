@@ -106,6 +106,9 @@ export function verifyAssets() {
     'projectNameInput',
     'btnSaveProjectName',
     'projectIdentityMeta',
+    'fileSearchInput',
+    'fileBreadcrumbs',
+    'fileTabsBar',
   ]
   for (const id of REQUIRED_IDS) {
     check(`html has id="${id}"`, html.includes(`id="${id}"`), 'id is missing')

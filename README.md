@@ -107,6 +107,14 @@ pluton status                      # shows recent runs and task counts from dura
 pluton status --all-projects       # shows recent runs across all registered projects
 ```
 
+### Scalable File Explorer & Multi-File Tabs (Phase 5)
+
+The graphical workspace includes an on-demand file explorer designed for arbitrarily deep projects:
+- **Lazy Directory Tree**: Subdirectories load on-demand (`GET /api/files?dir=...`) with deterministic pagination for folders >500 items, replacing fixed truncation limits.
+- **Bounded Search**: Rapid workspace-wide file and directory search (`GET /api/files/search?q=...`) bounded to 10,000 scanned entries and 100 matches.
+- **Multi-File Editor Tabs**: Work across multiple files simultaneously with dirty buffer tracking (`●`), scroll/cursor restoration, and `Ctrl+W` / `Ctrl+S` shortcuts.
+- **Strict Containment**: Directory and file access (`resolveWorkspaceDir`, `resolveWorkspaceFile`) rejects traversal (`..`), external symlinks, Windows 8.3 aliases, and protected paths (`.git`, `.pluton`, `node_modules`, `.env*`).
+
 ## Desktop Delivery Architecture & Packaging (ADR-0015)
 
 Pluton uses a two-tier desktop delivery model with **one shared graphical frontend** and **one authoritative SQLite runtime**:

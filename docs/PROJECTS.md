@@ -149,3 +149,35 @@ Pluton's web workspace provides unified multi-project access hosted by a single 
 - Switching projects in the web interface updates the browser URL (`?project=<id>`) and client state **without** overwriting the terminal's global `~/.pluton/active-project` pointer.
 - Live Server-Sent Events (`/api/events?projectId=<id>`) dynamically route events for the active project so background activities in other projects do not contaminate the active view.
 - Sessions, file browser trees, model configurations, and run activity cards automatically scope to the selected project.
+
+---
+
+## 6. Scalable File Explorer, Search & Editor Tabs (Phase 5)
+
+Pluton 4.1 Phase 5 replaces the legacy flat 300-file browser with an on-demand, lazy-loading directory tree, bounded recursive workspace search, multi-file editor tabs, and strict workspace containment:
+
+### Lazy Directory Tree & Pagination
+- **On-Demand Loading**: `GET /api/files?dir=<path>` resolves directory segments on the fly, loading subtrees only when expanded.
+- **Deep Nesting**: Supports arbitrary nesting depths (up to 32 levels) without artificial file count limits.
+- **Deterministic Pagination**: Directories containing over 500 entries are paginated deterministically (`?offset=...&limit=500`) with a "Load more…" control in the tree view.
+- **Backwards Compatibility**: Calling `GET /api/files` without a `dir` query parameter continues to return the workspace file list (`files: string[]`) alongside structured entries (`entries: WorkspaceDirectoryEntry[]`).
+
+### Bounded Workspace Search
+- **Recursive Fast Search**: `GET /api/files/search?q=<query>` searches files and directories across the workspace.
+- **Strict Bounds**: Search traversal is capped at 10,000 scanned entries and returns at most 100 matches (`truncated: true` if exceeded) to prevent event-loop starvation on massive codebases.
+- **Highlighting & Navigation**: Instant filter-as-you-type in the file explorer with query match highlighting and one-click directory navigation.
+
+### Multi-File Editor Tabs with Unsaved Buffer Protection
+- **Multi-File Tabs**: Multiple files can be opened simultaneously in `#fileTabsBar`.
+- **Buffer State & Cursor Preservation**: Switching between tabs preserves edited text, cursor position, and scroll offsets without premature saves.
+- **Dirty Buffer Indicators**: Unsaved changes are marked with an indicator dot (`●`).
+- **Loss Prevention**: Closing an unsaved tab or the viewer prompts an explicit confirmation dialog (`plutonConfirm`) before discarding edits.
+- **Shortcuts**: `Ctrl+S` saves the active tab, `Ctrl+E` enters edit mode, `Ctrl+W` closes the active tab, and `Esc` dismisses the viewer or closes the tab.
+
+### Containment Security
+- Both `resolveWorkspaceDir` and `resolveWorkspaceFile` enforce strict containment:
+  - Rejects traversal sequences (`..`), leading slashes, and control characters.
+  - Rejects Windows 8.3 short-name aliases (e.g. `RUN~1`).
+  - Resolves symlinks and verifies the canonical target resides within the project root directory.
+  - Excludes protected directories and secrets (`.git`, `.pluton`, `node_modules`, `.env*`).
+
