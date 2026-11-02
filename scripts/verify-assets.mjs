@@ -70,6 +70,7 @@ export function verifyAssets() {
     'btnBuildConfirmCancel',
     'buildConfirm',
     'buildConfirmWorkspace',
+    'buildConfirmProjectName',
     'buildConfirmGoal',
     'sbContext',
     'modelLabelBtn',
@@ -101,6 +102,10 @@ export function verifyAssets() {
     'projectSelectDropdown',
     'projectSelectBtn',
     'projectSelectName',
+    'projectIdentityCard',
+    'projectNameInput',
+    'btnSaveProjectName',
+    'projectIdentityMeta',
   ]
   for (const id of REQUIRED_IDS) {
     check(`html has id="${id}"`, html.includes(`id="${id}"`), 'id is missing')

@@ -288,6 +288,15 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <div id="mcpCardList" class="mcp-list"></div>
           </div>
 
+          <div class="card" id="projectIdentityCard">
+            <div class="card-head">
+              <span class="card-title">Project Identity</span>
+              <button id="btnSaveProjectName" class="btn-xs btn-secondary" type="button">Rename</button>
+            </div>
+            <input id="projectNameInput" class="input-text" type="text" placeholder="Project display name" autocomplete="off">
+            <div id="projectIdentityMeta" class="card-sub">No Build session yet.</div>
+          </div>
+
           <div class="card">
             <div class="card-head">
               <span class="card-title">Workspace Root Directory</span>
@@ -385,8 +394,9 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
         <div id="buildConfirmBody" class="build-confirm-body">
           <div class="build-confirm-row"><span class="build-confirm-key">Operation</span><span class="build-confirm-val">Supervised build - the manager agent plans and delegates to the team</span></div>
           <div class="build-confirm-row"><span class="build-confirm-key">Workspace</span><span class="build-confirm-val mono" id="buildConfirmWorkspace">-</span></div>
+          <div class="build-confirm-row"><span class="build-confirm-key">Project name</span><input id="buildConfirmProjectName" class="input-text" type="text" placeholder="Project display name" autocomplete="off"></div>
           <div class="build-confirm-row"><span class="build-confirm-key">Goal</span><span class="build-confirm-val" id="buildConfirmGoal">-</span></div>
-          <div class="build-confirm-note">A build provisions worker containers and spends engine tokens. Nothing is dispatched until you confirm.</div>
+          <div class="build-confirm-note">The first build establishes this project workspace and name. Later builds continue it without asking again. A build provisions worker containers and spends engine tokens; nothing is dispatched until you confirm.</div>
         </div>
         <div class="build-confirm-actions">
           <button id="btnBuildConfirmStart" class="btn-primary" type="button">Start build</button>
@@ -1802,6 +1812,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
 .build-confirm-row { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
 .build-confirm-key { flex: 0 0 82px; color: var(--text-muted); }
 .build-confirm-val { flex: 1 1 auto; color: #fff; word-break: break-word; }
+.build-confirm-row .input-text { flex: 1 1 auto; min-width: 0; padding: 4px 8px; font-size: 12px; }
 .build-confirm-val.mono { font-family: var(--font-mono); font-size: 11px; }
 .build-confirm-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-top: 2px; }
 .build-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 0 12px 11px; }
@@ -4167,6 +4178,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
       renderMuseModels();
       renderPermissions();
+      renderProjectIdentity();
       refreshActiveRun();
     } catch (err) {
       toast('Failed to load workspace: ' + err.message, true);
@@ -4763,6 +4775,42 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
     } catch (err) {
       toast('Failed to save settings: ' + err.message, true);
+    }
+  }
+
+  async function saveProjectName() {
+    var input = el('projectNameInput');
+    if (!input) return;
+    var name = input.value.trim();
+    if (!name) {
+      toast('Project name is required', true);
+      return;
+    }
+    var projectId = state.workspace && state.workspace.projectId;
+    if (!projectId) {
+      toast('No project loaded', true);
+      return;
+    }
+    try {
+      var res = await apiFetch('/api/projects/' + encodeURIComponent(projectId), {
+        method: 'PATCH',
+        body: JSON.stringify({ name: name })
+      });
+      if (res && res.project) {
+        state.workspace.name = res.project.name;
+        var active = state.projects.find(function (p) { return p.id === res.project.id; });
+        if (active) {
+          active.name = res.project.name;
+          active.slug = res.project.slug;
+        }
+        var nameNode = el('workspaceName');
+        if (nameNode) nameNode.textContent = res.project.name;
+        renderProjectSelector();
+        renderProjectIdentity();
+        toast('Project renamed to ' + res.project.name);
+      }
+    } catch (err) {
+      toast('Rename failed: ' + err.message, true);
     }
   }
 
@@ -6310,9 +6358,14 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (!text) return;
     if (state.mode === 'build') {
       if (state.busy) return;
-      // A supervised build provisions containers and spends engine tokens, so
-      // it is dispatched only after an explicit confirmation.
-      openBuildConfirm(text);
+      // Only the first Build asks the operator to establish the project. A
+      // known persistent session continues directly; approvals inside the run
+      // are unaffected by skipping this panel.
+      if (shouldConfirmBuild()) {
+        openBuildConfirm(text);
+        return;
+      }
+      await startBuild(text);
       return;
     }
     if (!state.activeSessionId) {
@@ -6361,11 +6414,33 @@ details:not([open]) > .tool-card-head .tool-chevron {
   /**
    * Show the supervised-build confirmation.
    *
-   * The panel names the workspace and the operation so the operator can see
-   * WHAT would run and WHERE, and nothing is dispatched until "Start build"
-   * is pressed. The prompt text stays in the composer until then, so
-   * cancelling the confirmation loses nothing.
+   * Only the FIRST build in a project opens this panel: it is where the
+   * operator establishes the persistent workspace and display name. Later
+   * builds reuse that session and dispatch directly.
    */
+  function currentProjectSession() {
+    var ws = state.workspace || {};
+    return ws.projectSession || null;
+  }
+
+  function shouldConfirmBuild() {
+    var session = currentProjectSession();
+    return !session || !(session.buildCount > 0);
+  }
+
+  function renderProjectIdentity() {
+    var ws = state.workspace || {};
+    var nameInput = el('projectNameInput');
+    if (nameInput && document.activeElement !== nameInput) nameInput.value = ws.name || '';
+    var meta = el('projectIdentityMeta');
+    if (meta) {
+      var session = ws.projectSession;
+      meta.textContent = session
+        ? ('Build #' + session.buildCount + ' · ' + (session.workspaceRoot || ws.rootDir || ''))
+        : 'No Build session yet — the first Build establishes this workspace.';
+    }
+  }
+
   function openBuildConfirm(goal) {
     if (state.buildConfirmOpen || state.buildDispatching) return;
     var panel = el('buildConfirm');
@@ -6375,11 +6450,17 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var ws = state.workspace || {};
     if (wsNode) wsNode.textContent = ws.rootDir || (ws.name ? ws.name : 'unknown workspace');
     if (goalNode) goalNode.textContent = goal;
+    var nameInput = el('buildConfirmProjectName');
+    if (nameInput) {
+      nameInput.value = ws.name || '';
+      nameInput.readOnly = false;
+    }
     state.pendingBuildGoal = goal;
     panel.classList.remove('is-hidden');
     state.buildConfirmOpen = true;
     var start = el('btnBuildConfirmStart');
-    if (start) start.focus();
+    if (nameInput) nameInput.focus();
+    else if (start) start.focus();
   }
 
   function closeBuildConfirm(restoreFocus) {
@@ -6393,7 +6474,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
   }
 
-  async function startBuild(goal) {
+  async function startBuild(goal, projectName) {
     state.buildDispatching = true;
     setBusy(true);
     try {
@@ -6401,7 +6482,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
         method: 'POST',
         body: JSON.stringify({
           goal: goal,
-          sessionId: state.activeSessionId || undefined
+          sessionId: state.activeSessionId || undefined,
+          projectName: projectName || undefined
         })
       });
       var input = el('promptInput');
@@ -6414,6 +6496,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var runId = res.run.id;
       state.activeRunId = runId;
       state.settledRunId = null;
+      if (res.projectSession) {
+        state.workspace = state.workspace || {};
+        state.workspace.projectSession = res.projectSession;
+        if (res.run.workspaceRoot) state.workspace.rootDir = res.run.workspaceRoot;
+        renderProjectIdentity();
+      }
       appendPlain('system', 'Build started \\u2014 run ' + runId + ' (' + res.run.state + '). The manager agent plans and delegates to the team.');
       await apiFetch('/api/runs/' + encodeURIComponent(runId) + '/start', {
         method: 'POST',
@@ -7602,12 +7690,26 @@ details:not([open]) > .tool-card-head .tool-chevron {
         if (state.buildDispatching) return;
         var goal = state.pendingBuildGoal;
         if (!goal) return;
+        var nameInput = el('buildConfirmProjectName');
+        var projectName = nameInput ? nameInput.value.trim() : '';
         closeBuildConfirm(false);
-        await startBuild(goal);
+        await startBuild(goal, projectName || undefined);
       });
     }
     var buildCancel = el('btnBuildConfirmCancel');
     if (buildCancel) buildCancel.addEventListener('click', function () { closeBuildConfirm(true); });
+
+    var saveProjectNameBtn = el('btnSaveProjectName');
+    if (saveProjectNameBtn) saveProjectNameBtn.addEventListener('click', saveProjectName);
+    var projectNameField = el('projectNameInput');
+    if (projectNameField) {
+      projectNameField.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveProjectName();
+        }
+      });
+    }
 
     // Escape dismisses the nearest overlay and puts the keyboard back where
     // it was.
