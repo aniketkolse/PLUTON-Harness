@@ -138,7 +138,7 @@ export class ApiRouter {
   /** Live MCP registrations, keyed by the chat session that owns them. */
   private readonly mcpRegistrations = new Map<string, McpRegistration>()
   /** Runs started from the SPA's Build mode, so Stop can cancel the right one. */
-  private readonly activeRunTasks = new Map<string, string>()
+  private readonly activeRunTasks = new Map<string, { runId: string; projectId: string; workspaceRoot: string }>()
   /**
    * Live native execution providers, one per distinct workspace root. The
    * provider enforces that every session's cwd is inside a root it was built
@@ -618,7 +618,23 @@ export class ApiRouter {
       // 9. Runs list & create
       if (pathname === '/api/runs') {
         if (method === 'GET') {
-          const runs = this.ctx.store.listRuns(50)
+          const allProjects = parsedUrl.searchParams.get('allProjects') === 'true' || parsedUrl.searchParams.get('all') === 'true'
+          if (allProjects && this.ctx.projectPool) {
+            const allRuns: any[] = []
+            for (const item of (this.ctx.projectPool as any).items.values()) {
+              try {
+                const projectRuns = item.store.listRuns(50)
+                allRuns.push(...projectRuns)
+              } catch {
+                // Ignore individual project read error
+              }
+            }
+            allRuns.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+            this.sendJson(res, 200, { ok: true, runs: allRuns.slice(0, 50) })
+            return true
+          }
+          const targetProj = this.getTargetProject(req, parsedUrl)
+          const runs = targetProj.store.listRuns(50)
           this.sendJson(res, 200, { ok: true, runs })
           return true
         }
@@ -629,13 +645,20 @@ export class ApiRouter {
             managerMuseId?: string
             sessionId?: string
             workspaceRoot?: string
+            projectId?: string
           }>(req)
+          const targetProj = this.getTargetProject(
+            req,
+            payload.projectId
+              ? new URL(`http://localhost/?projectId=${encodeURIComponent(payload.projectId)}`)
+              : parsedUrl,
+          )
           const goal = payload.goal?.trim()
           if (!goal) {
             this.sendJson(res, 400, { ok: false, error: 'goal is required' })
             return true
           }
-          const ships = this.getStoreShips()
+          const ships = targetProj.store.listShips?.() ?? targetProj.store.listMuses?.() ?? []
           const manager = ships.find((m) => m.role === 'supervisor') ?? ships[0]
           if (!manager) {
             this.sendJson(res, 400, { ok: false, error: 'no manager ship configured' })
@@ -646,14 +669,14 @@ export class ApiRouter {
             workspaceRoot = payload.workspaceRoot
               ? resolveWorkspaceRoot(payload.workspaceRoot)
               : payload.sessionId
-                ? this.workspaceRootFor(payload.sessionId)
-                : resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+                ? this.workspaceRootFor(payload.sessionId, targetProj)
+                : resolveWorkspaceRoot(targetProj.loaded.rootDir)
           } catch (err) {
             this.sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : 'invalid workspace' })
             return true
           }
-          const run = this.ctx.store.createRun({
-            projectId: this.ctx.projectId,
+          const run = targetProj.store.createRun({
+            projectId: targetProj.id,
             goal,
             origin: 'api',
             requestedBy: 'operator:ui',
@@ -678,21 +701,33 @@ export class ApiRouter {
       const runDetailMatch = pathname.match(/^\/api\/runs\/([^/]+)$/)
       if (runDetailMatch && method === 'GET') {
         const runId = runDetailMatch[1]!
-        const run = this.ctx.store.getRunOrNull(runId)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        let run = targetProj.store.getRunOrNull(runId)
+        let runProj = targetProj
+        if (!run && this.ctx.projectPool) {
+          for (const item of (this.ctx.projectPool as any).items.values()) {
+            const candidate = item.store.getRunOrNull(runId)
+            if (candidate) {
+              run = candidate
+              runProj = item
+              break
+            }
+          }
+        }
         if (!run) {
           this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
           return true
         }
-        const tasks = this.ctx.store.listTasks(runId)
-        const edges = this.ctx.store.listEdges(runId)
-        const approvals = this.ctx.store.listApprovals(runId)
-        const usage = this.ctx.store.getRunUsage(runId)
+        const tasks = runProj.store.listTasks(runId)
+        const edges = runProj.store.listEdges(runId)
+        const approvals = runProj.store.listApprovals(runId)
+        const usage = runProj.store.getRunUsage(runId)
         // Inspector partitions need role/model/workspace, but TaskRecord only
         // carries the claim-time `assignment` snapshot and a workspace id.
         // Enrich here (one place) so the SPA's reconstitution shows the real
         // assignment instead of guessing from task-id substrings.
         const workspacePathByTask = new Map<string, string>()
-        for (const ws of this.ctx.store.listWorkspaces(this.ctx.projectId)) {
+        for (const ws of runProj.store.listWorkspaces(runProj.id)) {
           if (ws.runId === runId && ws.taskId !== null) workspacePathByTask.set(ws.taskId, ws.path)
         }
         const taskViews = tasks.map((task) => {
@@ -1331,7 +1366,19 @@ export class ApiRouter {
       const runStartMatch = pathname.match(/^\/api\/runs\/([^/]+)\/start$/)
       if (runStartMatch && method === 'POST') {
         const runId = runStartMatch[1]!
-        const run = this.ctx.store.getRunOrNull(runId)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        let run = targetProj.store.getRunOrNull(runId)
+        let runProj = targetProj
+        if (!run && this.ctx.projectPool) {
+          for (const item of (this.ctx.projectPool as any).items.values()) {
+            const candidate = item.store.getRunOrNull(runId)
+            if (candidate) {
+              run = candidate
+              runProj = item
+              break
+            }
+          }
+        }
         if (!run) {
           this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
           return true
@@ -1344,18 +1391,30 @@ export class ApiRouter {
           this.sendJson(res, 409, { ok: false, error: `run '${runId}' is '${run.state}' and cannot be started` })
           return true
         }
+
+        const effectiveRoot = resolveWorkspaceRoot(run.workspaceRoot ?? runProj.loaded.rootDir)
+        for (const active of this.activeRunTasks.values()) {
+          if (active.projectId === runProj.id && active.workspaceRoot === effectiveRoot && active.runId !== runId) {
+            this.sendJson(res, 409, {
+              ok: false,
+              error: `workspace '${effectiveRoot}' is busy with active run '${active.runId}' in project '${runProj.id}'`,
+            })
+            return true
+          }
+        }
+
         // Drive the EXISTING run through the manager-planning supervisor — the
         // same path `pluton run --resume` uses, with skipManager off so the
         // manager Ship actually plans the run. Progress reaches the SPA over
         // the existing run_state/task_state SSE frames.
-        this.activeRunTasks.set(runId, runId)
-        void resumeRun(this.runProjectContext(run), runId, { skipManager: false }, this.runDeps()).then(
+        this.activeRunTasks.set(runId, { runId, projectId: runProj.id, workspaceRoot: effectiveRoot })
+        void resumeRun(this.runProjectContext(run, runProj), runId, { skipManager: false }, this.runDeps(runProj)).then(
           () => {
             this.activeRunTasks.delete(runId)
           },
           (err) => {
             this.activeRunTasks.delete(runId)
-            this.failRun(runId, err)
+            this.failRun(runId, err, 'start_failure', runProj)
           },
         )
         this.sendJson(res, 202, { ok: true, status: 'running', runId })
@@ -1366,12 +1425,25 @@ export class ApiRouter {
       const runCancelMatch = pathname.match(/^\/api\/runs\/([^/]+)\/cancel$/)
       if (runCancelMatch && method === 'POST') {
         const runId = runCancelMatch[1]!
-        const run = this.ctx.store.getRunOrNull(runId)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        let run = targetProj.store.getRunOrNull(runId)
+        let runProj = targetProj
+        if (!run && this.ctx.projectPool) {
+          for (const item of (this.ctx.projectPool as any).items.values()) {
+            const candidate = item.store.getRunOrNull(runId)
+            if (candidate) {
+              run = candidate
+              runProj = item
+              break
+            }
+          }
+        }
         if (!run) {
           this.sendJson(res, 404, { ok: false, error: `run '${runId}' not found` })
           return true
         }
-        const cancelled = requestRunCancel(this.ctx.store, runId, 'operator:spa')
+        const cancelled = requestRunCancel(runProj.store, runId, 'operator:spa')
+        this.activeRunTasks.delete(runId)
         this.sendJson(res, 200, { ok: true, cancelled, runId })
         return true
       }
@@ -1643,8 +1715,15 @@ export class ApiRouter {
    * what the SSE log-watcher derives `run_state` frames from), and the frame
    * is broadcast immediately so the client does not wait for the next poll.
    */
-  private failRun(runId: string, err: unknown, via: 'start_failure' | 'background_crash' = 'start_failure'): void {
-    const store = this.ctx.store
+  private failRun(
+    runId: string,
+    err: unknown,
+    via: 'start_failure' | 'background_crash' = 'start_failure',
+    proj?: { store: Store; id?: string; projectId?: string; broadcaster: ServerEventBroadcaster },
+  ): void {
+    const store = proj?.store ?? this.ctx.store
+    const projectId = proj?.id ?? (proj as any)?.projectId ?? this.ctx.projectId
+    const broadcaster = proj?.broadcaster ?? this.ctx.broadcaster
     let run: RunRecord
     try {
       run = store.getRun(runId)
@@ -1654,10 +1733,10 @@ export class ApiRouter {
     const settled = run.state
     // The durable settlement is shared with the CLI chat (same defect, same
     // rule); the route layer only adds the immediate SSE frame below.
-    settleRunCrashed(store, this.ctx.projectId, runId, err, via)
+    settleRunCrashed(store, projectId, runId, err, via)
     if (settled === 'failed' || isTerminalRunState(settled)) return
     const message = redactProseSecrets(stripControlChars((err instanceof Error ? err.message : String(err)).slice(0, 2_000)))
-    this.ctx.broadcaster.broadcast({
+    broadcaster.broadcast({
       type: 'run_state',
       runId,
       state: 'failed',
@@ -1680,15 +1759,20 @@ export class ApiRouter {
    * same SSE broadcaster as run/task frames, and the broadcaster persists them
    * in the durable event log before sending.
    */
-  private runDeps(): RunDeps {
+  private runDeps(
+    proj?: { store: Store; id?: string; projectId?: string; broadcaster: ServerEventBroadcaster },
+  ): RunDeps {
+    const store = proj?.store ?? this.ctx.store
+    const projectId = proj?.id ?? (proj as any)?.projectId ?? this.ctx.projectId
+    const broadcaster = proj?.broadcaster ?? this.ctx.broadcaster
     return {
       onWorkerEvent: (event) => {
-        this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId)
+        broadcaster.broadcastWorkerEvent(event, store, projectId)
       },
       onWorkerMessage: (event) => {
         // The bus already appended the durable `worker.message` event: publish
         // the live frame without persisting a duplicate.
-        this.ctx.broadcaster.broadcastWorkerEvent(event, this.ctx.store, this.ctx.projectId, {
+        broadcaster.broadcastWorkerEvent(event, store, projectId, {
           persist: false,
         })
       },
@@ -1729,15 +1813,23 @@ export class ApiRouter {
    * live driver left, so it settles the row via `settleRunCrashed`
    * (durable, terminal-safe, idempotent) in addition to the map cleanup.
    */
-  private watchBackgroundRun(started: { runId: string; done: Promise<unknown> }): void {
-    this.activeRunTasks.set(started.runId, started.runId)
+  private watchBackgroundRun(
+    started: { runId: string; done: Promise<unknown> },
+    proj?: { id?: string; projectId?: string; store: Store; broadcaster: ServerEventBroadcaster },
+    workspaceRoot?: string,
+  ): void {
+    this.activeRunTasks.set(started.runId, {
+      runId: started.runId,
+      projectId: proj?.id ?? (proj as any)?.projectId ?? this.ctx.projectId,
+      workspaceRoot: workspaceRoot ?? this.ctx.loaded.rootDir,
+    })
     void started.done.then(
       () => {
         this.activeRunTasks.delete(started.runId)
       },
       (err: unknown) => {
         this.activeRunTasks.delete(started.runId)
-        this.failRun(started.runId, err, 'background_crash')
+        this.failRun(started.runId, err, 'background_crash', proj)
       },
     )
   }
@@ -1790,7 +1882,7 @@ export class ApiRouter {
             },
             this.runDeps(),
           )
-          this.watchBackgroundRun(started)
+          this.watchBackgroundRun(started, undefined, effectiveRoot)
           return { runId: started.runId }
         },
       })
@@ -1931,12 +2023,13 @@ export class ApiRouter {
   }
 
   /** Project context bound to a run's workspace (background work stays bound). */
-  private runProjectContext(run: RunRecord): ProjectContext {
-    const rootDir = resolveWorkspaceRoot(run.workspaceRoot ?? this.ctx.loaded.rootDir)
+  private runProjectContext(run: RunRecord, proj?: { loaded: LoadedConfig }): ProjectContext {
+    const loaded = proj?.loaded ?? this.ctx.loaded
+    const rootDir = resolveWorkspaceRoot(run.workspaceRoot ?? loaded.rootDir)
     return {
       rootDir,
-      configPath: this.ctx.loaded.configPath,
-      loaded: this.ctx.loaded,
+      configPath: loaded.configPath,
+      loaded,
     }
   }
 

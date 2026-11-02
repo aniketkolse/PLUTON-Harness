@@ -62,6 +62,7 @@ import {
   runByRef,
   runDetail,
   runLine,
+  statusAllProjects,
   statusRuns,
   taskById,
   taskListHuman,
@@ -897,14 +898,33 @@ program
   .description('show recent runs and their task-state counts from durable state')
   .option('--run <id>', 'show one run in detail (full id or unique suffix)')
   .option('--limit <n>', 'how many runs to list (default 10)', '10')
-  .action(async (opts: { run?: string; limit: string }, cmd: Command) => {
+  .option('--all-projects', 'show recent runs across all registered projects')
+  .action(async (opts: { run?: string; limit: string; allProjects?: boolean }, cmd: Command) => {
     const json = jsonMode(cmd)
     await runCommand(io, json, async () => {
-      const ctx = requireProject(process.cwd())
       const limit = Number.parseInt(opts.limit, 10)
       if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
         throw new ValidationError('--limit must be an integer between 1 and 500')
       }
+
+      if (opts.allProjects) {
+        const runs = statusAllProjects(undefined, limit)
+        const human =
+          runs.length === 0
+            ? 'no runs recorded across registered projects'
+            : runs
+                .map((s) => {
+                  const counts = Object.entries(s.taskCounts)
+                    .map(([state, n]) => `${state}:${n}`)
+                    .join(' ')
+                  return `[${s.projectName}] ${runLine(s.run)}${counts ? `  [${counts}]` : ''}`
+                })
+                .join('\n')
+        emitOk(io, json, human, { runs })
+        return
+      }
+
+      const ctx = requireProject(process.cwd())
       const { store } = bootstrapStore(ctx.loaded)
       try {
         if (opts.run !== undefined) {

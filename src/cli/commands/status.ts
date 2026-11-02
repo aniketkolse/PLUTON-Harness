@@ -1,12 +1,47 @@
+import { existsSync } from 'node:fs'
 import type { EventRecord, RunRecord, TaskEdgeRecord, TaskRecord } from '../../domain/models.ts'
 import { NotFoundError, ValidationError } from '../../domain/errors.ts'
 import { recentEvents } from '../../store/query.ts'
 import type { Store } from '../../store/store.ts'
+import { getProjectRegistry } from '../../projects/registry.ts'
+import { loadConfig } from '../../config/load.ts'
+import { bootstrapStore } from '../../bootstrap.ts'
 
 export interface RunSummary {
   run: RunRecord
   taskCounts: Record<string, number>
   totalTasks: number
+}
+
+export interface ProjectRunSummary extends RunSummary {
+  projectName: string
+  projectId: string
+}
+
+export function statusAllProjects(customHome?: string, limitPerProject = 10): ProjectRunSummary[] {
+  const reg = getProjectRegistry(customHome)
+  const summaries: ProjectRunSummary[] = []
+  for (const entry of Object.values(reg.projects)) {
+    if (!existsSync(entry.rootDir)) continue
+    try {
+      const loaded = loadConfig(entry.rootDir)
+      const { store } = bootstrapStore(loaded)
+      try {
+        const runs = store.listRuns(limitPerProject).map((run) => ({
+          ...summarizeRun(store, run),
+          projectName: entry.name,
+          projectId: entry.id,
+        }))
+        summaries.push(...runs)
+      } finally {
+        store.close()
+      }
+    } catch {
+      // Ignore config/load errors on individual projects
+    }
+  }
+  summaries.sort((a, b) => b.run.createdAt.localeCompare(a.run.createdAt))
+  return summaries
 }
 
 export function summarizeRun(store: Store, run: RunRecord): RunSummary {
