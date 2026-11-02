@@ -22,7 +22,7 @@ function redact(v: JsonValue, keyHint: string, depth: number): JsonValue {
   if (typeof v === 'string') {
     return SECRET_KEY_RE.test(keyHint) ? REDACTED : v
   }
-  if (v === null || typeof v === 'number' || typeof v === 'boolean') return v
+  if (v === null || v === undefined || typeof v === 'number' || typeof v === 'boolean') return v
   if (Array.isArray(v)) {
     return v.map((item) => redact(item, '', depth + 1))
   }

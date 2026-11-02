@@ -56,4 +56,18 @@ describe('redactDeep', () => {
     const input: JsonValue = { goal: 'fix bug', files: ['a.ts'], count: 3, ok: true, nothing: null }
     expect(redactDeep(input)).toEqual(input)
   })
+
+  it('tolerates optional payload fields that are undefined (worker.progress shape)', () => {
+    // Live tool events may carry undefined optionals (tool.name/isError). The
+    // redactor must not throw: Object.entries(undefined) aborted every
+    // worker.progress broadcast with "Cannot convert undefined or null to object".
+    const input = {
+      step: 'read: src/index.ts',
+      phase: 'start',
+      tool: undefined,
+      isError: undefined,
+    } as unknown as JsonValue
+    expect(() => redactDeep(input)).not.toThrow()
+    expect(redactDeep(input)).toEqual({ step: 'read: src/index.ts', phase: 'start' })
+  })
 })

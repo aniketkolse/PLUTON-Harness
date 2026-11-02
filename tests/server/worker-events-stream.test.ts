@@ -113,6 +113,38 @@ describe('Worker Events SSE Broadcast', () => {
     expect(emitted.payload.buffer).toContain('[truncated')
   })
 
+  it('broadcasts manager worker.progress events carrying undefined optional tool fields', () => {
+    // Regression: the supervisor's manager onTool publisher always includes
+    // `tool` and `isError`, which are undefined on phases where the engine does
+    // not report them. Redaction threw "Cannot convert undefined or null to
+    // object", so every broadcast was dropped and the UI appeared frozen.
+    const broadcaster = new ServerEventBroadcaster()
+    let emitted: any = null
+    broadcaster.on('worker_event', (e) => {
+      emitted = e
+    })
+
+    expect(() =>
+      broadcaster.broadcastWorkerEvent({
+        type: 'worker.progress',
+        runId: 'run-505',
+        taskId: 'manager',
+        role: 'supervisor',
+        payload: {
+          step: 'planner: start',
+          phase: 'start',
+          tool: undefined,
+          isError: undefined,
+        },
+      }),
+    ).not.toThrow()
+
+    expect(emitted).not.toBeNull()
+    expect(emitted.type).toBe('worker.progress')
+    expect(emitted.taskId).toBe('manager')
+    expect(emitted.payload.step).toBe('planner: start')
+  })
+
   it('persists durable event to store when store is provided in call', () => {
     const broadcaster = new ServerEventBroadcaster()
     const mockStore = {
