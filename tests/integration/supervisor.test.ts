@@ -1833,9 +1833,11 @@ describe('RunSupervisor — restart reconciliation', () => {
       const states = [world.store.getTask(base.id).state, world.store.getTask(dup.id).state]
       expect(states.sort()).toEqual(['completed', 'queued'])
 
-      const suppressedIdx = states.indexOf('queued')
-      const suppressedId = suppressedIdx === 0 ? base.id : dup.id
-      const completedId = suppressedIdx === 0 ? dup.id : base.id
+      // Determine which task was actually suppressed (stayed queued). ID ordering
+      // is non-deterministic (random bytes in newId), so either task may win.
+      const suppressedId =
+        world.store.getTask(base.id).state === 'queued' ? base.id : dup.id
+      const completedId = suppressedId === base.id ? dup.id : base.id
 
       const dupEvents = eventsOfType(world, 'task.duplicate_suppressed')
       expect(dupEvents.length).toBe(1)
