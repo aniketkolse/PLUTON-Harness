@@ -48,8 +48,9 @@ global model switch.
   `unconfined` mode through the same provider but is not live-verified here. `pluton attach` needs
   host `tmux`; runs and chat work without it.
 - **Runtime**: Node.js >= 24 (built-in `node:sqlite`), Git >= 2.40 for checkout isolation and diff
-  capture, OpenCode v2 over the ACP stdio protocol with model auth configured in each Ship's
-  private engine home. The deterministic `mock` adapter is for tests/dev only.
+  capture, OpenCode v2 over the ACP stdio protocol, or OpenAI-compatible HTTP model providers
+  (DeepSeek, Groq, OpenAI, Ollama, etc.) with credentials isolated per provider (see `docs/PROVIDERS.md`).
+  The deterministic `mock` adapter is for tests/dev only.
 - **State**: one authoritative SQLite database per workspace at `.pluton/state/pluton.sqlite`
   holding runs, tasks, dependency edges, receipts, events, approvals, sessions, and resume tokens.
   Workspace-local runs, logs, and server claims live under `.pluton/run/`.

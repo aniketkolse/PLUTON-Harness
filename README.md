@@ -44,7 +44,8 @@ provides the missing control plane for local multi-agent development:
 | Linux for confined modes | kernel with Landlock ABI ≥ 3 (Linux ≥ 6.2) plus the bundled `native/landlock-run` helper; `restricted`/`none` networks also need unprivileged user and network namespaces |
 | Host platform | Linux supports confined `read-only`/`workspace-write`; Windows 11 and macOS support only acknowledged `unconfined`. Windows 11 is validated locally; native Linux confinement and macOS are CI-gated, not live-verified in this checkout. |
 
-> **Engine support:** OpenCode is the only supported real inference engine (`engine: opencode`).
+> **Engine support:** Supported inference engines are OpenCode (`engine: opencode`) via ACP
+> and standard HTTP model providers (`engine: openai-compatible`, see [`docs/PROVIDERS.md`](docs/PROVIDERS.md)).
 > The deterministic `mock` adapter exists for tests and development only; it is not a substitute
 > for a real run. Qwen Code support was removed in the OpenCode-only migration.
 
