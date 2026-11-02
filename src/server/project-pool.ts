@@ -5,6 +5,7 @@ import { NotFoundError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
 import type { Store } from '../store/store.ts'
 import { getProjectRegistry, registerProject } from '../projects/registry.ts'
+import { renameProjectIdentity } from '../projects/rename.ts'
 import type { ProjectRegistryEntry } from '../projects/types.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { ServerLogWatcher } from './log-watcher.ts'
@@ -168,6 +169,29 @@ export class ProjectContextPool {
 
   registerNewProject(dirPath: string): ProjectRegistryEntry {
     return registerProject(dirPath, this.customHome)
+  }
+
+  /**
+   * Rename a project and refresh the cached context so subsequent
+   * `/api/workspace` reads and the SPA header see the new name immediately.
+   * The workspace root never changes.
+   */
+  renameProject(projectIdOrSlug: string, newName: string): ProjectRegistryEntry {
+    const item = this.resolveContext(projectIdOrSlug)
+    const entry = renameProjectIdentity(item.rootDir, newName, this.customHome)
+
+    item.name = entry.name
+    item.loaded = {
+      ...item.loaded,
+      config: {
+        ...item.loaded.config,
+        project: {
+          ...item.loaded.config.project,
+          name: entry.name,
+        },
+      },
+    }
+    return entry
   }
 
   async close(): Promise<void> {

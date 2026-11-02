@@ -101,6 +101,32 @@ export function registerProject(rootDir: string, customHome?: string): ProjectRe
   return entry
 }
 
+/**
+ * Rename the display metadata of one registered project.
+ *
+ * Only `name` and `slug` change; the canonical id and the filesystem root are
+ * identity and stay untouched. Used by the composed rename after the config and
+ * SQLite writes have succeeded.
+ */
+export function renameProjectEntry(
+  projectIdOrSlug: string,
+  newName: string,
+  customHome?: string,
+): ProjectRegistryEntry {
+  const trimmed = newName.trim()
+  if (trimmed === '') throw new ValidationError('project name must not be empty')
+
+  const home = plutonHomeDir(customHome)
+  const reg = getProjectRegistry(home)
+  const entry = findProjectEntry(projectIdOrSlug, reg)
+  if (!entry) throw new NotFoundError('project', projectIdOrSlug)
+
+  entry.name = trimmed
+  entry.slug = slugify(trimmed)
+  saveRegistry(reg, home)
+  return entry
+}
+
 export function findProjectEntry(query: string, reg: ProjectRegistry): ProjectRegistryEntry | null {
   const trimmed = query.trim()
   if (!trimmed) return null
