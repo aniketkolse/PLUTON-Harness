@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { collectDoctorChecks, doctorExitCode } from '../../src/cli/commands/doctor.ts'
 import type { RunOptions, RunResult } from '../../src/util/exec.ts'
@@ -174,5 +175,87 @@ describe('doctor diagnostics', () => {
     expect(tmuxCheck).toBeDefined()
     expect(tmuxCheck?.status).toBe('info')
     expect(tmuxCheck?.message).toContain('not installed')
+  })
+
+  it('reports info when database is not yet initialized', async () => {
+    const root = makeTempProject()
+    // Remove state dir so no database exists
+    const stateDir = join(root, '.pluton', 'state')
+    rmSync(stateDir, { recursive: true, force: true })
+
+    const runFn = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
+    })
+
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    const dbCheck = checks.find((c) => c.id === 'database')
+    expect(dbCheck).toBeDefined()
+    expect(dbCheck?.status).toBe('info')
+    expect(dbCheck?.message).toContain('not yet initialized')
+  })
+
+  it('reports pass when database is at current schema version', async () => {
+    const root = makeTempProject()
+    const stateDir = join(root, '.pluton', 'state')
+    mkdirSync(stateDir, { recursive: true })
+    const dbPath = join(stateDir, 'pluton.sqlite')
+    const db = new DatabaseSync(dbPath)
+    db.exec('PRAGMA user_version = 14')
+    db.close()
+
+    const runFn = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
+    })
+
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    const dbCheck = checks.find((c) => c.id === 'database')
+    expect(dbCheck).toBeDefined()
+    expect(dbCheck?.status).toBe('pass')
+    expect(dbCheck?.message).toContain('schema v14')
+  })
+
+  it('reports warn when database is behind current schema version', async () => {
+    const root = makeTempProject()
+    const stateDir = join(root, '.pluton', 'state')
+    mkdirSync(stateDir, { recursive: true })
+    const dbPath = join(stateDir, 'pluton.sqlite')
+    const db = new DatabaseSync(dbPath)
+    db.exec('PRAGMA user_version = 10')
+    db.close()
+
+    const runFn = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
+    })
+
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    const dbCheck = checks.find((c) => c.id === 'database')
+    expect(dbCheck).toBeDefined()
+    expect(dbCheck?.status).toBe('warn')
+    expect(dbCheck?.message).toContain('pending')
+  })
+
+  it('reports fail when database is ahead of current schema version', async () => {
+    const root = makeTempProject()
+    const stateDir = join(root, '.pluton', 'state')
+    mkdirSync(stateDir, { recursive: true })
+    const dbPath = join(stateDir, 'pluton.sqlite')
+    const db = new DatabaseSync(dbPath)
+    db.exec('PRAGMA user_version = 99')
+    db.close()
+
+    const runFn = mockRun({
+      'git --version': { exitCode: 0, stdout: 'git version 2.40.0' },
+      'tmux -V': { exitCode: 0, stdout: 'tmux 3.4' },
+    })
+
+    const checks = await collectDoctorChecks({ cwd: root, runFn })
+    const dbCheck = checks.find((c) => c.id === 'database')
+    expect(dbCheck).toBeDefined()
+    expect(dbCheck?.status).toBe('fail')
+    expect(dbCheck?.message).toContain('newer than this build supports')
+    expect(doctorExitCode(checks)).toBe(1)
   })
 })

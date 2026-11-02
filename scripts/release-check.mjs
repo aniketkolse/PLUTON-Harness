@@ -355,6 +355,51 @@ if (packFiles) {
   }
 }
 
+// 9b. Package size
+{
+  let packSize = 0
+  try {
+    const raw = execSync('npm pack --dry-run --json', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 600_000,
+    })
+    const manifest = JSON.parse(raw)
+    let files = []
+    if (Array.isArray(manifest) && manifest.length > 0 && Array.isArray(manifest[0].files)) {
+      files = manifest[0].files
+    } else if (manifest && Array.isArray(manifest.files)) {
+      files = manifest.files
+    }
+    packSize = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)
+  } catch {
+    packSize = -1
+  }
+  const maxSize = 50 * 1024 * 1024 // 50 MB
+  const sizeMb = (packSize / 1024 / 1024).toFixed(2)
+  if (packSize >= 0 && packSize <= maxSize) {
+    record('pack-size', 'package size bounded', PASS, `${sizeMb} MB (max ${maxSize / 1024 / 1024} MB)`)
+  } else if (packSize < 0) {
+    record(
+      'pack-size',
+      'package size bounded',
+      NOT_TESTED,
+      'could not compute package size',
+      'run `npm pack --dry-run --json` manually',
+    )
+  } else {
+    record(
+      'pack-size',
+      'package size bounded',
+      FAIL,
+      `${sizeMb} MB exceeds ${maxSize / 1024 / 1024} MB maximum`,
+      'reduce the "files" whitelist or remove large assets',
+    )
+  }
+}
+
 // 10. Production dependency audit
 {
   let raw = ''
