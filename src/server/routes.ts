@@ -401,13 +401,45 @@ export class ApiRouter {
         }
       }
 
-      // 2c. Workspace file list (session-scoped when sessionId supplied, or project-scoped)
+      // 2c. Workspace file list (on-demand directory expansion, pagination, session-scoped or project-scoped)
       if (method === 'GET' && pathname === '/api/files') {
         const targetProj = this.getTargetProject(req, parsedUrl)
         const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
         const rootDir = this.workspaceRootFor(sessionId ?? null, targetProj)
-        const files = this.listWorkspaceFiles(rootDir)
-        this.sendJson(res, 200, { ok: true, files, rootDir })
+        const hasExplicitDir = parsedUrl.searchParams.has('dir')
+        const dirParam = parsedUrl.searchParams.get('dir') ?? ''
+        const offsetParam = Math.max(0, parseInt(parsedUrl.searchParams.get('offset') ?? '0', 10) || 0)
+        const limitParam = Math.min(1000, Math.max(1, parseInt(parsedUrl.searchParams.get('limit') ?? '500', 10) || 500))
+
+        const resolvedDir = this.resolveWorkspaceDir(rootDir, dirParam)
+        if (!resolvedDir.ok) {
+          this.sendJson(res, resolvedDir.status, { ok: false, error: resolvedDir.error })
+          return true
+        }
+
+        const { entries, total, hasMore } = listWorkspaceDirectory(
+          rootDir,
+          resolvedDir.canonical,
+          resolvedDir.canonicalRel,
+          offsetParam,
+          limitParam,
+        )
+
+        // For backwards compatibility: if no explicit ?dir parameter was passed,
+        // populate legacy `files` with the recursive workspace file list.
+        const files = hasExplicitDir ? entries.map((e) => e.path) : this.listWorkspaceFiles(rootDir)
+
+        this.sendJson(res, 200, {
+          ok: true,
+          dir: resolvedDir.canonicalRel.replace(/\\/g, '/'),
+          entries,
+          files,
+          total,
+          hasMore,
+          offset: offsetParam,
+          limit: limitParam,
+          rootDir,
+        })
         return true
       }
 
@@ -442,7 +474,8 @@ export class ApiRouter {
           this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
           return true
         }
-        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null, targetProj)
         const resolved = this.resolveWorkspaceFile(rootDir, target)
         if (!resolved.ok) {
           this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
@@ -470,7 +503,8 @@ export class ApiRouter {
           this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
           return true
         }
-        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null, targetProj)
         const resolved = this.resolveWorkspaceFile(rootDir, target)
         if (!resolved.ok) {
           this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
@@ -2701,4 +2735,81 @@ export function resolveWorkspaceDir(
     return { ok: false, status: 404, error: 'not a directory' }
   }
   return { ok: true, canonical, canonicalRel }
+}
+
+export interface WorkspaceFileEntry {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  size: number
+  modified: number
+}
+
+/**
+ * List immediate entries of a canonical workspace directory with deterministic sorting and paging.
+ */
+export function listWorkspaceDirectory(
+  rootDir: string,
+  canonicalDir: string,
+  relDir: string,
+  offset = 0,
+  limit = 500,
+): { entries: WorkspaceFileEntry[]; total: number; hasMore: boolean } {
+  const ignored = new Set(['dist', '.DS_Store', 'coverage', '.git', '.pluton', 'node_modules'])
+  let rawEntries
+  try {
+    rawEntries = readdirSync(canonicalDir, { withFileTypes: true })
+  } catch {
+    return { entries: [], total: 0, hasMore: false }
+  }
+
+  const dirs: WorkspaceFileEntry[] = []
+  const files: WorkspaceFileEntry[] = []
+
+  for (const entry of rawEntries) {
+    if (ignored.has(entry.name) || protectedWorkspaceSegment(entry.name) !== null) continue
+    if (entry.name.startsWith('.env')) continue
+    const fullPath = join(canonicalDir, entry.name)
+    const entryRel = relDir ? `${relDir}/${entry.name}` : entry.name
+
+    if (entry.isSymbolicLink()) {
+      try {
+        const targetReal = realpathSync(fullPath)
+        const rootReal = realpathSync(rootDir)
+        const relFromRoot = relative(rootReal, targetReal)
+        if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+        if (protectedWorkspaceSegment(relFromRoot) !== null) continue
+      } catch {
+        continue
+      }
+    }
+
+    try {
+      const stat = statSync(fullPath)
+      const isDirectory = stat.isDirectory()
+      const item: WorkspaceFileEntry = {
+        name: entry.name,
+        path: entryRel.replace(/\\/g, '/'),
+        type: isDirectory ? 'dir' : 'file',
+        size: stat.size,
+        modified: Math.round(stat.mtimeMs),
+      }
+      if (isDirectory) {
+        dirs.push(item)
+      } else if (stat.isFile()) {
+        files.push(item)
+      }
+    } catch {
+      // Ignore unreadable entries
+    }
+  }
+
+  dirs.sort((a, b) => a.name.localeCompare(b.name))
+  files.sort((a, b) => a.name.localeCompare(b.name))
+  const all = [...dirs, ...files]
+  const total = all.length
+  const paged = all.slice(offset, offset + limit)
+  const hasMore = offset + limit < total
+
+  return { entries: paged, total, hasMore }
 }
