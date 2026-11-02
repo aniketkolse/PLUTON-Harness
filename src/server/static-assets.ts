@@ -183,6 +183,19 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <div id="runtimeInfo" class="kv-list"></div>
           </div>
 
+          <!-- AI Providers -->
+          <div class="card" id="providerSettingsCard">
+            <div class="card-head">
+              <span class="card-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                AI Providers
+              </span>
+              <button id="btnOpenAddProvider" class="btn-xs btn-primary" type="button">+ Add Provider</button>
+            </div>
+            <div class="card-sub">Credentials stored securely in <code>.pluton/provider-homes/</code> (0600)</div>
+            <div id="providerTable" class="provider-table"></div>
+          </div>
+
           <!-- Add Custom AI Model & Personal API Key -->
           <div class="card">
             <div class="card-head">
@@ -469,11 +482,30 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
     </aside>
   </div>
 
-  <!-- Model popover -->
-  <div id="modelPopover" class="popover popover-models is-hidden" role="dialog" aria-label="Select AI model">
-    <div class="popover-head">Select AI Model</div>
-    <div id="modelListContainer" class="popover-body"></div>
+  <!-- Searchable Select Model Dialog -->
+  <div id="modelSelectModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="modelSelectTitle">
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <div>
+          <h3 class="modal-title" id="modelSelectTitle">Select AI Model</h3>
+          <div id="modelSelectTargetShip" class="card-sub" style="margin-top: 2px;">Assign model to Ship</div>
+        </div>
+        <button id="modelSelectClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="model-select-search-wrap">
+        <input id="modelSearchInput" type="text" placeholder="Search models by name, engine, or provider..." autocomplete="off" class="input-text">
+      </div>
+      <div id="modelSelectFeedback" class="card-status-text"></div>
+      <div id="modelListContainer" class="model-select-list"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">Models are validated and assigned to the selected Ship.</span>
+        <button id="modelSelectCancel" class="btn-secondary" type="button">Cancel</button>
+      </div>
+    </div>
   </div>
+  <div id="modelPopover" class="is-hidden" style="display:none;" aria-hidden="true"></div>
 
   <!-- MCP popover -->
   <div id="mcpPopover" class="popover popover-mcp is-hidden" role="dialog" aria-label="Connected MCP servers">
@@ -548,6 +580,69 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <input id="workerDetailMessageInput" type="text" autocomplete="off" placeholder="Message this worker" disabled>
           <button id="workerDetailSend" class="btn-secondary" type="button" disabled>Send</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Provider Dialog -->
+  <div id="providerAddModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="providerAddTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="providerAddTitle">Add AI Provider</h3>
+        <button id="providerAddClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <label class="field">
+        <span class="field-label">Provider ID (slug)</span>
+        <input id="providerIdInput" type="text" placeholder="e.g. openrouter, deepseek, ollama" autocomplete="off" class="input-text">
+      </label>
+      <label class="field">
+        <span class="field-label">Engine</span>
+        <select id="providerEngineSelect" class="select-box">
+          <option value="openai-compatible" selected>openai-compatible (Standard HTTP)</option>
+          <option value="opencode">opencode (Local CLI)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Display Name</span>
+        <input id="providerDisplayNameInput" type="text" placeholder="e.g. OpenRouter, DeepSeek" autocomplete="off" class="input-text">
+      </label>
+      <label class="field">
+        <span class="field-label">Base URL</span>
+        <input id="providerBaseUrlInput" type="text" placeholder="https://api.openai.com/v1" autocomplete="off" class="input-text mono">
+      </label>
+      <label class="field">
+        <span class="field-label">API Key</span>
+        <input id="providerApiKeyInput" type="password" placeholder="Stored securely in private credential file" autocomplete="off" class="input-text mono">
+      </label>
+      <div id="providerAddStatus" class="card-status-text"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">Key is written to 0600 file on disk; never logged or exposed.</span>
+        <button id="providerAddCancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="btnAddProviderSubmit" class="btn-primary" type="button">Add Provider</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Set Provider Key Dialog -->
+  <div id="providerKeyModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="providerKeyTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="providerKeyTitle">Set Provider API Key</h3>
+        <button id="providerKeyClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <p id="providerKeySubtitle" class="modal-message"></p>
+      <label class="field">
+        <span class="field-label">New API Key</span>
+        <input id="providerKeyInput" type="password" placeholder="sk-..." autocomplete="off" class="input-text mono">
+      </label>
+      <div id="providerKeyStatus" class="card-status-text"></div>
+      <div class="modal-foot">
+        <button id="providerKeyCancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="btnSaveProviderKey" class="btn-primary" type="button">Save Key</button>
       </div>
     </div>
   </div>
@@ -1963,6 +2058,34 @@ details:not([open]) > .tool-card-head .tool-chevron {
 .attach-row.is-attached { background: rgba(255,255,255,0.08); color: #fff; }
 .attach-row-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ===================== Provider Management ===================== */
+.provider-table { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.provider-card { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.provider-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.provider-name { font-size: 13px; font-weight: 600; color: #fff; }
+.provider-url { font-size: 11px; color: var(--text-dim); }
+.provider-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.provider-status-msg { font-size: 12px; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.04); margin-top: 4px; }
+.provider-status-msg.is-error { color: #fca5a5; background: rgba(239,68,68,0.1); }
+.provider-status-msg.is-ok { color: #86efac; background: rgba(34,197,94,0.1); }
+
+/* ===================== Searchable Model Select Dialog ===================== */
+.model-select-search-wrap { margin-bottom: 8px; }
+.model-select-search-wrap input { width: 100%; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: #fff; font-size: 13px; }
+.model-select-list { max-height: 52vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.model-group { display: flex; flex-direction: column; gap: 4px; }
+.model-group-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); padding: 4px 6px; }
+.model-card-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-radius: 8px; background: var(--bg-inset); border: 1px solid var(--border-soft); cursor: pointer; transition: all 120ms ease; }
+.model-card-item:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.model-card-item.is-current { border-color: var(--accent-cyan); background: rgba(6,182,212,0.08); }
+.model-card-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.model-card-name { font-size: 13px; font-weight: 500; color: #fff; }
+.model-card-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); }
+.model-avail-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.model-avail-dot.is-avail { background: #22c55e; }
+.model-avail-dot.is-unavail { background: #ef4444; }
+
 /* ===================== Toasts ===================== */
 .toast-host { position: fixed; right: 18px; bottom: 18px; z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .toast { background: var(--bg-surface); border: 1px solid var(--border-strong); color: var(--text); padding: 9px 14px; border-radius: 10px; box-shadow: 0 14px 36px rgba(0,0,0,0.5); font-size: 12px; max-width: 380px; opacity: 1; transition: opacity 250ms ease; }
@@ -2571,6 +2694,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
     muse: null,
     workspace: null,
     models: {},
+    providers: [],
+    modelSelectTargetShipId: null,
     modelChoice: null,
     mcp: { connected: 0, total: 0, transportUp: false, servers: [] },
     mode: 'chat',
@@ -4023,6 +4148,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
       renderModelRegistry();
       renderMuseModels();
       renderModelPopover();
+      var searchIn = el('modelSearchInput');
+      renderModelSelectList(searchIn ? searchIn.value : '');
     } catch (err) {
       var node = el('modelRegistry');
       if (node) node.innerHTML = '<div class="empty-hint">Failed to read the model registry: ' + escapeHtml(err.message) + '</div>';
@@ -4033,7 +4160,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
     var out = [];
     Object.keys(state.models).forEach(function (engine) {
       (state.models[engine] || []).forEach(function (m) {
-        out.push({ engine: engine, id: m.id, label: m.label || m.id, source: m.source });
+        out.push({
+          engine: engine,
+          id: m.id,
+          label: m.label || m.id,
+          source: m.source,
+          available: m.available !== false,
+          reason: m.reason,
+          provider: m.provider,
+          providerName: m.providerName
+        });
       });
     });
     return out;
@@ -4078,6 +4214,113 @@ details:not([open]) > .tool-card-head .tool-chevron {
         switchModel(node.getAttribute('data-model'));
       });
     });
+  }
+
+  function renderModelSelectList(filter) {
+    var list = el('modelListContainer');
+    if (!list) return;
+    var filterLower = (filter || '').trim().toLowerCase();
+    var entries = modelEntries();
+
+    if (filterLower) {
+      entries = entries.filter(function (m) {
+        var idMatch = String(m.id || '').toLowerCase().indexOf(filterLower) !== -1;
+        var labelMatch = String(m.label || '').toLowerCase().indexOf(filterLower) !== -1;
+        var engMatch = String(m.engine || '').toLowerCase().indexOf(filterLower) !== -1;
+        var provMatch = String(m.providerName || m.provider || '').toLowerCase().indexOf(filterLower) !== -1;
+        return idMatch || labelMatch || engMatch || provMatch;
+      });
+    }
+
+    if (entries.length === 0) {
+      list.innerHTML = '<div class="popover-empty">No models match your search.</div>';
+      return;
+    }
+
+    var groups = {};
+    entries.forEach(function (m) {
+      var groupKey = m.providerName || (m.provider ? ('Provider: ' + m.provider) : (m.engine ? ('Engine: ' + m.engine) : 'Other'));
+      if (!groups[groupKey]) groups[groupKey] = [];
+      groups[groupKey].push(m);
+    });
+
+    var targetShipId = state.modelSelectTargetShipId || (state.muse ? state.muse.id : null);
+    var targetShip = null;
+    if (state.workspace && state.workspace.muses) {
+      targetShip = state.workspace.muses.find(function (s) { return s.id === targetShipId; });
+    }
+    var currentModel = targetShip ? targetShip.model : (state.muse ? state.muse.model : null);
+
+    var groupHtmlList = Object.keys(groups).map(function (groupName) {
+      var items = groups[groupName];
+      return '<div class="model-group">' +
+        '<div class="model-group-title">' + escapeHtml(groupName) + ' (' + items.length + ')</div>' +
+        items.map(function (m) {
+          var isCurrent = currentModel === m.id;
+          var availClass = m.available ? 'is-avail' : 'is-unavail';
+          var availLabel = m.available ? 'Available' : (m.reason ? escapeHtml(m.reason) : 'Unavailable');
+          return '<div class="model-card-item' + (isCurrent ? ' is-current' : '') + '" data-model="' + escapeHtml(m.id) +
+            '" data-engine="' + escapeHtml(m.engine) + '" data-provider="' + escapeHtml(m.provider || '') + '">' +
+            '<div class="model-card-main">' +
+              '<div class="model-card-name">' + escapeHtml(m.label || m.id) + (isCurrent ? ' <span class="tag-mono" style="color:var(--accent-cyan);">Active</span>' : '') + '</div>' +
+              '<div class="model-card-meta">' +
+                '<span class="mono">' + escapeHtml(m.id) + '</span>' +
+                '<span>\\u00b7</span>' +
+                '<span class="model-avail-dot ' + availClass + '" title="' + availLabel + '"></span>' +
+                '<span>' + availLabel + '</span>' +
+              '</div>' +
+            '</div>' +
+            '<button class="btn-xs ' + (isCurrent ? 'btn-secondary' : 'btn-primary') + '" type="button">' + (isCurrent ? 'Selected' : 'Select') + '</button>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+    });
+
+    list.innerHTML = groupHtmlList.join('');
+
+    Array.prototype.forEach.call(list.querySelectorAll('.model-card-item'), function (item) {
+      item.addEventListener('click', function () {
+        var modelId = item.getAttribute('data-model');
+        var engineId = item.getAttribute('data-engine') || undefined;
+        var providerId = item.getAttribute('data-provider') || undefined;
+        selectModelForShip(targetShipId, modelId, providerId, engineId);
+      });
+    });
+  }
+
+  function openModelSelectModal(targetShipId) {
+    state.modelSelectTargetShipId = targetShipId || (state.muse ? state.muse.id : null);
+    var modal = el('modelSelectModal');
+    if (!modal) return;
+    var targetLabel = el('modelSelectTargetShip');
+    if (targetLabel) {
+      var shipName = state.modelSelectTargetShipId;
+      if (state.workspace && state.workspace.muses) {
+        var s = state.workspace.muses.find(function (x) { return x.id === state.modelSelectTargetShipId; });
+        if (s) shipName = (s.displayName || s.id) + ' (' + (s.role || s.engine) + ')';
+      }
+      targetLabel.textContent = shipName ? ('Assign model to ' + shipName) : 'Assign model to Ship';
+    }
+    var searchInput = el('modelSearchInput');
+    if (searchInput) searchInput.value = '';
+    modal.classList.remove('is-hidden');
+    renderModelSelectList('');
+    loadModels();
+    if (searchInput) searchInput.focus();
+  }
+
+  function closeModelSelectModal() {
+    var modal = el('modelSelectModal');
+    if (modal) modal.classList.add('is-hidden');
+  }
+
+  async function selectModelForShip(shipId, modelId, providerId, engineId) {
+    closeModelSelectModal();
+    if (shipId) {
+      await switchMuseModel(shipId, modelId, providerId, engineId);
+    } else {
+      await switchModel(modelId, providerId, engineId);
+    }
   }
 
   function applyMuseModel() {
@@ -4220,11 +4463,17 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var roleTag = isManagerAgent(m) ? ' <span class="muted">(main chat model)</span>' : '';
       return '<div class="muse-row"><div class="muse-row-head"><span class="muse-name">' + escapeHtml(m.displayName || m.id) +
         '</span><span class="muse-role">' + escapeHtml(m.role || 'unknown role') + ' \\u00b7 ' + escapeHtml(m.engine || '') + roleTag + '</span></div>' +
-        '<select class="mini-select" data-muse="' + escapeHtml(String(m.id || m.slug)) + '">' + opts + '</select></div>';
+        '<div style="display:flex;align-items:center;gap:6px;"><select class="mini-select" data-muse="' + escapeHtml(String(m.id || m.slug)) + '">' + opts + '</select>' +
+        '<button type="button" class="btn-xs btn-secondary btn-ship-model-select" data-muse="' + escapeHtml(String(m.id || m.slug)) + '" title="Browse and search all models">Browse...</button></div></div>';
     }).join('');
     Array.prototype.forEach.call(node.querySelectorAll('select'), function (sel) {
       sel.addEventListener('change', function () {
         switchMuseModel(sel.getAttribute('data-muse'), sel.value);
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-ship-model-select'), function (btn) {
+      btn.addEventListener('click', function () {
+        openModelSelectModal(btn.getAttribute('data-muse'));
       });
     });
   }
@@ -4235,7 +4484,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
    */
   var modelSwitchSeq = 0;
 
-  async function switchMuseModel(museId, modelId) {
+  async function switchMuseModel(museId, modelId, providerId, engineId) {
     if (!museId) return; // nothing addressable: the API itself 404s empty ids
     var switchSeq = ++modelSwitchSeq;
     var previous = null;
@@ -4245,9 +4494,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
       if (prior) previous = prior.model;
     }
     try {
+      var reqBody = { model: modelId };
+      if (providerId !== undefined) reqBody.provider = providerId;
+      if (engineId !== undefined) reqBody.engine = engineId;
       await apiFetch('/api/muses/' + encodeURIComponent(museId) + '/model', {
         method: 'POST',
-        body: JSON.stringify({ model: modelId })
+        body: JSON.stringify(reqBody)
       });
     } catch (err) {
       if (switchSeq !== modelSwitchSeq) return;
@@ -4446,6 +4698,271 @@ details:not([open]) > .tool-card-head .tool-chevron {
         status.textContent = 'Verification error: ' + err.message;
       }
       toast('Failed to register model: ' + err.message, true);
+    }
+  }
+
+  // ------------------------------------------------------------- providers
+  async function loadProviders() {
+    try {
+      var res = await apiFetch('/api/providers');
+      state.providers = res.providers || [];
+      renderProviders();
+    } catch (err) {
+      var node = el('providerTable');
+      if (node) node.innerHTML = '<div class="empty-hint">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function renderProviders() {
+    var node = el('providerTable');
+    if (!node) return;
+    var list = state.providers || [];
+    if (list.length === 0) {
+      node.innerHTML = '<div class="empty-hint">No AI providers configured yet. Click "+ Add Provider" to connect OpenAI, OpenRouter, DeepSeek, or any compatible endpoint.</div>';
+      return;
+    }
+    node.innerHTML = list.map(function (p) {
+      var keyBadge = p.hasCredential
+        ? '<span class="tag-mono" style="color:#86efac;border-color:rgba(34,197,94,0.3);">Key Configured</span>'
+        : '<span class="tag-mono" style="color:#fca5a5;border-color:rgba(239,68,68,0.3);">No Key</span>';
+      return '<div class="provider-card" id="prov-card-' + escapeHtml(p.id) + '">' +
+        '<div class="provider-card-head">' +
+          '<div class="provider-meta">' +
+            '<span class="provider-name">' + escapeHtml(p.displayName || p.id) + '</span>' +
+            '<span class="tag-mono">' + escapeHtml(p.id) + '</span>' +
+            '<span class="tag-mono">' + escapeHtml(p.engine) + '</span>' +
+            keyBadge +
+          '</div>' +
+        '</div>' +
+        '<div class="provider-url mono">' + escapeHtml(p.baseUrl) + '</div>' +
+        '<div class="provider-actions">' +
+          '<button type="button" class="btn-xs btn-secondary btn-prov-key" data-provider="' + escapeHtml(p.id) + '">' + (p.hasCredential ? 'Update Key' : 'Set Key') + '</button>' +
+          (p.hasCredential ? '<button type="button" class="btn-xs btn-secondary btn-prov-rm-key" data-provider="' + escapeHtml(p.id) + '">Remove Key</button>' : '') +
+          '<button type="button" class="btn-xs btn-secondary btn-prov-validate" data-provider="' + escapeHtml(p.id) + '">Validate</button>' +
+          '<button type="button" class="btn-xs btn-secondary btn-prov-delete" data-provider="' + escapeHtml(p.id) + '" style="color:#fca5a5;">Delete</button>' +
+        '</div>' +
+        '<div class="provider-status-msg is-hidden" id="prov-status-' + escapeHtml(p.id) + '"></div>' +
+      '</div>';
+    }).join('');
+
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-prov-key'), function (btn) {
+      btn.addEventListener('click', function () {
+        openProviderKeyModal(btn.getAttribute('data-provider'));
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-prov-rm-key'), function (btn) {
+      btn.addEventListener('click', function () {
+        removeProviderKey(btn.getAttribute('data-provider'));
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-prov-validate'), function (btn) {
+      btn.addEventListener('click', function () {
+        validateProvider(btn.getAttribute('data-provider'));
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-prov-delete'), function (btn) {
+      btn.addEventListener('click', function () {
+        deleteProvider(btn.getAttribute('data-provider'));
+      });
+    });
+  }
+
+  function openAddProviderModal() {
+    var modal = el('providerAddModal');
+    if (!modal) return;
+    var status = el('providerAddStatus');
+    if (status) { status.textContent = ''; status.className = 'card-status-text'; }
+    var idInput = el('providerIdInput');
+    if (idInput) idInput.value = '';
+    var nameInput = el('providerDisplayNameInput');
+    if (nameInput) nameInput.value = '';
+    var urlInput = el('providerBaseUrlInput');
+    if (urlInput) urlInput.value = '';
+    var keyInput = el('providerApiKeyInput');
+    if (keyInput) keyInput.value = '';
+    modal.classList.remove('is-hidden');
+    if (idInput) idInput.focus();
+  }
+
+  function closeAddProviderModal() {
+    var modal = el('providerAddModal');
+    if (modal) modal.classList.add('is-hidden');
+  }
+
+  async function submitAddProvider() {
+    var idInput = el('providerIdInput');
+    var engineSelect = el('providerEngineSelect');
+    var nameInput = el('providerDisplayNameInput');
+    var urlInput = el('providerBaseUrlInput');
+    var keyInput = el('providerApiKeyInput');
+    var status = el('providerAddStatus');
+
+    var id = idInput && idInput.value ? idInput.value.trim().toLowerCase() : '';
+    var engine = engineSelect ? engineSelect.value : 'openai-compatible';
+    var displayName = nameInput && nameInput.value ? nameInput.value.trim() : '';
+    var baseUrl = urlInput && urlInput.value ? urlInput.value.trim() : '';
+    var apiKey = keyInput && keyInput.value ? keyInput.value.trim() : '';
+
+    if (!id) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Provider ID is required (e.g. openrouter).'; }
+      return;
+    }
+    if (!baseUrl) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Base URL is required.'; }
+      return;
+    }
+
+    if (status) { status.className = 'card-status-text'; status.textContent = 'Adding provider...'; }
+
+    try {
+      var payload = {
+        id: id,
+        engine: engine,
+        baseUrl: baseUrl,
+        displayName: displayName || id
+      };
+      if (apiKey) payload.apiKey = apiKey;
+
+      var res = await apiFetch('/api/providers', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (res && res.ok) {
+        toast('Provider added: ' + id);
+        closeAddProviderModal();
+        await loadProviders();
+        await loadModels();
+      }
+    } catch (err) {
+      if (status) {
+        status.className = 'card-status-text is-error';
+        status.textContent = 'Failed to add provider: ' + err.message;
+      }
+      toast('Failed to add provider: ' + err.message, true);
+    }
+  }
+
+  var activeKeyProviderId = null;
+
+  function openProviderKeyModal(providerId) {
+    activeKeyProviderId = providerId;
+    var modal = el('providerKeyModal');
+    if (!modal) return;
+    var sub = el('providerKeySubtitle');
+    if (sub) sub.textContent = 'Store credential for provider: ' + providerId;
+    var input = el('providerKeyInput');
+    if (input) input.value = '';
+    var status = el('providerKeyStatus');
+    if (status) { status.textContent = ''; status.className = 'card-status-text'; }
+    modal.classList.remove('is-hidden');
+    if (input) input.focus();
+  }
+
+  function closeProviderKeyModal() {
+    activeKeyProviderId = null;
+    var modal = el('providerKeyModal');
+    if (modal) modal.classList.add('is-hidden');
+  }
+
+  async function submitProviderKey() {
+    if (!activeKeyProviderId) return;
+    var input = el('providerKeyInput');
+    var status = el('providerKeyStatus');
+    var key = input && input.value ? input.value.trim() : '';
+    if (!key) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'API key cannot be empty.'; }
+      return;
+    }
+    if (status) { status.className = 'card-status-text'; status.textContent = 'Saving key...'; }
+    try {
+      var res = await apiFetch('/api/providers/' + encodeURIComponent(activeKeyProviderId) + '/key', {
+        method: 'POST',
+        body: JSON.stringify({ apiKey: key })
+      });
+      if (res && res.ok) {
+        toast('Key saved securely for ' + activeKeyProviderId);
+        closeProviderKeyModal();
+        await loadProviders();
+        await loadModels();
+      }
+    } catch (err) {
+      if (status) {
+        status.className = 'card-status-text is-error';
+        status.textContent = 'Error: ' + err.message;
+      }
+      toast('Failed to save key: ' + err.message, true);
+    }
+  }
+
+  async function removeProviderKey(providerId) {
+    var ok = await openPlutonDialog({
+      title: 'Remove API Key',
+      message: 'Remove the stored credential for provider "' + providerId + '"? The provider configuration will remain.',
+      confirmLabel: 'Remove Key',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      var res = await apiFetch('/api/providers/' + encodeURIComponent(providerId) + '/key', {
+        method: 'DELETE'
+      });
+      if (res && res.ok) {
+        toast('Credential removed for ' + providerId);
+        await loadProviders();
+        await loadModels();
+      }
+    } catch (err) {
+      toast('Failed to remove key: ' + err.message, true);
+    }
+  }
+
+  async function validateProvider(providerId) {
+    var statusNode = el('prov-status-' + providerId);
+    if (statusNode) {
+      statusNode.className = 'provider-status-msg';
+      statusNode.textContent = 'Validating connectivity...';
+      statusNode.classList.remove('is-hidden');
+    }
+    try {
+      var res = await apiFetch('/api/providers/' + encodeURIComponent(providerId) + '/validate', {
+        method: 'POST'
+      });
+      var rep = res.report;
+      if (statusNode) {
+        var isOk = rep.liveCheck === 'passed' || rep.authConfigured;
+        statusNode.className = 'provider-status-msg ' + (isOk ? 'is-ok' : 'is-error');
+        statusNode.textContent = rep.detail + (rep.modelsCount !== undefined ? ' (' + rep.modelsCount + ' models discovered)' : '');
+      }
+      toast('Validation ' + (rep.liveCheck === 'passed' ? 'passed' : 'result: ' + rep.detail));
+      await loadModels();
+    } catch (err) {
+      if (statusNode) {
+        statusNode.className = 'provider-status-msg is-error';
+        statusNode.textContent = 'Validation error: ' + err.message;
+      }
+      toast('Validation failed: ' + err.message, true);
+    }
+  }
+
+  async function deleteProvider(providerId) {
+    var ok = await openPlutonDialog({
+      title: 'Delete Provider',
+      message: 'Are you sure you want to delete provider "' + providerId + '"? Metadata and credentials will be permanently removed.',
+      confirmLabel: 'Delete Provider',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      var res = await apiFetch('/api/providers/' + encodeURIComponent(providerId), {
+        method: 'DELETE'
+      });
+      if (res && res.ok) {
+        toast('Provider ' + providerId + ' deleted');
+        await loadProviders();
+        await loadModels();
+      }
+    } catch (err) {
+      toast('Failed to delete provider: ' + err.message, true);
     }
   }
 
@@ -6650,6 +7167,21 @@ details:not([open]) > .tool-card-head .tool-chevron {
       closePlutonDialog(pending && pending.input ? null : false);
       return true;
     }
+    var modelModal = el('modelSelectModal');
+    if (modelModal && !modelModal.classList.contains('is-hidden')) {
+      closeModelSelectModal();
+      return true;
+    }
+    var provAddModal = el('providerAddModal');
+    if (provAddModal && !provAddModal.classList.contains('is-hidden')) {
+      closeAddProviderModal();
+      return true;
+    }
+    var provKeyModal = el('providerKeyModal');
+    if (provKeyModal && !provKeyModal.classList.contains('is-hidden')) {
+      closeProviderKeyModal();
+      return true;
+    }
     var newSesModal = el('newSessionModal');
     if (newSesModal && !newSesModal.classList.contains('is-hidden')) {
       closeNewSessionModal();
@@ -6722,6 +7254,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       loadApprovals();
       loadMcp();
       loadSettings();
+      loadProviders();
     }
   }
 
@@ -7131,9 +7664,48 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (thinkingSelect) thinkingSelect.addEventListener('change', function () { saveSettings({ thinkingEffort: thinkingSelect.value }); });
 
     var modelBtn = el('modelLabelBtn');
-    if (modelBtn) modelBtn.addEventListener('click', function () { toggleModelPopover(); });
+    if (modelBtn) modelBtn.addEventListener('click', function () { openModelSelectModal(); });
     var mcpBtn = el('mcpToggleBtn');
     if (mcpBtn) mcpBtn.addEventListener('click', function () { toggleMcpPopover(); });
+
+    // Provider management bindings
+    var btnOpenAddProv = el('btnOpenAddProvider');
+    if (btnOpenAddProv) btnOpenAddProv.addEventListener('click', openAddProviderModal);
+    var provAddClose = el('providerAddClose');
+    if (provAddClose) provAddClose.addEventListener('click', closeAddProviderModal);
+    var provAddCancel = el('providerAddCancel');
+    if (provAddCancel) provAddCancel.addEventListener('click', closeAddProviderModal);
+    var btnAddProvSubmit = el('btnAddProviderSubmit');
+    if (btnAddProvSubmit) btnAddProvSubmit.addEventListener('click', submitAddProvider);
+
+    var provKeyClose = el('providerKeyClose');
+    if (provKeyClose) provKeyClose.addEventListener('click', closeProviderKeyModal);
+    var provKeyCancel = el('providerKeyCancel');
+    if (provKeyCancel) provKeyCancel.addEventListener('click', closeProviderKeyModal);
+    var btnSaveProvKey = el('btnSaveProviderKey');
+    if (btnSaveProvKey) btnSaveProvKey.addEventListener('click', submitProviderKey);
+
+    var provKeyInput = el('providerKeyInput');
+    if (provKeyInput) {
+      provKeyInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); submitProviderKey(); }
+      });
+    }
+
+    // Model select modal bindings
+    var modelSelectClose = el('modelSelectClose');
+    if (modelSelectClose) modelSelectClose.addEventListener('click', closeModelSelectModal);
+    var modelSelectCancel = el('modelSelectCancel');
+    if (modelSelectCancel) modelSelectCancel.addEventListener('click', closeModelSelectModal);
+    var modelSearchIn = el('modelSearchInput');
+    if (modelSearchIn) {
+      modelSearchIn.addEventListener('input', function () {
+        renderModelSelectList(modelSearchIn.value);
+      });
+      modelSearchIn.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') e.preventDefault();
+      });
+    }
 
     var filesTabBtn = el('tabFiles');
     var diffsTabBtn = el('tabDiffs');
@@ -7248,6 +7820,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       await loadWorkspace();
       await loadSessions();
       await loadModels();
+      await loadProviders();
       await loadMcp();
       await loadApprovals();
       await loadSettings();

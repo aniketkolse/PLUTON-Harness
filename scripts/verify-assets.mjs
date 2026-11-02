@@ -93,6 +93,11 @@ export function verifyAssets() {
     'btnVerifyAddCustomModel',
     'toggleAutonomous',
     'thinkingEffortSelect',
+    'providerSettingsCard',
+    'providerTable',
+    'btnOpenAddProvider',
+    'modelSelectModal',
+    'modelSearchInput',
   ]
   for (const id of REQUIRED_IDS) {
     check(`html has id="${id}"`, html.includes(`id="${id}"`), 'id is missing')
@@ -135,6 +140,7 @@ export function verifyAssets() {
     "apiFetch('/api/settings'",
     "apiFetch('/api/account/",
     "apiFetch('/api/models/custom'",
+    "apiFetch('/api/providers')",
   ]
   for (const call of REQUIRED_CALLS) {
     check(`client calls ${call}`, js.includes(call), 'call is missing')

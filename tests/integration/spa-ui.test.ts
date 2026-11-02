@@ -1185,5 +1185,49 @@ describe('PLUTON SPA — replaced assets', () => {
       await server.close()
     }
   })
+
+  it('provides Provider Management and Searchable Model Selection UI components', async () => {
+    const { appServer } = await setupTestProject()
+    const server = await appServer
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+      const js = await (await fetch(`http://127.0.0.1:${server.port}/app.js`)).text()
+
+      // Provider management HTML elements
+      expect(html).toContain('id="providerSettingsCard"')
+      expect(html).toContain('id="providerTable"')
+      expect(html).toContain('id="btnOpenAddProvider"')
+      expect(html).toContain('id="providerAddModal"')
+      expect(html).toContain('id="providerKeyModal"')
+      expect(html).toContain('id="providerIdInput"')
+      expect(html).toContain('id="providerBaseUrlInput"')
+
+      // Model select modal HTML elements
+      expect(html).toContain('id="modelSelectModal"')
+      expect(html).toContain('id="modelSearchInput"')
+      expect(html).toContain('id="modelListContainer"')
+
+      // Provider management JS wiring
+      expect(js).toContain("apiFetch('/api/providers')")
+      expect(js).toContain('function loadProviders')
+      expect(js).toContain('function renderProviders')
+      expect(js).toContain('function openAddProviderModal')
+      expect(js).toContain('function submitAddProvider')
+      expect(js).toContain('function openProviderKeyModal')
+      expect(js).toContain('function submitProviderKey')
+      expect(js).toContain('function removeProviderKey')
+      expect(js).toContain('function validateProvider')
+      expect(js).toContain('function deleteProvider')
+
+      // Searchable model select JS wiring
+      expect(js).toContain('function openModelSelectModal')
+      expect(js).toContain('function closeModelSelectModal')
+      expect(js).toContain('function renderModelSelectList')
+      expect(js).toContain('btn-ship-model-select')
+    } finally {
+      await server.close()
+    }
+  })
 })
+
 
