@@ -98,6 +98,9 @@ export function verifyAssets() {
     'btnOpenAddProvider',
     'modelSelectModal',
     'modelSearchInput',
+    'projectSelectDropdown',
+    'projectSelectBtn',
+    'projectSelectName',
   ]
   for (const id of REQUIRED_IDS) {
     check(`html has id="${id}"`, html.includes(`id="${id}"`), 'id is missing')

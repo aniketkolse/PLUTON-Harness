@@ -181,8 +181,8 @@ export class ApiRouter {
       })
   }
 
-  private getStoreShips(): ShipRecord[] {
-    return this.ctx.store.listShips?.() ?? this.ctx.store.listMuses?.() ?? []
+  private getStoreShips(store: Store = this.ctx.store): ShipRecord[] {
+    return store.listShips?.() ?? store.listMuses?.() ?? []
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
@@ -1146,28 +1146,30 @@ export class ApiRouter {
 
       // 17. Ships list (backward-compatible: /api/muses is a deprecated alias)
       if ((pathname === '/api/ships' || pathname === '/api/muses') && method === 'GET') {
-        const ships = this.getStoreShips()
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const ships = this.getStoreShips(targetProj.store)
         this.sendJson(res, 200, { ok: true, ships, muses: ships })
         return true
       }
 
       // 18. Models list
       if (pathname === '/api/models' && method === 'GET') {
-        const ships = this.getStoreShips()
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const ships = this.getStoreShips(targetProj.store)
         const engineKinds = new Set(ships.map((m) => m.engineKind))
         engineKinds.add('opencode')
 
         const modelsByEngine: Record<string, unknown[]> = {}
         for (const engineKind of engineKinds) {
           const matchingShip = ships.find((m) => m.engineKind === engineKind)
-          const matchingShipConfig = matchingShip ? this.ctx.loaded?.config?.ships?.[matchingShip.id] : undefined
+          const matchingShipConfig = matchingShip ? targetProj.loaded?.config?.ships?.[matchingShip.id] : undefined
           const unavailableFor = (reason: string): unknown[] =>
             matchingShip
               ? [{ id: matchingShip.model, source: 'static', available: false, reason }]
               : []
           try {
             const adapter = getEngineAdapter(engineKind, {
-              rootDir: this.ctx.loaded?.rootDir,
+              rootDir: targetProj.loaded?.rootDir,
               providerId: matchingShipConfig?.provider,
             })
             let listed: unknown[]
@@ -1263,13 +1265,14 @@ export class ApiRouter {
           this.sendJson(res, 400, { ok: false, error: 'model is required' })
           return true
         }
-        const ship = this.ctx.store.getShip(shipId)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const ship = targetProj.store.getShip(shipId)
         if (!ship) {
           this.sendJson(res, 404, { ok: false, error: `ship '${shipId}' not found` })
           return true
         }
 
-        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const rootDir = targetProj.loaded?.rootDir ?? process.cwd()
         let targetProvider: string | undefined
         let targetEngine = payload.engine?.trim() || ship.engineKind
 
@@ -1348,7 +1351,7 @@ export class ApiRouter {
 
         // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
-        this.ctx.store.updateShipModel(ship.id, requested, targetEngine)
+        targetProj.store.updateShipModel(ship.id, requested, targetEngine)
         const restarted = await this.restartEngineSessionForShip(ship.id, requested)
         this.sendJson(res, 200, {
           ok: true,

@@ -311,6 +311,16 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <span class="brand-name">PLUTON</span>
           <span class="brand-badge">Agentic Harness</span>
         </div>
+        <div id="projectSelectDropdown" class="project-selector">
+          <button id="projectSelectBtn" class="project-btn" type="button" title="Switch active project" aria-haspopup="true" aria-expanded="false">
+            <span class="project-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+            </span>
+            <span id="projectSelectName" class="project-name">—</span>
+            <span class="caret" aria-hidden="true">▾</span>
+          </button>
+          <div id="projectSelectMenu" class="project-menu is-hidden" role="menu"></div>
+        </div>
         <div class="header-tools">
           <button id="btnToggleSplitView" class="tool-btn" type="button" title="Toggle Sub-Agents Split View">
             <span class="boat" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${plutonMarkBody}</svg></span>
@@ -1259,6 +1269,32 @@ select.mini-select {
 .brand-mark svg { width: 20px; height: 20px; }
 .brand-name { font-weight: 700; font-size: 14px; letter-spacing: 0.08em; color: #fff; }
 .brand-badge { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #222228; border: 1px solid var(--border); color: var(--text-muted); }
+.project-selector { position: relative; display: inline-flex; align-items: center; }
+.project-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #18181c; border: 1px solid var(--border-soft); border-radius: 6px;
+  color: var(--text); font-size: 12px; font-weight: 500; padding: 4px 10px;
+  cursor: pointer; transition: background 0.15s, border-color 0.15s; max-width: 240px;
+}
+.project-btn:hover { background: #222228; border-color: var(--border); }
+.project-icon { display: inline-flex; align-items: center; color: var(--accent-purple, #a78bfa); }
+.project-icon svg { width: 14px; height: 14px; }
+.project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 100;
+  min-width: 260px; max-height: 320px; overflow-y: auto;
+  background: #141418; border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5); padding: 4px; display: flex; flex-direction: column; gap: 2px;
+}
+.project-menu-item {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 5px;
+  cursor: pointer; text-align: left; background: transparent; border: none; color: var(--text);
+  transition: background 0.12s;
+}
+.project-menu-item:hover { background: #22222a; }
+.project-menu-item.is-active { background: #2a2838; }
+.project-menu-item-name { font-weight: 600; font-size: 12px; display: flex; align-items: center; justify-content: space-between; }
+.project-menu-item-path { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .header-tools { display: flex; align-items: center; gap: 10px; }
 .conn { display: none; align-items: center; font-size: 12px; color: var(--accent-ok); }
 .conn.is-offline, .conn.is-reconnected { display: inline-flex; }
@@ -2754,20 +2790,29 @@ details:not([open]) > .tool-card-head .tool-chevron {
       customModels: []
     },
     speechRecognition: null,
-    isRecordingVoice: false
+    isRecordingVoice: false,
+    projects: [],
+    activeProjectId: null
   };
 
   // ---------------------------------------------------------------- utils
   function el(id) { return document.getElementById(id); }
 
   function apiHeaders() {
-    return { 'Content-Type': 'application/json', 'X-Pluton-Token': token };
+    var headers = { 'Content-Type': 'application/json', 'X-Pluton-Token': token };
+    if (state.activeProjectId) {
+      headers['X-Pluton-Project'] = state.activeProjectId;
+    }
+    return headers;
   }
 
   async function apiFetch(path, opts) {
     opts = opts || {};
     var url = new URL(path, window.location.origin);
     if (token) url.searchParams.set('token', token);
+    if (state.activeProjectId && !url.searchParams.has('projectId') && !url.searchParams.has('project') && !path.startsWith('/api/projects')) {
+      url.searchParams.set('projectId', state.activeProjectId);
+    }
     var res = await fetch(url.toString(), {
       method: opts.method || 'GET',
       headers: Object.assign(apiHeaders(), opts.headers || {}),
@@ -3689,6 +3734,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (eventSource) eventSource.close();
     var sseUrl = new URL('/api/events', window.location.origin);
     if (token) sseUrl.searchParams.set('token', token);
+    if (state.activeProjectId) sseUrl.searchParams.set('projectId', state.activeProjectId);
     eventSource = new EventSource(sseUrl.toString());
     eventSource.onopen = function () {
       var conn = el('connectionStatus');
@@ -3976,6 +4022,114 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
     } catch (err) {
       toast('Folder selection failed: ' + err.message, true);
+    }
+  }
+
+  // -------------------------------------------------------------- projects
+  async function loadProjects() {
+    try {
+      var res = await apiFetch('/api/projects');
+      if (res && res.ok && Array.isArray(res.projects)) {
+        state.projects = res.projects;
+        var queryProject = urlParams.get('project') || urlParams.get('projectId');
+        if (queryProject && state.projects.some(function (p) { return p.id === queryProject; })) {
+          state.activeProjectId = queryProject;
+        } else if (res.activeProjectId && state.projects.some(function (p) { return p.id === res.activeProjectId; })) {
+          state.activeProjectId = res.activeProjectId;
+        } else if (state.projects.length > 0) {
+          state.activeProjectId = state.projects[0].id;
+        }
+        renderProjectSelector();
+      }
+    } catch (err) {
+      console.warn('Failed to load projects:', err);
+    }
+  }
+
+  function renderProjectSelector() {
+    var nameEl = el('projectSelectName');
+    var activeProj = state.projects.find(function (p) { return p.id === state.activeProjectId; });
+    if (nameEl) {
+      nameEl.textContent = activeProj ? activeProj.name : 'Select Project';
+    }
+    var menu = el('projectSelectMenu');
+    if (!menu) return;
+    menu.innerHTML = '';
+    state.projects.forEach(function (proj) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'project-menu-item' + (proj.id === state.activeProjectId ? ' is-active' : '');
+      var row = document.createElement('div');
+      row.className = 'project-menu-item-name';
+      row.textContent = proj.name;
+      if (proj.id === state.activeProjectId) {
+        var badge = document.createElement('span');
+        badge.className = 'tag-mono';
+        badge.style.fontSize = '9px';
+        badge.textContent = 'active';
+        row.appendChild(badge);
+      }
+      var path = document.createElement('div');
+      path.className = 'project-menu-item-path';
+      path.textContent = proj.rootDir;
+      btn.appendChild(row);
+      btn.appendChild(path);
+      btn.addEventListener('click', function () {
+        switchActiveProject(proj.id);
+      });
+      menu.appendChild(btn);
+    });
+  }
+
+  async function switchActiveProject(projectId) {
+    if (state.activeProjectId === projectId) {
+      toggleProjectMenu(false);
+      return;
+    }
+    state.activeProjectId = projectId;
+    toggleProjectMenu(false);
+    renderProjectSelector();
+
+    // Update URL parameter without full page reload
+    var newUrl = new URL(window.location.href);
+    newUrl.searchParams.set('project', projectId);
+    window.history.replaceState({}, '', newUrl.toString());
+
+    // Reconnect SSE for events of selected project
+    connectSSE();
+
+    // Reload project-scoped data
+    try {
+      state.activeSessionId = null;
+      state.activeRunId = null;
+      await loadWorkspace();
+      await loadSessions();
+      await loadModels();
+      await loadProviders();
+      await loadMcp();
+      await loadApprovals();
+      await loadSettings();
+      if (state.sidebarTab === 'files') {
+        await loadFiles();
+      }
+      var target = state.projects.find(function (p) { return p.id === projectId; });
+      toast('Switched to project: ' + (target ? target.name : projectId));
+    } catch (err) {
+      toast('Failed to refresh project workspace: ' + err.message, true);
+    }
+  }
+
+  function toggleProjectMenu(show) {
+    var menu = el('projectSelectMenu');
+    var btn = el('projectSelectBtn');
+    if (!menu) return;
+    var isOpen = typeof show === 'boolean' ? show : menu.classList.contains('is-hidden');
+    if (isOpen) {
+      menu.classList.remove('is-hidden');
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+    } else {
+      menu.classList.add('is-hidden');
+      if (btn) btn.setAttribute('aria-expanded', 'false');
     }
   }
 
@@ -7420,6 +7574,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (settingsTab) settingsTab.addEventListener('click', function () { switchSidebarTab('settings'); });
     var sidebarToggle = el('sidebarToggleBtn');
     if (sidebarToggle) sidebarToggle.addEventListener('click', toggleSidebarVisibility);
+    var projBtn = el('projectSelectBtn');
+    if (projBtn) {
+      projBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        toggleProjectMenu();
+      });
+    }
     var sidebarScrim = el('sidebarScrim');
     if (sidebarScrim) {
       sidebarScrim.addEventListener('click', function () {
@@ -7783,7 +7944,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
     document.addEventListener('click', function (e) {
       var modelPop = el('modelPopover');
       var mcpPop = el('mcpPopover');
+      var projDropdown = el('projectSelectDropdown');
       var target = e.target;
+      if (projDropdown && !projDropdown.contains(target)) {
+        toggleProjectMenu(false);
+      }
       if (modelPop && !modelPop.contains(target) && target !== el('modelLabelBtn') && !(el('modelLabelBtn') && el('modelLabelBtn').contains(target))) {
         toggleModelPopover(false);
       }
@@ -7803,6 +7968,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     });
 
     window.addEventListener('resize', function () {
+      toggleProjectMenu(false);
       toggleModelPopover(false);
       toggleMcpPopover(false);
       applyResponsiveSidebar();
@@ -7815,6 +7981,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     initSidebarResize();
     applyResponsiveSidebar();
     setMode('chat');
+    await loadProjects();
     connectSSE();
     try {
       await loadWorkspace();
