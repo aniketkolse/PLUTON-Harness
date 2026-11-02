@@ -443,6 +443,29 @@ export class ApiRouter {
         return true
       }
 
+      // 2c2. Recursive workspace file search
+      if (method === 'GET' && pathname === '/api/files/search') {
+        const query = parsedUrl.searchParams.get('q')
+        if (!query || query.trim() === '') {
+          this.sendJson(res, 400, { ok: false, error: 'q query parameter is required' })
+          return true
+        }
+        const limitParam = Math.min(200, Math.max(1, parseInt(parsedUrl.searchParams.get('limit') ?? '100', 10) || 100))
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
+        const rootDir = this.workspaceRootFor(sessionId ?? null, targetProj)
+
+        const { matches, totalMatches, truncated } = searchWorkspaceFiles(rootDir, query.trim(), limitParam)
+        this.sendJson(res, 200, {
+          ok: true,
+          query: query.trim(),
+          matches,
+          totalMatches,
+          truncated,
+        })
+        return true
+      }
+
       // 2d. Read one workspace file.
       if (method === 'GET' && pathname === '/api/files/content') {
         const target = parsedUrl.searchParams.get('path')
@@ -2812,4 +2835,99 @@ export function listWorkspaceDirectory(
   const hasMore = offset + limit < total
 
   return { entries: paged, total, hasMore }
+}
+
+export interface WorkspaceSearchMatch {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+}
+
+/**
+ * Recursively search workspace files and directories by query substring.
+ * Traversal is safety-bounded to prevent event loop locking on giant trees.
+ */
+export function searchWorkspaceFiles(
+  rootDir: string,
+  query: string,
+  limit = 100,
+  maxScanned = 10000,
+): { matches: WorkspaceSearchMatch[]; totalMatches: number; truncated: boolean } {
+  const normQuery = query.toLowerCase()
+  const ignored = new Set(['dist', '.DS_Store', 'coverage', '.git', '.pluton', 'node_modules'])
+  const matches: WorkspaceSearchMatch[] = []
+  let scannedCount = 0
+  let truncated = false
+
+  const queue: string[] = ['']
+
+  while (queue.length > 0 && matches.length < limit && scannedCount < maxScanned) {
+    const currentRel = queue.shift()!
+    const currentAbs = currentRel ? join(rootDir, currentRel) : rootDir
+
+    let entries
+    try {
+      entries = readdirSync(currentAbs, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      scannedCount++
+      if (scannedCount >= maxScanned) {
+        truncated = true
+        break
+      }
+      if (ignored.has(entry.name) || protectedWorkspaceSegment(entry.name) !== null) continue
+      if (entry.name.startsWith('.env')) continue
+
+      const fullPath = join(currentAbs, entry.name)
+      const entryRel = currentRel ? `${currentRel}/${entry.name}` : entry.name
+      const normalizedRel = entryRel.replace(/\\/g, '/')
+
+      if (entry.isSymbolicLink()) {
+        try {
+          const targetReal = realpathSync(fullPath)
+          const rootReal = realpathSync(rootDir)
+          const relFromRoot = relative(rootReal, targetReal)
+          if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+          if (protectedWorkspaceSegment(relFromRoot) !== null) continue
+        } catch {
+          continue
+        }
+      }
+
+      let isDirectory = false
+      try {
+        const stat = statSync(fullPath)
+        isDirectory = stat.isDirectory()
+      } catch {
+        continue
+      }
+
+      const matchName = entry.name.toLowerCase().includes(normQuery)
+      const matchPath = normalizedRel.toLowerCase().includes(normQuery)
+      if (matchName || matchPath) {
+        matches.push({
+          name: entry.name,
+          path: normalizedRel,
+          type: isDirectory ? 'dir' : 'file',
+        })
+        if (matches.length >= limit) {
+          truncated = true
+          break
+        }
+      }
+
+      if (isDirectory) {
+        queue.push(entryRel)
+      }
+    }
+  }
+
+  if (matches.length >= limit || scannedCount >= maxScanned) {
+    truncated = true
+  }
+
+  return { matches, totalMatches: matches.length, truncated }
 }
