@@ -6226,7 +6226,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var url = '/api/files/content?path=' + encodeURIComponent(path);
       if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
       await apiFetch(url, { method: 'DELETE' });
-      if (state.viewerPath === path) closeFileViewer(true);
+      if (state.editorTabs.some(function (t) { return t.path === path; })) {
+        await closeEditorTab(path, true);
+      } else if (state.viewerPath === path) {
+        closeFileViewer(true);
+      }
       await loadFilesList();
       toast('File deleted');
     } catch (err) {
@@ -6370,49 +6374,207 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (gutter) gutter.scrollTop = source.scrollTop;
   }
 
+  function renderEditorTabs() {
+    var tabsBar = el('fileTabsBar');
+    if (!tabsBar) return;
+    if (!state.editorTabs || state.editorTabs.length === 0) {
+      tabsBar.innerHTML = '';
+      return;
+    }
+    var html = '';
+    state.editorTabs.forEach(function (tab) {
+      var isActive = tab.path === state.activeTabPath;
+      var parts = String(tab.path).split('/');
+      var name = parts[parts.length - 1] || tab.path;
+      html += '<div class="file-tab' + (isActive ? ' is-active' : '') + '" data-tab-path="' + escapeHtml(tab.path) + '" title="' + escapeHtml(tab.path) + '" role="tab" aria-selected="' + (isActive ? 'true' : 'false') + '">';
+      if (tab.isDirty) {
+        html += '<span class="file-tab-dirty" title="Unsaved changes"></span>';
+      }
+      html += '<span class="file-tab-title">' + escapeHtml(name) + '</span>';
+      html += '<button class="file-tab-close" type="button" data-close-tab="' + escapeHtml(tab.path) + '" title="Close tab" aria-label="Close tab">&times;</button>';
+      html += '</div>';
+    });
+    tabsBar.innerHTML = html;
+
+    Array.prototype.forEach.call(tabsBar.querySelectorAll('.file-tab'), function (tabEl) {
+      tabEl.addEventListener('click', function () {
+        var p = tabEl.getAttribute('data-tab-path');
+        if (p && p !== state.activeTabPath) switchEditorTab(p);
+      });
+    });
+    Array.prototype.forEach.call(tabsBar.querySelectorAll('[data-close-tab]'), function (closeBtn) {
+      closeBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var p = closeBtn.getAttribute('data-close-tab');
+        if (p) closeEditorTab(p);
+      });
+    });
+  }
+
+  function snapshotActiveTab() {
+    if (!state.activeTabPath) return;
+    var tab = state.editorTabs.find(function (t) { return t.path === state.activeTabPath; });
+    if (!tab) return;
+    var input = el('fileEditorInput');
+    if (input) {
+      tab.content = input.value;
+      tab.scrollTop = input.scrollTop;
+      tab.scrollLeft = input.scrollLeft;
+      if (typeof input.selectionStart === 'number') {
+        tab.selectionStart = input.selectionStart;
+        tab.selectionEnd = input.selectionEnd;
+      }
+    }
+    tab.isDirty = (tab.content !== tab.originalContent);
+    tab.editing = state.viewerEditing;
+  }
+
+  function switchEditorTab(targetPath, skipSnapshot) {
+    if (!skipSnapshot) {
+      snapshotActiveTab();
+    }
+    var tab = state.editorTabs.find(function (t) { return t.path === targetPath; });
+    if (!tab) return;
+
+    state.activeTabPath = targetPath;
+    state.viewerPath = tab.path;
+    state.viewerOriginal = tab.originalContent;
+    state.viewerEditing = tab.editing;
+    state.viewerDiff = tab.diff;
+    state.viewerDirty = tab.isDirty;
+
+    var viewer = el('fileViewer');
+    if (viewer) {
+      viewer.classList.remove('is-hidden');
+      viewer.classList.toggle('is-editing', tab.editing);
+    }
+
+    var nameNode = el('fileViewerPath');
+    if (nameNode) nameNode.textContent = tab.path;
+    var iconNode = el('fileViewerIcon');
+    if (iconNode) {
+      var parts = String(tab.path).split('/');
+      iconNode.innerHTML = getFileIconSvg(parts[parts.length - 1] || tab.path, false, false);
+    }
+    var langNode = el('fileViewerLang');
+    if (langNode) langNode.textContent = tab.lang || 'text';
+    var meta = el('fileViewerMeta');
+    if (meta) {
+      if (tab.diff) {
+        meta.textContent = 'Read-only worktree diff';
+      } else if (tab.editing) {
+        meta.textContent = 'Editing \\u2014 Ctrl+S saves, Esc closes';
+      } else {
+        meta.textContent = (tab.lang ? tab.lang + ' \\u2014 ' : '') + 'click Edit (or Ctrl+E) to modify';
+      }
+    }
+
+    var input = el('fileEditorInput');
+    if (input) {
+      input.value = tab.content;
+      input.scrollTop = tab.scrollTop || 0;
+      input.scrollLeft = tab.scrollLeft || 0;
+      if (tab.editing && typeof input.setSelectionRange === 'function') {
+        try {
+          input.setSelectionRange(tab.selectionStart || 0, tab.selectionEnd || 0);
+        } catch (e) {}
+      }
+    }
+    var highlight = el('codeHighlight');
+    if (highlight) {
+      highlight.scrollTop = tab.scrollTop || 0;
+      highlight.scrollLeft = tab.scrollLeft || 0;
+    }
+
+    if (tab.diff) renderViewerDiff(tab.content);
+    else renderViewerCode(tab.content, tab.lang);
+
+    setViewerDirty(tab.isDirty);
+    renderEditorTabs();
+    updateBreadcrumbs(tab.path);
+  }
+
+  async function closeEditorTab(path, force) {
+    var tabIndex = state.editorTabs.findIndex(function (t) { return t.path === path; });
+    if (tabIndex === -1) return;
+    var tab = state.editorTabs[tabIndex];
+
+    if (path === state.activeTabPath) {
+      var input = el('fileEditorInput');
+      if (input) {
+        tab.content = input.value;
+        tab.isDirty = (tab.content !== tab.originalContent);
+      }
+    }
+
+    if (!force && tab.isDirty) {
+      var ok = await plutonConfirm({
+        title: 'Discard changes',
+        message: 'Discard unsaved changes to ' + path + '?',
+        confirmLabel: 'Discard changes',
+        danger: true
+      });
+      if (!ok) return;
+    }
+
+    state.editorTabs.splice(tabIndex, 1);
+
+    if (state.editorTabs.length === 0) {
+      closeFileViewer(true);
+      return;
+    }
+
+    if (state.activeTabPath === path) {
+      var nextIndex = tabIndex < state.editorTabs.length ? tabIndex : state.editorTabs.length - 1;
+      var nextTab = state.editorTabs[nextIndex];
+      switchEditorTab(nextTab.path, true);
+    } else {
+      renderEditorTabs();
+    }
+  }
+
   function openFileViewer(path, content, options) {
     options = options || {};
     var viewer = el('fileViewer');
     if (!viewer) return;
-    state.viewerPath = path;
-    state.viewerOriginal = String(content || '');
-    state.viewerEditing = false;
-    state.viewerDiff = options.diff === true;
-    state.viewerDirty = false;
 
-    var lang = options.lang || langFromPath(path);
-    viewer.classList.remove('is-hidden', 'is-editing');
-    var nameNode = el('fileViewerPath');
-    if (nameNode) nameNode.textContent = path;
-    var iconNode = el('fileViewerIcon');
-    if (iconNode) {
-      var parts = String(path).split('/');
-      iconNode.innerHTML = getFileIconSvg(parts[parts.length - 1] || path, false, false);
+    snapshotActiveTab();
+
+    var existingTab = state.editorTabs.find(function (t) { return t.path === path; });
+    if (!existingTab) {
+      var lang = options.lang || langFromPath(path);
+      var newTab = {
+        path: path,
+        content: String(content || ''),
+        originalContent: String(content || ''),
+        isDirty: false,
+        diff: options.diff === true,
+        lang: lang,
+        scrollTop: 0,
+        scrollLeft: 0,
+        selectionStart: 0,
+        selectionEnd: 0,
+        editing: false
+      };
+      state.editorTabs.push(newTab);
+    } else if (content !== undefined && !existingTab.isDirty) {
+      existingTab.content = String(content || '');
+      existingTab.originalContent = String(content || '');
+      if (options.diff !== undefined) existingTab.diff = options.diff === true;
+      if (options.lang) existingTab.lang = options.lang;
     }
-    var langNode = el('fileViewerLang');
-    if (langNode) langNode.textContent = lang || 'text';
-    var meta = el('fileViewerMeta');
-    if (meta) {
-      meta.textContent = state.viewerDiff
-        ? 'Read-only worktree diff'
-        : (lang ? lang + ' \\u2014 ' : '') + 'click Edit (or Ctrl+E) to modify';
-    }
-    var input = el('fileEditorInput');
-    if (input) {
-      input.value = state.viewerOriginal;
-      input.scrollTop = 0;
-      input.scrollLeft = 0;
-    }
-    var highlight = el('codeHighlight');
-    if (highlight) { highlight.scrollTop = 0; highlight.scrollLeft = 0; }
-    if (state.viewerDiff) renderViewerDiff(state.viewerOriginal);
-    else renderViewerCode(state.viewerOriginal, lang);
-    setViewerDirty(false);
+
+    state.activeTabPath = path;
+    switchEditorTab(path, true);
   }
 
   function enterFileEditMode() {
     if (!fileViewerIsOpen() || !state.viewerPath || state.viewerDiff) return;
     state.viewerEditing = true;
+    if (state.activeTabPath) {
+      var tab = state.editorTabs.find(function (t) { return t.path === state.activeTabPath; });
+      if (tab) tab.editing = true;
+    }
     var viewer = el('fileViewer');
     if (viewer) viewer.classList.add('is-editing');
     var input = el('fileEditorInput');
@@ -6436,7 +6598,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
   function onFileEditorInput() {
     var input = el('fileEditorInput');
     if (!input) return;
-    setViewerDirty(input.value !== state.viewerOriginal);
+    var isDirty = input.value !== state.viewerOriginal;
+    setViewerDirty(isDirty);
+    if (state.activeTabPath) {
+      var tab = state.editorTabs.find(function (t) { return t.path === state.activeTabPath; });
+      if (tab) {
+        tab.content = input.value;
+        tab.isDirty = isDirty;
+        renderEditorTabs();
+      }
+    }
     renderViewerCode(input.value, langFromPath(state.viewerPath));
     syncCodeScroll(input);
   }
@@ -6462,6 +6633,15 @@ details:not([open]) > .tool-card-head .tool-chevron {
       });
       state.viewerOriginal = content;
       setViewerDirty(false);
+      if (state.activeTabPath) {
+        var tab = state.editorTabs.find(function (t) { return t.path === state.activeTabPath; });
+        if (tab) {
+          tab.content = content;
+          tab.originalContent = content;
+          tab.isDirty = false;
+          renderEditorTabs();
+        }
+      }
       var meta = el('fileViewerMeta');
       if (meta) meta.textContent = 'Saved \\u2014 Ctrl+S saves, Esc closes';
       toast('Saved ' + state.viewerPath);
@@ -6475,21 +6655,24 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
   }
 
-  function closeFileViewer(force) {
-    if (!force && state.viewerDirty) {
-      var path = state.viewerPath || 'this file';
-      plutonConfirm({
-        title: 'Discard changes',
-        message: 'Discard unsaved changes to ' + path + '?',
-        confirmLabel: 'Discard changes',
-        danger: true
-      }).then(function (ok) {
-        if (ok) closeFileViewer(true);
-      });
-      return;
+  async function closeFileViewer(force) {
+    if (!force) {
+      var dirtyTab = state.editorTabs.find(function (t) { return t.isDirty; });
+      if (dirtyTab || state.viewerDirty) {
+        var path = (dirtyTab ? dirtyTab.path : state.viewerPath) || 'this file';
+        var ok = await plutonConfirm({
+          title: 'Discard changes',
+          message: 'Discard unsaved changes to ' + path + '?',
+          confirmLabel: 'Discard changes',
+          danger: true
+        });
+        if (!ok) return;
+      }
     }
     var viewer = el('fileViewer');
     if (viewer) { viewer.classList.add('is-hidden'); viewer.classList.remove('is-editing'); }
+    state.editorTabs = [];
+    state.activeTabPath = null;
     state.viewerPath = null;
     state.viewerOriginal = '';
     state.viewerEditing = false;
@@ -6501,6 +6684,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (input) input.value = '';
     var list = el('filesList');
     if (list) Array.prototype.forEach.call(list.querySelectorAll('.file-item'), function (i) { i.classList.remove('is-active'); });
+    renderEditorTabs();
   }
 
   async function openFile(path) {
@@ -8132,7 +8316,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
 
     var fileViewerClose = el('fileViewerClose');
-    if (fileViewerClose) fileViewerClose.addEventListener('click', function () { closeFileViewer(false); });
+    if (fileViewerClose) {
+      fileViewerClose.addEventListener('click', function () {
+        if (state.activeTabPath) closeEditorTab(state.activeTabPath);
+        else closeFileViewer(false);
+      });
+    }
     var fileViewerEdit = el('fileViewerEdit');
     if (fileViewerEdit) fileViewerEdit.addEventListener('click', enterFileEditMode);
     var fileViewerSave = el('fileViewerSave');
@@ -8148,6 +8337,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
     document.addEventListener('keydown', function (e) {
       if (!fileViewerIsOpen()) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault();
+        if (state.activeTabPath) closeEditorTab(state.activeTabPath);
+        else closeFileViewer(false);
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
         saveFileContent();
@@ -8160,7 +8355,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
       if (e.key === 'Escape') {
         e.preventDefault();
-        closeFileViewer(false);
+        if (state.activeTabPath) closeEditorTab(state.activeTabPath);
+        else closeFileViewer(false);
       }
     });
 
