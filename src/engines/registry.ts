@@ -3,6 +3,7 @@ import type { AcpSpawnFn } from './acp/client.ts'
 import type { RetryOptions } from './acp/retry.ts'
 import type { EngineAdapter } from './contract/types.ts'
 import { MockEngineAdapter } from './mock/adapter.ts'
+import { OpenAICompatibleAdapter } from './openai-compatible/adapter.ts'
 import { OpenCodeEngineAdapter } from './opencode/adapter.ts'
 
 /**
@@ -26,6 +27,10 @@ export interface EngineCreateOptions {
    * Absent/false = the fail-closed default shared by project-root sessions.
    */
   isolatedCheckout?: boolean
+  /** Project root used to resolve project-local provider metadata and credentials. */
+  rootDir?: string
+  /** Explicit provider id selected by the Ship; absent means resolve by engine. */
+  providerId?: string
 }
 
 export interface EngineFactory {
@@ -33,6 +38,12 @@ export interface EngineFactory {
   description: string
   /** True for engines that exist only for tests/dev (must be labeled as such). */
   devOnly: boolean
+  /**
+   * Whether this engine spawns a child process. HTTP adapters report false so
+   * the native execution wrapper (sandbox process supervision) is bypassed.
+   * Absent = true: the conservative default for process engines.
+   */
+  spawnsProcess?: boolean
   create: (opts?: EngineCreateOptions) => EngineAdapter
 }
 
@@ -55,6 +66,20 @@ export function getEngineAdapter(kind: string, opts: EngineCreateOptions = {}): 
   return f.create(opts)
 }
 
+/**
+ * Whether an engine creates an OS process. Non-process (HTTP) engines must not
+ * be wrapped in the native execution provider: there is nothing to spawn and
+ * preparing a sandbox session for them would be a fake security boundary.
+ */
+export function engineSpawnsProcess(kind: string): boolean {
+  const f = factories.get(kind)
+  if (!f) {
+    const known = listEngineKinds().map((k) => k.kind).join(', ') || '(none registered)'
+    throw new ValidationError(`unknown engine '${kind}'; known engines: ${known}`)
+  }
+  return f.spawnsProcess !== false
+}
+
 /** Built-in registrations. Real engines are appended as their adapters land. */
 export function registerBuiltinEngines(): void {
   registerEngine({
@@ -68,5 +93,13 @@ export function registerBuiltinEngines(): void {
     description: 'OpenCode CLI over ACP (stdio JSON-RPC; verified against v2.0.29)',
     devOnly: false,
     create: (opts) => new OpenCodeEngineAdapter(opts ?? {}),
+  })
+  registerEngine({
+    kind: 'openai-compatible',
+    description:
+      'OpenAI-compatible HTTP providers (chat completions + Pluton tool bridge; no local process)',
+    devOnly: false,
+    spawnsProcess: false,
+    create: (opts) => new OpenAICompatibleAdapter(opts ?? {}),
   })
 }

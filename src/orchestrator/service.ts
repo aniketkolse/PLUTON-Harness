@@ -39,6 +39,7 @@ import { ModelDiscoveryService } from '../engines/model-discovery.ts'
 import { ModelHealthMonitor } from '../engines/model-health.ts'
 import type { ModelFallbackConfig } from '../engines/model-fallback.ts'
 import { resolveModelConfig } from '../config/model-config.ts'
+import { resolveProviderForEngine } from '../providers/store.ts'
 import { nativeAdapterFor } from '../execution/adapter.ts'
 import {
   appendExecutionEvent,
@@ -365,8 +366,9 @@ export function createRunSupervisor(args: {
   if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
     const nativeProvider = args.nativeProvider
     const extraAllowedRoots = collectRunExtraRoots(ctx, [run.workspaceRoot])
-    supervisorAdapterFor = (ship, session) =>
-      nativeAdapterFor(ship, {
+    supervisorAdapterFor = (ship, session) => {
+      const shipConfig = ctx.loaded.config.ships[ship.id]
+      return nativeAdapterFor(ship, {
         provider: nativeProvider,
         isolatedCheckout: session.isolatedCheckout,
         specFor: (req) =>
@@ -382,7 +384,12 @@ export function createRunSupervisor(args: {
             ...(extraAllowedRoots.length > 0 ? { extraAllowedRoots } : {}),
             ...(args.executionBridge !== undefined ? { bridge: args.executionBridge } : {}),
           }),
+        engineOptions: {
+          rootDir: ctx.rootDir,
+          providerId: shipConfig?.provider,
+        },
       })
+    }
   }
 
   const workspaceManager = new GitWorkspaceManager({ workspacesRoot: workspaceDir(ctx.rootDir) })
@@ -396,10 +403,17 @@ export function createRunSupervisor(args: {
   // still unknown.
   const discoveryEngines = listEngineKinds()
     .filter((f) => f.devOnly !== true)
-    .map((f) => ({
-      engineKind: f.kind,
-      adapter: getEngineAdapter(f.kind),
-    }))
+    .map((f) => {
+      try {
+        return {
+          engineKind: f.kind,
+          adapter: getEngineAdapter(f.kind, { rootDir: ctx.rootDir }),
+        }
+      } catch {
+        return null
+      }
+    })
+    .filter((e): e is { engineKind: string; adapter: EngineAdapter } => e !== null)
   const modelHealthMonitor = new ModelHealthMonitor({ registry: modelRegistry })
   const discovery = new ModelDiscoveryService({
     engines: discoveryEngines,
@@ -822,6 +836,7 @@ export interface CreateShipSpec {
   displayName?: string
   role?: string
   engine: string
+  provider?: string
   model: string
   instructionsFile?: string
   workspacePolicy?: string
@@ -838,7 +853,10 @@ export function createShip(ctx: ProjectContext, spec: CreateShipSpec): { configP
   if (ctx.loaded.config.ships[spec.id]) {
     throw new ValidationError(`ship '${spec.id}' already exists in pluton.yaml`)
   }
-  getEngineAdapter(spec.engine)
+  if (spec.provider !== undefined || spec.engine === 'openai-compatible') {
+    resolveProviderForEngine(ctx.rootDir, spec.engine, spec.provider)
+  }
+  getEngineAdapter(spec.engine, { rootDir: ctx.rootDir, providerId: spec.provider })
   if (spec.role !== undefined && !(SHIP_ROLES as readonly string[]).includes(spec.role)) {
     throw new ValidationError(`unknown role '${spec.role}'; known roles: ${SHIP_ROLES.join(', ')}`)
   }
@@ -854,6 +872,7 @@ export function createShip(ctx: ProjectContext, spec: CreateShipSpec): { configP
     display_name: spec.displayName ?? spec.id,
     role,
     engine: spec.engine,
+    ...(spec.provider ? { provider: spec.provider } : {}),
     model: spec.model,
     workspace_policy: (spec.workspacePolicy as ShipConfig['workspace_policy']) ?? defaultWorkspace,
     approval_mode: (spec.approvalMode as ShipConfig['approval_mode']) ?? 'ask-for-sensitive-actions',

@@ -10,10 +10,13 @@ import { loadConfig } from '../../src/config/load.ts'
 import { PolicyDeniedError } from '../../src/domain/errors.ts'
 import { detectCapabilities } from '../../src/execution/capabilities.ts'
 import { createNativeExecutionProvider } from '../../src/execution/factory.ts'
+import { registerBuiltinEngines } from '../../src/engines/registry.ts'
 import { openDatabase, type DatabaseSync } from '../../src/store/db.ts'
 import { Store } from '../../src/store/store.ts'
 
 const FAKE_OPENCODE_BIN = fileURLToPath(new URL('../helpers/fake-opencode-cli.mjs', import.meta.url))
+
+registerBuiltinEngines()
 
 const tmpDirs: string[] = []
 const openDbs: DatabaseSync[] = []

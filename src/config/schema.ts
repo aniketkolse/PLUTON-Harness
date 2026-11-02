@@ -25,6 +25,8 @@ export const shipConfigSchema = z
     display_name: z.string().min(1),
     role: z.enum(SHIP_ROLES),
     engine: z.string().min(1),
+    /** Optional provider id defined in `.pluton/providers.json`. */
+    provider: z.string().min(1).optional(),
     /** Exact provider-qualified model id. When omitted, automatic model selection is used.
      * Validated against the engine when discovery is possible. */
     model: z.string().min(1).optional(),

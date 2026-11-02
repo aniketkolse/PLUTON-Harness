@@ -6,6 +6,7 @@ import type {
   StartSessionRequest,
 } from '../engines/contract/types.ts'
 import type { EngineCreateOptions } from '../engines/registry.ts'
+import { engineSpawnsProcess } from '../engines/registry.ts'
 import type {
   ExecutionProvider,
   ExecutionSessionSpec,
@@ -35,6 +36,11 @@ export function nativeAdapterFor(
     ...(args.engineOptions ?? {}),
   }
   const base = engineAdapterForShip(ship, baseOptions)
+
+  // HTTP engines create no OS process, so there is no execution session to
+  // prepare. Wrapping them would pretend a sandbox boundary this provider
+  // cannot place around network calls; return the adapter directly instead.
+  if (!engineSpawnsProcess(ship.engineKind)) return base
 
   const adapter: EngineAdapter = {
     kind: base.kind,

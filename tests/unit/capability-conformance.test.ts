@@ -32,6 +32,15 @@ const CONFORMANCE: Record<string, EngineCapabilities> = {
     mcpServers: true,
     sessionExport: false,
   },
+  'openai-compatible': {
+    resumeSession: false,
+    interrupt: true,
+    approvals: false,
+    usage: true,
+    modelList: true,
+    mcpServers: true,
+    sessionExport: false,
+  },
 }
 
 const CAPABILITY_KEYS = Object.keys(defaultCapabilities()).sort()
