@@ -6,6 +6,8 @@ import { firstLine, run } from '../../util/exec.ts'
 import { engineHomesDir } from '../../config/load.ts'
 import { createNativeExecutionProvider } from '../../execution/factory.ts'
 import { TMUX_NOT_INSTALLED_FIX } from '../../terminal/native.ts'
+import { SCHEMA_VERSION } from '../../store/migrations.ts'
+import { inspectDatabase } from '../../store/backup.ts'
 import type { CheckResult } from '../output.ts'
 
 const MIN_NODE_MAJOR = 24
@@ -14,6 +16,8 @@ export interface DoctorOptions {
   cwd: string
   runFn?: typeof run
   findProjectRoot?: typeof findProjectRoot
+  /** Guided first-run mode: provides remediation hints for every failing check. */
+  init?: boolean
 }
 
 export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckResult[]> {
@@ -113,6 +117,57 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
         title: 'State storage',
         status: 'fail',
         message: `cannot write ${stateDir(root)}: ${(e as Error).message}`,
+        fix: 'fix directory permissions on .pluton/state',
+      })
+    }
+
+    // 6a. Database accessibility + migration status (read-only; never creates or mutates)
+    try {
+      const dbPath = join(stateDir(root), 'pluton.sqlite')
+      if (!existsSync(dbPath)) {
+        checks.push({
+          id: 'database',
+          title: 'Database',
+          status: 'info',
+          message: 'not yet initialized — will be created on first run',
+          fix: 'run `pluton run` (or any command that touches the store) to initialize the database',
+        })
+      } else {
+        const inspected = inspectDatabase(dbPath)
+        const currentVersion = inspected.schemaVersion
+        const expected = SCHEMA_VERSION
+        if (currentVersion > expected) {
+          checks.push({
+            id: 'database',
+            title: 'Database schema',
+            status: 'fail',
+            message: `schema v${currentVersion} is newer than this build supports (v${expected}) — upgrade Pluton-Harness`,
+            fix: 'upgrade pluton-harness to a version that supports this schema',
+          })
+        } else if (currentVersion < expected) {
+          const pending = expected - currentVersion
+          checks.push({
+            id: 'database',
+            title: 'Database schema',
+            status: 'warn',
+            message: `schema v${currentVersion}, ${pending} migration(s) pending to v${expected}`,
+            fix: 'run `pluton run` (or any command that touches the store) to apply pending migrations',
+          })
+        } else {
+          checks.push({
+            id: 'database',
+            title: 'Database schema',
+            status: 'pass',
+            message: `schema v${currentVersion} (integrity: ${inspected.integrity})`,
+          })
+        }
+      }
+    } catch (e) {
+      checks.push({
+        id: 'database',
+        title: 'Database',
+        status: 'fail',
+        message: `cannot inspect SQLite database: ${(e as Error).message}`,
         fix: 'fix directory permissions on .pluton/state',
       })
     }
@@ -237,6 +292,59 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
   )
 
   return checks
+}
+
+/**
+ * Guided first-run remediation for `pluton doctor --init`.
+ *
+ * Produces human-readable, actionable remediation steps for every check that
+ * is not `pass`. Never overwrites existing configuration; never exposes
+ * secrets. Returns the ordered list of remediation steps.
+ */
+export function renderDoctorInit(checks: CheckResult[]): string {
+  const steps: string[] = []
+  let stepNo = 0
+
+  for (const c of checks) {
+    if (c.status === 'pass') continue
+    stepNo += 1
+
+    const label = `${stepNo}. ${c.title}`
+    const lines: string[] = [label]
+
+    if (c.status === 'fail') {
+      lines.push(`   PROBLEM: ${c.message}`)
+      if (c.fix) lines.push(`   FIX: ${c.fix}`)
+    } else if (c.status === 'warn') {
+      lines.push(`   NOTICE: ${c.message}`)
+      if (c.fix) lines.push(`   GUIDANCE: ${c.fix}`)
+    } else if (c.status === 'info') {
+      lines.push(`   INFO: ${c.message}`)
+      if (c.fix) lines.push(`   NEXT: ${c.fix}`)
+    }
+
+    steps.push(lines.join('\n'))
+  }
+
+  // Add a final summary and next steps
+  const failCount = checks.filter((c) => c.status === 'fail').length
+  const warnCount = checks.filter((c) => c.status === 'warn').length
+  const infoCount = checks.filter((c) => c.status === 'info').length
+
+  steps.push('')
+  steps.push('Next steps:')
+  if (failCount > 0) {
+    steps.push(`  - Resolve the ${failCount} failure(s) above before running Pluton.`)
+  }
+  if (!checks.some((c) => c.id === 'config' && c.status === 'pass')) {
+    steps.push(`  - Run \`pluton init\` to create pluton.yaml and private runtime directories.`)
+  }
+  if (warnCount > 0 || infoCount > 0) {
+    steps.push(`  - Review the ${warnCount} warning(s) and ${infoCount} info item(s); they do not block startup.`)
+  }
+  steps.push(`  - Re-run \`pluton doctor\` to confirm all checks pass.`)
+
+  return steps.join('\n')
 }
 
 function safeAdapter(kind: string): ReturnType<typeof getEngineAdapter> | null {

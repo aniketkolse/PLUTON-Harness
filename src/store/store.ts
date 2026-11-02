@@ -1696,6 +1696,16 @@ export class Store {
     return rows.map(rowToEvent)
   }
 
+  /** Events of a given type across all runs in a project, newest first (bounded read for cross-run aggregation). */
+  listEventsByType(projectId: string, type: string, limit = 500): EventRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM events WHERE project_id = ? AND type = ? ORDER BY seq DESC LIMIT ?',
+      )
+      .all(projectId, type, limit) as Row[]
+    return rows.map(rowToEvent)
+  }
+
   // -- chat (operator conversation, ADR-0012) --------------------------------
 
   createChatSession(spec: {

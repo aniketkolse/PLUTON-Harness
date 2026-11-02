@@ -24,7 +24,7 @@ import type {
   PromptRequest,
 } from '../engines/contract/types.ts'
 import { selectModel, type ModelSelectionOutcome } from '../engines/model-selection.ts'
-import { ModelPerformanceMonitor } from '../engines/model-performance.ts'
+import { ModelPerformanceMonitor, type ModelPerformanceSummary } from '../engines/model-performance.ts'
 import type { ResolvedModelConfig, ResolvedShipModelConfig } from '../config/model-config.ts'
 import { ModelRegistry } from '../engines/model-registry.ts'
 import { ModelDiscoveryService, type ModelDiscoveryReport } from '../engines/model-discovery.ts'
@@ -679,6 +679,22 @@ export class RunSupervisor {
     this.modelHealthMonitor = opts.modelHealthMonitor ?? null
     this.modelFallbackConfig = opts.modelFallbackConfig ?? null
     this.modelPerformanceMonitor = opts.modelPerformanceMonitor ?? new ModelPerformanceMonitor()
+    // Cross-run model performance: load historical run.model_performance events
+    // for this project and merge them into the monitor. Unknown values remain
+    // unknown; summaries never override hard eligibility (Ruling #13).
+    try {
+      const historical = this.store.listEventsByType(this.projectId, 'run.model_performance', 500)
+      for (const event of historical) {
+        const payload = (event.payload as unknown) as
+          | { modelId: string; engineKind: string; summary: ModelPerformanceSummary }
+          | undefined
+        if (payload?.summary) {
+          this.modelPerformanceMonitor.mergeHistoricalSummary(payload.summary)
+        }
+      }
+    } catch {
+      // Historical load is best-effort; a failure here must not prevent a run
+    }
     this.wakeups = opts.wakeups ?? new WakeupRegistry()
     this.now = opts.now ?? Date.now
     this.diagnostic = opts.diagnostic ?? (() => {})

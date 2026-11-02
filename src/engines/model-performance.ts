@@ -175,6 +175,33 @@ export class ModelPerformanceMonitor {
   clear(): void {
     this.observations.length = 0
   }
+
+  /**
+   * Merge a historical `ModelPerformanceSummary` (from a prior `run.model_performance`
+   * event) into this monitor. Observations are reconstructed from summary counts
+   * — derived from actual observed data, never estimated or fabricated.
+   * Unknown values remain unknown.
+   */
+  mergeHistoricalSummary(summary: ModelPerformanceSummary): void {
+    const at = new Date().toISOString()
+    const base = {
+      modelId: summary.modelId,
+      engineKind: summary.engineKind,
+      at,
+    }
+    for (let i = 0; i < summary.successCount; i++) this.observe({ ...base, category: 'success', value: 1 })
+    for (let i = 0; i < summary.failureCount; i++) this.observe({ ...base, category: 'failure', value: 1 })
+    for (let i = 0; i < summary.fallbackCount; i++) this.observe({ ...base, category: 'fallback', value: 1 })
+    for (let i = 0; i < summary.contextFailureCount; i++) this.observe({ ...base, category: 'context_failure', value: 1 })
+    for (let i = 0; i < summary.toolFailureCount; i++) this.observe({ ...base, category: 'tool_failure', value: 1 })
+    for (let i = 0; i < summary.completionCount; i++) this.observe({ ...base, category: 'completion', value: 1 })
+    if (summary.latencySampleCount > 0 && summary.latencySumMs > 0) {
+      const avgLatencyMs = summary.latencySumMs / summary.latencySampleCount
+      for (let i = 0; i < summary.latencySampleCount; i++) {
+        this.observe({ ...base, category: 'latency', valueMs: avgLatencyMs })
+      }
+    }
+  }
 }
 
 /** Derived rates computed from a summary. All undefined when no samples. */
