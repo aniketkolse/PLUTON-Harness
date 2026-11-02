@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { ConfigError, InternalError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { run as execRun } from '../util/exec.ts'
+import { redactProseSecrets } from '../util/redact.ts'
 import { terminalSafeLine } from '../util/sanitize.ts'
 import { stateDir } from '../config/load.ts'
 import { TERMINAL_TASK_STATES } from '../domain/state.ts'
@@ -26,7 +27,8 @@ import { formatSearchHuman, searchStore, type SearchCommandOptions } from './com
 import { decideApproval, listApprovals, type ApprovalListView } from './commands/approvals.ts'
 import { attachShip } from './commands/attach.ts'
 import { chatRun } from './commands/chat.ts'
-import { collectDoctorChecks, doctorExitCode } from './commands/doctor.ts'
+import { collectDoctorChecks, doctorExitCode, renderDoctorInit } from './commands/doctor.ts'
+import { configView, configValidate, configPath, configShips } from './commands/config.ts'
 import { runInit, type TeamTemplate } from './commands/init.ts'
 import { integrateRun, integrationChecksPassed } from './commands/integrate.ts'
 import { collectLogType, formatLogsHuman, logsView } from './commands/logs.ts'
@@ -59,6 +61,15 @@ const program = new Command()
   )
   .version(PLUTON_VERSION)
   .option('--json', 'machine-readable output: one JSON document on stdout (also via PLUTON_JSON=1)')
+  .option('--config <path>', 'path to pluton.yaml (default: walk up from CWD)')
+
+// Honor --config before commander parses argv so every subcommand sees it via PLUTON_ENV.
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] === '--config' && i + 1 < process.argv.length) {
+    process.env.PLUTON_CONFIG = process.argv[i + 1]
+    break
+  }
+}
 
 const io = stdIo
 
@@ -241,18 +252,32 @@ program
 program
   .command('doctor')
   .description('check the environment: Node, Git, project config, engine installs, and the selected execution provider')
+  .option('--init', 'guided first-run setup: remediation hints for every failing check')
   .action(async (_opts: unknown, cmd: Command) => {
     const json = jsonMode(cmd)
+    const init = (cmd.opts() as { init?: boolean }).init === true
     await runCommand(io, json, async () => {
-      const checks = await collectDoctorChecks({ cwd: process.cwd() })
+      const checks = await collectDoctorChecks({ cwd: process.cwd(), init })
       const summary = summarizeChecks(checks)
-      emitOk(
-        io,
-        json,
-        `${renderChecks(checks)}\n\n${summary.pass} ok, ${summary.warn} warning(s), ${summary.fail} failure(s)`,
-        { checks, summary },
-      )
-      return doctorExitCode(checks)
+      if (init && json) {
+        emitOk(
+          io,
+          json,
+          renderDoctorInit(checks),
+          { checks, summary, init: true },
+        )
+      } else if (init) {
+        io.out(renderDoctorInit(checks))
+        return doctorExitCode(checks)
+      } else {
+        emitOk(
+          io,
+          json,
+          `${renderChecks(checks)}\n\n${summary.pass} ok, ${summary.warn} warning(s), ${summary.fail} failure(s)`,
+          { checks, summary },
+        )
+        return doctorExitCode(checks)
+      }
     })
   })
 
@@ -290,6 +315,63 @@ program
         .filter((s) => s.length > 0)
         .join('\n')
       emitOk(io, json, human, result)
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// config
+// ---------------------------------------------------------------------------
+
+program
+  .command('config [subcommand]')
+  .description('inspect and validate pluton.yaml configuration (read-only, never exposes secrets)')
+  .option('--json', 'machine-readable output')
+  .action(async (subcommand: string | undefined, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const sub = (subcommand ?? 'view').toLowerCase()
+      if (!['view', 'validate', 'path', 'ships'].includes(sub)) {
+        throw new ValidationError(
+          `unknown config subcommand '${sub}'; available: view, validate, path, ships`,
+        )
+      }
+
+      if (sub === 'view') {
+        const report = await configView(process.cwd())
+        const safe = redactProseSecrets(JSON.stringify(report))
+        emitOk(
+          io,
+          json,
+          json ? '' : `Configuration: ${report.configPath}\n${safe}`,
+          report,
+        )
+      } else if (sub === 'validate') {
+        await configValidate(process.cwd())
+        emitOk(
+          io,
+          json,
+          `Configuration is valid: ${process.cwd()}/pluton.yaml`,
+          { valid: true },
+        )
+      } else if (sub === 'path') {
+        const info = await configPath(process.cwd())
+        emitOk(
+          io,
+          json,
+          info.configPath,
+          { configPath: info.configPath, rootDir: info.rootDir },
+        )
+      } else if (sub === 'ships') {
+        const ships = await configShips(process.cwd())
+        const rows = [['ID', 'ROLE', 'ENGINE']]
+        for (const s of ships) rows.push([s.id, s.role, s.engine])
+        emitOk(
+          io,
+          json,
+          json ? '' : table(rows),
+          { ships },
+        )
+      }
     })
   })
 
