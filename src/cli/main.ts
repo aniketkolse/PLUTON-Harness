@@ -35,6 +35,16 @@ import { collectLogType, formatLogsHuman, logsView } from './commands/logs.ts'
 import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createShip, editShip, engineList, listShips, modelList, showShip } from './commands/ship.ts'
+import {
+  providerAdd,
+  providerList,
+  providerModels,
+  providerRemove,
+  providerRemoveKey,
+  providerSetKey,
+  providerValidate,
+  readKeyFromStdin,
+} from './commands/provider.ts'
 import { sandboxProbe } from './commands/sandbox.ts'
 import { workspaceClean } from './commands/workspace.ts'
 import {
@@ -393,9 +403,9 @@ shipCmd
       const ctx = requireProject(process.cwd())
       const ships = listShips(ctx.loaded.config)
       const manager = ships.find((m) => m.role === 'supervisor') ?? null
-      const rows: string[][] = [['ID', 'NAME', 'ROLE', 'ENGINE', 'MODEL', 'WORKSPACE']]
+      const rows: string[][] = [['ID', 'NAME', 'ROLE', 'ENGINE', 'PROVIDER', 'MODEL', 'WORKSPACE']]
       for (const m of ships) {
-        rows.push([m.id, m.displayName, m.role, m.engine, m.model, m.workspacePolicy])
+        rows.push([m.id, m.displayName, m.role, m.engine, m.provider ?? '(default)', m.model, m.workspacePolicy])
       }
       const human =
         ships.length === 0
@@ -417,6 +427,7 @@ shipCmd
         `ship:        ${detail.id} (${detail.displayName})`,
         `role:        ${detail.role}`,
         `engine:      ${detail.engine}${detail.discovery ? ` — ${detail.discovery.installed ? 'installed' : 'NOT installed'}` : ' — unknown engine kind'}`,
+        `provider:    ${detail.provider ?? '(default)'}`,
         `model:       ${detail.model}`,
         `workspace:   ${detail.workspacePolicy}`,
         `approval:    ${detail.approvalMode}`,
@@ -434,6 +445,7 @@ shipCmd
   .description('add a Ship to pluton.yaml (validated before the file is touched)')
   .requiredOption('--engine <kind>', 'engine kind (see `pluton engine list`)')
   .requiredOption('--model <model>', 'exact provider-qualified model id for that engine')
+  .option('--provider <id>', 'provider id defined in .pluton/providers.json')
   .option('--display-name <name>', 'human display name (default: id)')
   .option('--role <role>', 'supervisor | researcher | coder | tester | reviewer | custom', 'custom')
   .option('--instructions-file <path>', 'role prompt file, relative to the project root')
@@ -446,6 +458,7 @@ shipCmd
       opts: {
         engine: string
         model: string
+        provider?: string
         displayName?: string
         role: string
         instructionsFile?: string
@@ -462,6 +475,7 @@ shipCmd
           id: shipId,
           engine: opts.engine,
           model: opts.model,
+          ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
           ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
           ...(opts.role !== undefined ? { role: opts.role } : {}),
           ...(opts.instructionsFile !== undefined ? { instructionsFile: opts.instructionsFile } : {}),
@@ -485,6 +499,7 @@ shipCmd
   .option('--display-name <name>', 'human display name')
   .option('--role <role>', 'supervisor | researcher | coder | tester | reviewer | custom')
   .option('--engine <kind>', 'engine kind (see `pluton engine list`)')
+  .option('--provider <id>', 'provider id defined in .pluton/providers.json')
   .option('--model <model>', 'exact provider-qualified model id')
   .option('--instructions-file <path>', 'role prompt file, relative to the project root')
   .option('--workspace-policy <policy>', 'coordinator-read-only | read-only | isolated-task-checkout')
@@ -497,6 +512,7 @@ shipCmd
         displayName?: string
         role?: string
         engine?: string
+        provider?: string
         model?: string
         instructionsFile?: string
         workspacePolicy?: string
@@ -512,6 +528,7 @@ shipCmd
           ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
           ...(opts.role !== undefined ? { role: opts.role } : {}),
           ...(opts.engine !== undefined ? { engine: opts.engine } : {}),
+          ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
           ...(opts.model !== undefined ? { model: opts.model } : {}),
           ...(opts.instructionsFile !== undefined ? { instructionsFile: opts.instructionsFile } : {}),
           ...(opts.workspacePolicy !== undefined ? { workspacePolicy: opts.workspacePolicy } : {}),
@@ -602,6 +619,170 @@ engineCmd
         ])
       }
       emitOk(io, json, table(rows), { engines })
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// provider — external model providers and credentials (Phase 1, ADR-0003)
+// ---------------------------------------------------------------------------
+
+const providerCmd = program.command('provider').description('inspect and configure model providers and credentials')
+
+providerCmd
+  .command('list')
+  .description('list configured providers')
+  .action(async (_opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const providers = providerList(ctx.rootDir)
+      const rows: string[][] = [['ID', 'ENGINE', 'DISPLAY NAME', 'BASE URL', 'AUTH', 'CREDENTIAL']]
+      for (const p of providers) {
+        rows.push([p.id, p.engine, p.displayName, p.baseUrl, p.authStyle, p.hasCredential ? 'configured' : 'missing'])
+      }
+      const human =
+        providers.length === 0
+          ? 'no providers configured — run `pluton provider add <id> --engine <kind> --base-url <url>`'
+          : table(rows)
+      emitOk(io, json, human, { providers, count: providers.length })
+    })
+  })
+
+providerCmd
+  .command('add <id>')
+  .description('add a provider configuration (saved to .pluton/providers.json)')
+  .requiredOption('--engine <kind>', 'engine kind (e.g. openai-compatible)')
+  .requiredOption('--base-url <url>', 'provider base URL (http(s)://...)')
+  .option('--display-name <name>', 'human display name')
+  .option('--auth-style <style>', 'bearer | header', 'bearer')
+  .option('--auth-header <name>', 'HTTP header name when auth-style is header (default: x-api-key)')
+  .option('--auth-prefix <prefix>', 'prefix prepended to credential')
+  .option('--models-path <path>', 'custom models endpoint path (default: /models)')
+  .option('--chat-path <path>', 'custom chat completions endpoint path (default: /chat/completions)')
+  .option('--timeout <ms>', 'request timeout in ms', (v) => Number.parseInt(v, 10))
+  .action(
+    async (
+      id: string,
+      opts: {
+        engine: string
+        baseUrl: string
+        displayName?: string
+        authStyle?: string
+        authHeader?: string
+        authPrefix?: string
+        modelsPath?: string
+        chatPath?: string
+        timeout?: number
+      },
+      cmd: Command,
+    ) => {
+      const json = jsonMode(cmd)
+      await runCommand(io, json, async () => {
+        const ctx = requireProject(process.cwd())
+        const res = providerAdd(ctx.rootDir, {
+          id,
+          engine: opts.engine,
+          baseUrl: opts.baseUrl,
+          ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
+          ...(opts.authStyle === 'header' || opts.authStyle === 'bearer' ? { authStyle: opts.authStyle } : {}),
+          ...(opts.authHeader !== undefined ? { authHeader: opts.authHeader } : {}),
+          ...(opts.authPrefix !== undefined ? { authPrefix: opts.authPrefix } : {}),
+          ...(opts.modelsPath !== undefined ? { modelsPath: opts.modelsPath } : {}),
+          ...(opts.chatPath !== undefined ? { chatPath: opts.chatPath } : {}),
+          ...(opts.timeout !== undefined ? { timeoutMs: opts.timeout } : {}),
+        })
+        emitOk(
+          io,
+          json,
+          `added provider '${id}' (${res.provider.engine}) -> ${res.provider.base_url}\nstore credential with: pluton provider key ${id}`,
+          { provider: res.provider },
+        )
+      })
+    },
+  )
+
+providerCmd
+  .command('remove <id>')
+  .description('remove a provider configuration and its credential file')
+  .action(async (id: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const res = providerRemove(ctx.rootDir, id)
+      emitOk(io, json, `removed provider '${id}' and its credential home`, res)
+    })
+  })
+
+providerCmd
+  .command('key <id>')
+  .description('store or replace a provider credential (reads key from stdin)')
+  .action(async (id: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const key = await readKeyFromStdin()
+      const res = providerSetKey(ctx.rootDir, id, key)
+      emitOk(
+        io,
+        json,
+        `credential stored for provider '${id}' in .pluton/provider-homes/${id}/credential.json (mode 0600)`,
+        res,
+      )
+    })
+  })
+
+providerCmd
+  .command('remove-key <id>')
+  .description('delete the stored credential for a provider')
+  .action(async (id: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const res = providerRemoveKey(ctx.rootDir, id)
+      emitOk(
+        io,
+        json,
+        res.removed ? `removed credential for provider '${id}'` : `no credential stored for provider '${id}'`,
+        res,
+      )
+    })
+  })
+
+providerCmd
+  .command('validate <id>')
+  .description('validate provider install, credentials, and live model listing')
+  .action(async (id: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const report = await providerValidate(ctx.rootDir, id)
+      const lines = [
+        `provider:   ${report.id} (${report.engine})`,
+        `credential: ${report.hasCredential ? 'present' : 'MISSING'}`,
+        `status:     ${report.liveCheck}`,
+        `detail:     ${report.detail}`,
+        ...(report.modelsCount !== undefined ? [`models:     ${report.modelsCount} model(s) discovered`] : []),
+      ]
+      emitOk(io, json, lines.join('\n'), report)
+      return report.liveCheck === 'failed' ? 1 : 0
+    })
+  })
+
+providerCmd
+  .command('models <id>')
+  .description('list models reported by this provider')
+  .action(async (id: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const models = await providerModels(ctx.rootDir, id)
+      const rows: string[][] = [['MODEL ID', 'LABEL', 'SOURCE']]
+      for (const m of models) rows.push([m.id, m.label ?? '', m.source])
+      const human =
+        models.length === 0
+          ? `provider '${id}' reported no models`
+          : table(rows)
+      emitOk(io, json, human, { provider: id, models, count: models.length })
     })
   })
 

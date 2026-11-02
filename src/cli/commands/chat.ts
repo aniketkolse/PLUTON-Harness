@@ -203,6 +203,7 @@ export async function chatRun(
           },
         })
       const provider = nativeProvider
+      const shipConfig = ctx.loaded.config.ships[ship.id]
       adapter = nativeAdapterFor(ship, {
         provider,
         isolatedCheckout: false,
@@ -218,6 +219,10 @@ export async function chatRun(
             sessionKind: 'chat',
             ...(executionBridge !== undefined ? { bridge: executionBridge } : {}),
           }),
+        engineOptions: {
+          rootDir: ctx.rootDir,
+          providerId: shipConfig?.provider,
+        },
       })
     }
 

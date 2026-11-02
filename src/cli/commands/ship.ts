@@ -5,16 +5,18 @@ import { ConfigError, ValidationError } from '../../domain/errors.ts'
 import { engineHomesDir, validateConfig } from '../../config/load.ts'
 import type { ProjectContext } from '../context.ts'
 import type { ShipConfig, PlutonConfig } from '../../config/schema.ts'
-import { getEngineAdapter, listEngineKinds } from '../../engines/registry.ts'
+import { getEngineAdapter, listEngineKinds, type EngineCreateOptions } from '../../engines/registry.ts'
 import type { EngineDiscovery, EngineAuthStatus, EngineModel } from '../../engines/contract/types.ts'
 import { isPermission } from '../../domain/permissions.ts'
 import { SHIP_ROLES } from '../../domain/models.ts'
+import { resolveProviderForEngine } from '../../providers/store.ts'
 
 export interface ShipListEntry {
   id: string
   displayName: string
   role: string
   engine: string
+  provider: string | null
   model: string
   workspacePolicy: string
   approvalMode: string
@@ -30,6 +32,7 @@ export function listShips(config: PlutonConfig): ShipListEntry[] {
       displayName: m.display_name,
       role: m.role,
       engine: m.engine,
+      provider: m.provider ?? null,
       model: m.model ?? '',
       workspacePolicy: m.workspace_policy,
       approvalMode: m.approval_mode,
@@ -60,7 +63,7 @@ export async function showShip(ctx: ProjectContext, id: string): Promise<ShipDet
   const instructionsPath = m.instructions_file ? join(ctx.rootDir, m.instructions_file) : null
   let discovery: EngineDiscovery | null = null
   let auth: EngineAuthStatus | null = null
-  const adapter = tryAdapter(m.engine)
+  const adapter = tryAdapter(m.engine, { rootDir: ctx.rootDir, providerId: m.provider })
   if (adapter) {
     discovery = await adapter.discover()
     auth = await adapter.authStatus(engineHome)
@@ -99,7 +102,7 @@ export async function engineList(): Promise<EngineListEntry[]> {
 export async function modelList(ctx: ProjectContext, shipId: string): Promise<EngineModel[]> {
   const m = ctx.loaded.config.ships[shipId]
   if (!m) throw new ValidationError(`unknown ship '${shipId}'`)
-  const adapter = getEngineAdapter(m.engine)
+  const adapter = getEngineAdapter(m.engine, { rootDir: ctx.rootDir, providerId: m.provider })
   const disc = await adapter.discover()
   if (!disc.installed) {
     throw new ValidationError(`engine '${m.engine}' is not installed. ${disc.fix}`)
@@ -119,6 +122,7 @@ export interface EditShipPatch {
   displayName?: string
   role?: string
   engine?: string
+  provider?: string
   model?: string
   instructionsFile?: string
   workspacePolicy?: string
@@ -140,7 +144,14 @@ export function editShip(
     const known = Object.keys(ctx.loaded.config.ships).join(', ') || '(none configured)'
     throw new ValidationError(`unknown ship '${id}'; configured ships: ${known}`)
   }
-  if (patch.engine !== undefined) getEngineAdapter(patch.engine)
+  const targetEngine = patch.engine ?? ctx.loaded.config.ships[id]?.engine
+  const targetProvider = patch.provider !== undefined ? patch.provider : ctx.loaded.config.ships[id]?.provider
+  if (targetEngine !== undefined) {
+    if (targetProvider !== undefined || targetEngine === 'openai-compatible') {
+      resolveProviderForEngine(ctx.rootDir, targetEngine, targetProvider)
+    }
+    getEngineAdapter(targetEngine, { rootDir: ctx.rootDir, providerId: targetProvider })
+  }
   if (patch.role !== undefined && !(SHIP_ROLES as readonly string[]).includes(patch.role)) {
     throw new ValidationError(`unknown role '${patch.role}'; known roles: ${SHIP_ROLES.join(', ')}`)
   }
@@ -158,6 +169,7 @@ export function editShip(
   if (patch.displayName !== undefined) setField('display_name', patch.displayName)
   if (patch.role !== undefined) setField('role', patch.role)
   if (patch.engine !== undefined) setField('engine', patch.engine)
+  if (patch.provider !== undefined) setField('provider', patch.provider)
   if (patch.model !== undefined) setField('model', patch.model)
   if (patch.instructionsFile !== undefined) setField('instructions_file', patch.instructionsFile)
   if (patch.workspacePolicy !== undefined) setField('workspace_policy', patch.workspacePolicy)
@@ -166,7 +178,7 @@ export function editShip(
 
   if (changed.length === 0) {
     throw new ValidationError(
-      'ship edit: nothing to change — pass at least one of --engine, --model, --role, --display-name, ' +
+      'ship edit: nothing to change — pass at least one of --engine, --provider, --model, --role, --display-name, ' +
         '--instructions-file, --workspace-policy, --approval-mode, --permission',
     )
   }
@@ -179,9 +191,9 @@ export function editShip(
   return { configPath: ctx.configPath, ship, changed }
 }
 
-function tryAdapter(kind: string): ReturnType<typeof getEngineAdapter> | null {
+function tryAdapter(kind: string, opts?: EngineCreateOptions): ReturnType<typeof getEngineAdapter> | null {
   try {
-    return getEngineAdapter(kind)
+    return getEngineAdapter(kind, opts)
   } catch {
     return null
   }

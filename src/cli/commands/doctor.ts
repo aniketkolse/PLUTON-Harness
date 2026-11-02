@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { findProjectRoot, loadConfig, stateDir, type LoadedConfig } from '../../config/load.ts'
-import { registerBuiltinEngines, listEngineKinds, getEngineAdapter } from '../../engines/registry.ts'
+import { registerBuiltinEngines, listEngineKinds, getEngineAdapter, type EngineCreateOptions } from '../../engines/registry.ts'
 import { firstLine, run } from '../../util/exec.ts'
 import { engineHomesDir } from '../../config/load.ts'
 import { createNativeExecutionProvider } from '../../execution/factory.ts'
@@ -174,8 +174,9 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
     // Engine checks per configured Ship
     const seen = new Set<string>()
     for (const [id, ship] of Object.entries(ships)) {
-      const key = `${ship.engine}` // one discovery per engine kind is enough for install state
-      const adapter = safeAdapter(ship.engine)
+      const providerKey = ship.provider ?? ''
+      const key = `${ship.engine}:${providerKey}`
+      const adapter = safeAdapter(ship.engine, { rootDir: root, providerId: ship.provider })
       if (!adapter) {
         checks.push({
           id: `engine:${ship.engine}`,
@@ -189,36 +190,55 @@ export async function collectDoctorChecks(opts: DoctorOptions): Promise<CheckRes
       const home = join(engineHomesDir(root), id)
       if (!seen.has(key)) {
         seen.add(key)
-        const disc = await adapter.discover()
+        try {
+          const disc = await adapter.discover()
+          checks.push(
+            disc.installed
+              ? {
+                  id: `engine:${ship.engine}${providerKey ? `:${providerKey}` : ''}`,
+                  title: `Engine '${ship.engine}'${providerKey ? ` (provider: ${providerKey})` : ''}`,
+                  status: 'pass',
+                  message: `${disc.version ?? 'version unknown'} ${disc.binaryPath ? `(${disc.binaryPath})` : ''}`.trim(),
+                }
+              : {
+                  id: `engine:${ship.engine}${providerKey ? `:${providerKey}` : ''}`,
+                  title: `Engine '${ship.engine}'${providerKey ? ` (provider: ${providerKey})` : ''}`,
+                  status: 'fail',
+                  message: 'not installed / not on PATH',
+                  fix: disc.fix,
+                },
+          )
+        } catch (e) {
+          checks.push({
+            id: `engine:${ship.engine}${providerKey ? `:${providerKey}` : ''}`,
+            title: `Engine '${ship.engine}'${providerKey ? ` (provider: ${providerKey})` : ''}`,
+            status: 'fail',
+            message: (e as Error).message,
+          })
+          continue
+        }
+      }
+      try {
+        const auth = await adapter.authStatus(home)
         checks.push(
-          disc.installed
-            ? {
-                id: `engine:${ship.engine}`,
-                title: `Engine '${ship.engine}'`,
-                status: 'pass',
-                message: `${disc.version ?? 'version unknown'} ${disc.binaryPath ? `(${disc.binaryPath})` : ''}`.trim(),
-              }
+          auth.configured
+            ? { id: `auth:${id}`, title: `Auth for ship '${id}'`, status: 'pass', message: 'configured' }
             : {
-                id: `engine:${ship.engine}`,
-                title: `Engine '${ship.engine}'`,
-                status: 'fail',
-                message: 'not installed / not on PATH',
-                fix: disc.fix,
+                id: `auth:${id}`,
+                title: `Auth for ship '${id}'`,
+                status: 'warn',
+                message: 'not configured — engine runs will fail until this is set up',
+                fix: auth.hint,
               },
         )
+      } catch (e) {
+        checks.push({
+          id: `auth:${id}`,
+          title: `Auth for ship '${id}'`,
+          status: 'fail',
+          message: (e as Error).message,
+        })
       }
-      const auth = await adapter.authStatus(home)
-      checks.push(
-        auth.configured
-          ? { id: `auth:${id}`, title: `Auth for ship '${id}'`, status: 'pass', message: 'configured' }
-          : {
-              id: `auth:${id}`,
-              title: `Auth for ship '${id}'`,
-              status: 'warn',
-              message: 'not configured — engine runs will fail until this is set up',
-              fix: auth.hint,
-            },
-      )
     }
   }
 
@@ -347,9 +367,9 @@ export function renderDoctorInit(checks: CheckResult[]): string {
   return steps.join('\n')
 }
 
-function safeAdapter(kind: string): ReturnType<typeof getEngineAdapter> | null {
+function safeAdapter(kind: string, opts?: EngineCreateOptions): ReturnType<typeof getEngineAdapter> | null {
   try {
-    return getEngineAdapter(kind)
+    return getEngineAdapter(kind, opts)
   } catch {
     return null
   }
