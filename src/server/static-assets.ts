@@ -140,6 +140,13 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
             <button id="tabFiles" class="sub-tab is-active" type="button">Files</button>
             <button id="tabDiffs" class="sub-tab" type="button">Worktree Diffs</button>
           </div>
+          <div class="file-search-bar">
+            <svg class="file-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input id="fileSearchInput" class="file-search-input" type="text" placeholder="Search files (by name/path)…" autocomplete="off" spellcheck="false" />
+            <button id="fileSearchClear" class="file-search-clear is-hidden" type="button" title="Clear search" aria-label="Clear search">&times;</button>
+          </div>
+          <div id="fileBreadcrumbs" class="file-breadcrumbs" aria-label="Breadcrumb navigation"></div>
+          <div id="fileSearchResults" class="file-search-results is-hidden"></div>
           <div id="filesList" class="file-list"></div>
         </div>
       </section>
@@ -361,6 +368,7 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
 
       <!-- MAIN-AREA FILE VIEWER / EDITOR (covers the conversation while open) -->
       <section id="fileViewer" class="file-viewer is-hidden" aria-label="Workspace file viewer">
+        <div id="fileTabsBar" class="file-tabs-bar" role="tablist" aria-label="Open editor tabs"></div>
         <div class="file-viewer-head">
           <div class="file-viewer-title">
             <span id="fileViewerIcon" class="file-viewer-icon" aria-hidden="true"></span>
@@ -1025,7 +1033,201 @@ body {
 .icon-config { color: #a1a1aa; }
 .icon-file { color: #71717a; }
 .file-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+.file-children { display: flex; flex-direction: column; padding-left: 12px; }
 .file-children.is-collapsed { display: none; }
+
+.file-search-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 6px 0;
+  padding: 0 4px;
+}
+.file-search-icon {
+  position: absolute;
+  left: 12px;
+  width: 14px;
+  height: 14px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+.file-search-input {
+  width: 100%;
+  padding: 5px 24px 5px 28px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  box-sizing: border-box;
+}
+.file-search-input:focus {
+  outline: none;
+  border-color: var(--border-focus, #6366f1);
+  background: rgba(255, 255, 255, 0.07);
+}
+.file-search-clear {
+  position: absolute;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+}
+.file-search-clear:hover {
+  color: var(--text);
+}
+.file-search-results {
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+  overflow-y: auto;
+  gap: 2px;
+}
+.file-search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.file-search-result-item:hover {
+  background: #222228;
+  color: var(--text);
+}
+.file-search-match {
+  color: var(--accent-primary, #818cf8);
+  font-weight: 600;
+}
+.file-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 4px;
+}
+.file-breadcrumb-segment {
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: 2px;
+  padding: 1px 3px;
+}
+.file-breadcrumb-segment:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.file-breadcrumb-sep {
+  color: var(--text-dim);
+  user-select: none;
+}
+.file-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  margin: 4px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed var(--border-soft);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.file-load-more:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.file-tabs-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 0;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+}
+.file-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-soft);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  max-width: 180px;
+  position: relative;
+}
+.file-tab:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+.file-tab.is-active {
+  background: var(--bg-main);
+  color: var(--text);
+  border-color: var(--border-soft);
+  border-bottom: 1px solid var(--bg-main);
+  margin-bottom: -1px;
+  font-weight: 600;
+}
+.file-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tab-dirty {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-primary, #818cf8);
+  flex-shrink: 0;
+}
+.file-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.file-tab-close:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
 
 /* ===================== Main-area file viewer / editor ===================== */
 .file-viewer {
@@ -2784,6 +2986,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
     dagViewMode: 'flow',
     filesTabMode: 'files',
     fileList: [],
+    expandedDirs: new Set(),
+    dirCache: {},
+    currentNavPath: '',
+    searchQuery: '',
+    searchResults: [],
+    editorTabs: [],
+    activeTabPath: null,
     sidebarTab: 'sessions',
     sidebarOpen: true,
     sidebarUserSet: false,
@@ -5738,94 +5947,271 @@ details:not([open]) > .tool-card-head .tool-chevron {
     return '<svg class="file-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>';
   }
 
-  function buildFileTree(paths) {
-    var root = { dirs: {}, files: [] };
-    paths.forEach(function (p) {
-      var parts = String(p).split('/').filter(Boolean);
-      if (parts.length === 0) return;
-      var node = root;
-      for (var i = 0; i < parts.length - 1; i++) {
-        var seg = parts[i];
-        if (!node.dirs[seg]) node.dirs[seg] = { dirs: {}, files: [] };
-        node = node.dirs[seg];
+  function updateBreadcrumbs(path) {
+    state.currentNavPath = path || '';
+    var container = el('fileBreadcrumbs');
+    if (!container) return;
+    var html = '<span class="file-breadcrumb-segment" data-breadcrumb-path="" title="Workspace root">root</span>';
+    if (path && path.trim() !== '') {
+      var parts = path.split('/').filter(Boolean);
+      var accum = '';
+      for (var i = 0; i < parts.length; i++) {
+        accum = accum ? accum + '/' + parts[i] : parts[i];
+        html += '<span class="file-breadcrumb-sep">/</span>';
+        html += '<span class="file-breadcrumb-segment" data-breadcrumb-path="' + escapeHtml(accum) + '">' + escapeHtml(parts[i]) + '</span>';
       }
-      node.files.push({ name: parts[parts.length - 1], path: p });
-    });
-    return root;
-  }
-
-  function countTreeFiles(node) {
-    var n = node.files.length;
-    Object.keys(node.dirs).forEach(function (k) { n += countTreeFiles(node.dirs[k]); });
-    return n;
-  }
-
-  function renderFileTree(paths) {
-    var root = buildFileTree(paths);
-    var html = '';
-    Object.keys(root.dirs).sort().forEach(function (name) {
-      var dir = root.dirs[name];
-      html += '<div class="file-row file-dir" role="treeitem" aria-expanded="true">' +
-        CHEV_ICON + getFileIconSvg(name, true, true) +
-        '<span class="file-name">' + escapeHtml(name) + '</span>' +
-        '<span class="file-count">' + countTreeFiles(dir) + '</span>' +
-        '</div>';
-      html += '<div class="file-children">' + renderFileTreeNode(dir) + '</div>';
-    });
-    root.files.sort(function (a, b) { return a.name.localeCompare(b.name); }).forEach(function (f) { html += renderFileRow(f, 0); });
-    return html;
-  }
-
-  function renderFileTreeNode(node) {
-    var html = '';
-    Object.keys(node.dirs).sort().forEach(function (name) {
-      var dir = node.dirs[name];
-      html += '<div class="file-row file-dir" role="treeitem" aria-expanded="true">' +
-        CHEV_ICON + getFileIconSvg(name, true, true) +
-        '<span class="file-name">' + escapeHtml(name) + '</span>' +
-        '<span class="file-count">' + countTreeFiles(dir) + '</span>' +
-        '</div>';
-      html += '<div class="file-children">' + renderFileTreeNode(dir) + '</div>';
-    });
-    node.files.sort(function (a, b) { return a.name.localeCompare(b.name); }).forEach(function (f) {
-      html += renderFileRow(f, 1);
-    });
-    return html;
-  }
-
-  function renderFileRow(f, depth) {
-    return '<div class="file-row file-item" data-path="' + escapeHtml(f.path) + '" title="' + escapeHtml(f.path) + '" role="treeitem">' +
-      getFileIconSvg(f.name, false, false) +
-      '<span class="file-name">' + escapeHtml(f.name) + '</span>' +
-      '<button class="file-row-delete" type="button" data-delete-path="' + escapeHtml(f.path) + '" title="Delete file" aria-label="Delete file ' + escapeHtml(f.path) + '">' + TRASH_ICON + '</button>' +
-      '</div>';
-  }
-
-  function bindFileTree(list) {
-    Array.prototype.forEach.call(list.querySelectorAll('.file-dir'), function (row) {
-      row.classList.add('is-open');
-      row.addEventListener('click', function (e) {
-        e.stopPropagation();
-        var kids = row.nextElementSibling;
-        if (!kids || !kids.classList.contains('file-children')) return;
-        var collapsed = kids.classList.toggle('is-collapsed');
-        row.classList.toggle('is-open', !collapsed);
-        row.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    }
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('.file-breadcrumb-segment'), function (seg) {
+      seg.addEventListener('click', function () {
+        var segPath = seg.getAttribute('data-breadcrumb-path');
+        navigateBreadcrumb(segPath);
       });
     });
-    Array.prototype.forEach.call(list.querySelectorAll('.file-item'), function (row) {
+  }
+
+  async function navigateBreadcrumb(segPath) {
+    if (!segPath) {
+      updateBreadcrumbs('');
+      return;
+    }
+    await expandDirRecursively(segPath);
+  }
+
+  function renderDirectoryChildren(dirPath, entries, hasMore) {
+    if (!entries || entries.length === 0) {
+      return '<div class="empty-hint" style="padding: 4px 12px; font-size: 11px;">(empty directory)</div>';
+    }
+    var html = '';
+    entries.forEach(function (entry) {
+      if (entry.type === 'dir') {
+        var isOpen = state.expandedDirs.has(entry.path);
+        var dirCached = state.dirCache[entry.path];
+        html += '<div class="file-row file-dir' + (isOpen ? ' is-open' : '') + '" data-dir-path="' + escapeHtml(entry.path) + '" role="treeitem" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
+          CHEV_ICON + getFileIconSvg(entry.name, true, isOpen) +
+          '<span class="file-name">' + escapeHtml(entry.name) + '</span>' +
+          '</div>';
+        html += '<div class="file-children' + (isOpen ? '' : ' is-collapsed') + '" data-children-for="' + escapeHtml(entry.path) + '">';
+        if (isOpen && dirCached) {
+          html += renderDirectoryChildren(entry.path, dirCached.entries, dirCached.hasMore);
+        }
+        html += '</div>';
+      } else {
+        html += '<div class="file-row file-item" data-path="' + escapeHtml(entry.path) + '" title="' + escapeHtml(entry.path) + '" role="treeitem">' +
+          getFileIconSvg(entry.name, false, false) +
+          '<span class="file-name">' + escapeHtml(entry.name) + '</span>' +
+          '<button class="file-row-delete" type="button" data-delete-path="' + escapeHtml(entry.path) + '" title="Delete file" aria-label="Delete file ' + escapeHtml(entry.path) + '">' + TRASH_ICON + '</button>' +
+          '</div>';
+      }
+    });
+    if (hasMore) {
+      html += '<div class="file-load-more" data-load-more-dir="' + escapeHtml(dirPath) + '" role="button" tabindex="0">Load more\\u2026 (' + entries.length + ' shown)</div>';
+    }
+    return html;
+  }
+
+  async function onDirRowClick(row) {
+    var dirPath = row.getAttribute('data-dir-path');
+    if (!dirPath) return;
+    var kids = row.nextElementSibling;
+    if (!kids || !kids.classList.contains('file-children')) return;
+
+    if (state.expandedDirs.has(dirPath)) {
+      state.expandedDirs.delete(dirPath);
+      row.classList.remove('is-open');
+      row.setAttribute('aria-expanded', 'false');
+      kids.classList.add('is-collapsed');
+      var icon = row.querySelector('.file-icon');
+      if (icon) {
+        var parts = dirPath.split('/');
+        icon.outerHTML = getFileIconSvg(parts[parts.length - 1], true, false);
+      }
+    } else {
+      state.expandedDirs.add(dirPath);
+      row.classList.add('is-open');
+      row.setAttribute('aria-expanded', 'true');
+      kids.classList.remove('is-collapsed');
+      var icon = row.querySelector('.file-icon');
+      if (icon) {
+        var parts = dirPath.split('/');
+        icon.outerHTML = getFileIconSvg(parts[parts.length - 1], true, true);
+      }
+      updateBreadcrumbs(dirPath);
+      if (!state.dirCache[dirPath]) {
+        kids.innerHTML = '<div class="empty-hint" style="padding: 4px 12px; font-size: 11px;">Loading\\u2026</div>';
+        try {
+          var url = '/api/files?dir=' + encodeURIComponent(dirPath);
+          if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+          var res = await apiFetch(url);
+          state.dirCache[dirPath] = {
+            entries: res.entries || [],
+            total: res.total || 0,
+            hasMore: !!res.hasMore,
+            offset: res.offset || 0
+          };
+          kids.innerHTML = renderDirectoryChildren(dirPath, state.dirCache[dirPath].entries, state.dirCache[dirPath].hasMore);
+          bindFileTree(kids);
+        } catch (err) {
+          kids.innerHTML = '<div class="empty-hint wd-error" style="padding: 4px 12px;">Failed to load: ' + escapeHtml(err.message) + '</div>';
+        }
+      }
+    }
+  }
+
+  async function loadMoreDirectory(dirPath, btn) {
+    var cached = state.dirCache[dirPath];
+    if (!cached) return;
+    var nextOffset = (cached.offset || 0) + 500;
+    btn.textContent = 'Loading\\u2026';
+    btn.style.pointerEvents = 'none';
+    try {
+      var url = '/api/files?dir=' + encodeURIComponent(dirPath) + '&offset=' + nextOffset + '&limit=500';
+      if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      var res = await apiFetch(url);
+      var newEntries = res.entries || [];
+      cached.entries = cached.entries.concat(newEntries);
+      cached.offset = nextOffset;
+      cached.hasMore = !!res.hasMore;
+      var kids = btn.parentElement;
+      if (kids) {
+        kids.innerHTML = renderDirectoryChildren(dirPath, cached.entries, cached.hasMore);
+        bindFileTree(kids);
+      }
+    } catch (err) {
+      btn.textContent = 'Load more failed. Retry?';
+      btn.style.pointerEvents = '';
+    }
+  }
+
+  function bindFileTree(container) {
+    Array.prototype.forEach.call(container.querySelectorAll('.file-dir'), function (row) {
+      row.addEventListener('click', function (e) {
+        e.stopPropagation();
+        onDirRowClick(row);
+      });
+    });
+    Array.prototype.forEach.call(container.querySelectorAll('.file-item'), function (row) {
       row.addEventListener('click', function () {
-        Array.prototype.forEach.call(list.querySelectorAll('.file-item'), function (i) { i.classList.remove('is-active'); });
+        var rootList = el('filesList');
+        if (rootList) {
+          Array.prototype.forEach.call(rootList.querySelectorAll('.file-item'), function (i) { i.classList.remove('is-active'); });
+        }
         row.classList.add('is-active');
         openFile(row.getAttribute('data-path'));
       });
     });
-    Array.prototype.forEach.call(list.querySelectorAll('[data-delete-path]'), function (button) {
+    Array.prototype.forEach.call(container.querySelectorAll('[data-delete-path]'), function (button) {
       button.addEventListener('click', function (e) {
         e.stopPropagation();
         deleteWorkspaceFile(button.getAttribute('data-delete-path'));
       });
     });
+    Array.prototype.forEach.call(container.querySelectorAll('[data-load-more-dir]'), function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var dirPath = btn.getAttribute('data-load-more-dir');
+        loadMoreDirectory(dirPath, btn);
+      });
+    });
+  }
+
+  function highlightSearchMatch(text, query) {
+    if (!text) return '';
+    if (!query) return escapeHtml(text);
+    var lowerText = text.toLowerCase();
+    var lowerQuery = query.toLowerCase();
+    var idx = lowerText.indexOf(lowerQuery);
+    if (idx === -1) return escapeHtml(text);
+    var before = escapeHtml(text.slice(0, idx));
+    var match = escapeHtml(text.slice(idx, idx + query.length));
+    var after = escapeHtml(text.slice(idx + query.length));
+    return before + '<span class="file-search-match">' + match + '</span>' + after;
+  }
+
+  async function searchWorkspace(query) {
+    var searchResults = el('fileSearchResults');
+    var filesList = el('filesList');
+    if (filesList) filesList.classList.add('is-hidden');
+    if (!searchResults) return;
+    searchResults.classList.remove('is-hidden');
+    searchResults.innerHTML = '<div class="empty-hint" style="padding: 8px;">Searching workspace\\u2026</div>';
+
+    try {
+      var url = '/api/files/search?q=' + encodeURIComponent(query);
+      if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+      var res = await apiFetch(url);
+      var matches = res.matches || [];
+      if (matches.length === 0) {
+        searchResults.innerHTML = '<div class="empty-hint" style="padding: 8px;">No matches found for "' + escapeHtml(query) + '".</div>';
+        return;
+      }
+      var html = '';
+      matches.forEach(function (m) {
+        var isDir = m.type === 'dir';
+        var icon = getFileIconSvg(m.name, isDir, false);
+        html += '<div class="file-search-result-item" data-search-path="' + escapeHtml(m.path) + '" data-search-type="' + m.type + '" title="' + escapeHtml(m.path) + '">';
+        html += icon;
+        html += '<span class="file-name truncate">' + highlightSearchMatch(m.path, query) + '</span>';
+        html += '</div>';
+      });
+      if (res.truncated) {
+        html += '<div class="empty-hint" style="font-size: 11px; padding: 4px 8px;">Capped at ' + matches.length + ' matches. Refine query for more.</div>';
+      }
+      searchResults.innerHTML = html;
+      bindSearchResults(searchResults);
+    } catch (err) {
+      searchResults.innerHTML = '<div class="empty-hint wd-error" style="padding: 8px;">Search failed: ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function bindSearchResults(container) {
+    Array.prototype.forEach.call(container.querySelectorAll('.file-search-result-item'), function (item) {
+      item.addEventListener('click', async function () {
+        var path = item.getAttribute('data-search-path');
+        var type = item.getAttribute('data-search-type');
+        if (type === 'file') {
+          openFile(path);
+        } else if (type === 'dir') {
+          var searchIn = el('fileSearchInput');
+          if (searchIn) searchIn.value = '';
+          var clearBtn = el('fileSearchClear');
+          if (clearBtn) clearBtn.classList.add('is-hidden');
+          var searchRes = el('fileSearchResults');
+          if (searchRes) searchRes.classList.add('is-hidden');
+          var list = el('filesList');
+          if (list) list.classList.remove('is-hidden');
+          await expandDirRecursively(path);
+        }
+      });
+    });
+  }
+
+  async function expandDirRecursively(dirPath) {
+    var parts = dirPath.split('/').filter(Boolean);
+    var accum = '';
+    for (var i = 0; i < parts.length; i++) {
+      accum = accum ? accum + '/' + parts[i] : parts[i];
+      state.expandedDirs.add(accum);
+      if (!state.dirCache[accum]) {
+        try {
+          var url = '/api/files?dir=' + encodeURIComponent(accum);
+          if (state.activeSessionId) url += '&sessionId=' + encodeURIComponent(state.activeSessionId);
+          var res = await apiFetch(url);
+          state.dirCache[accum] = {
+            entries: res.entries || [],
+            total: res.total || 0,
+            hasMore: !!res.hasMore,
+            offset: res.offset || 0
+          };
+        } catch (e) {}
+      }
+    }
+    var listNode = el('filesList');
+    if (listNode && state.dirCache['']) {
+      listNode.innerHTML = renderDirectoryChildren('', state.dirCache[''].entries, state.dirCache[''].hasMore);
+      bindFileTree(listNode);
+    }
+    updateBreadcrumbs(dirPath);
   }
 
   async function deleteWorkspaceFile(path) {
@@ -5879,35 +6265,30 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   async function loadFilesList(background) {
     var list = el('filesList');
-    if (list && !background && (!state.fileList || state.fileList.length === 0)) {
+    if (list && !background && (!state.dirCache[''] || state.dirCache[''].entries.length === 0)) {
       list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
     }
     try {
       var res = state.activeSessionId
         ? await apiFetch('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
         : await apiFetch('/api/files');
-      var newFiles = res.files || [];
-      var changed = !state.fileList || state.fileList.length !== newFiles.length;
-      if (!changed) {
-        for (var i = 0; i < newFiles.length; i++) {
-          if (state.fileList[i] !== newFiles[i]) {
-            changed = true;
-            break;
-          }
-        }
-      }
-      state.fileList = newFiles;
+      var entries = res.entries || [];
+      state.dirCache[''] = {
+        entries: entries,
+        total: res.total || 0,
+        hasMore: !!res.hasMore,
+        offset: res.offset || 0
+      };
+      state.fileList = res.files || entries.map(function (e) { return e.path; });
       var listNode = el('filesList');
       if (!listNode) return;
-      if (state.fileList.length === 0) {
+      if (entries.length === 0) {
         listNode.innerHTML = '<div class="empty-hint">No files in the workspace.</div>';
         return;
       }
-      if (!changed && listNode.children.length > 0 && !listNode.querySelector('.empty-hint')) {
-        return;
-      }
-      listNode.innerHTML = renderFileTree(state.fileList);
+      listNode.innerHTML = renderDirectoryChildren('', entries, state.dirCache[''].hasMore);
       bindFileTree(listNode);
+      updateBreadcrumbs(state.currentNavPath || '');
     } catch (err) {
       if (!background) {
         renderFileListError(el('filesList'), err.message, function () { loadFilesList(); });
@@ -6130,6 +6511,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       }
       var res = await apiFetch(url);
       openFileViewer(path, res.content || '');
+      updateBreadcrumbs(path);
     } catch (err) {
       toast('Failed to read ' + path + ': ' + err.message, true);
     }
@@ -7986,6 +8368,47 @@ details:not([open]) > .tool-card-head .tool-chevron {
         diffsTabBtn.classList.add('is-active');
         if (filesTabBtn) filesTabBtn.classList.remove('is-active');
         loadDiffsTab(state.activeRunId);
+      });
+    }
+
+    var fileSearchIn = el('fileSearchInput');
+    var fileSearchClear = el('fileSearchClear');
+    var fileSearchResults = el('fileSearchResults');
+    var filesList = el('filesList');
+    var searchDebounceTimer = null;
+
+    if (fileSearchIn) {
+      fileSearchIn.addEventListener('input', function () {
+        var query = (fileSearchIn.value || '').trim();
+        if (fileSearchClear) fileSearchClear.classList.toggle('is-hidden', !query);
+        if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+        if (!query) {
+          if (fileSearchResults) fileSearchResults.classList.add('is-hidden');
+          if (filesList) filesList.classList.remove('is-hidden');
+          return;
+        }
+        searchDebounceTimer = setTimeout(function () {
+          searchWorkspace(query);
+        }, 300);
+      });
+      fileSearchIn.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          fileSearchIn.value = '';
+          if (fileSearchClear) fileSearchClear.classList.add('is-hidden');
+          if (fileSearchResults) fileSearchResults.classList.add('is-hidden');
+          if (filesList) filesList.classList.remove('is-hidden');
+        }
+      });
+    }
+
+    if (fileSearchClear) {
+      fileSearchClear.addEventListener('click', function () {
+        if (fileSearchIn) fileSearchIn.value = '';
+        fileSearchClear.classList.add('is-hidden');
+        if (fileSearchResults) fileSearchResults.classList.add('is-hidden');
+        if (filesList) filesList.classList.remove('is-hidden');
+        if (fileSearchIn) fileSearchIn.focus();
       });
     }
 
