@@ -507,6 +507,27 @@ export const MIGRATIONS: Migration[] = [
          ON verification_checks(task_id, attempt, superseded_at)`,
     ],
   },
+  {
+    version: 15,
+    name: 'project-sessions',
+    // A persistent Build session is the anchor between successive runs in one
+    // project. It holds the stable workspace and a monotonic build counter;
+    // runs link back through `project_session_id` (legacy runs stay NULL).
+    statements: [
+      `CREATE TABLE project_sessions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
+        workspace_root TEXT NOT NULL,
+        active_run_id TEXT,
+        build_count INTEGER NOT NULL DEFAULT 0,
+        last_goal TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `ALTER TABLE runs ADD COLUMN project_session_id TEXT`,
+      `CREATE INDEX idx_runs_project_session ON runs(project_session_id, created_at)`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

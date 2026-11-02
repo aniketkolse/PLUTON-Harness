@@ -38,6 +38,7 @@ import {
   type JsonValue,
   type ShipRecord,
   type ProjectRecord,
+  type ProjectSessionRecord,
   type RequestReceiptRecord,
   type RequestTargetKind,
   type RunBudget,
@@ -191,6 +192,8 @@ export interface NewRunSpec {
   workspaceRoot?: string | null
   /** Chat session that started the run (background work stays bound to it). */
   originSessionId?: string | null
+  /** Persistent Build session this run joins (PLUTON 4.1 Phase 4). */
+  projectSessionId?: string | null
 }
 
 export interface NewTaskSpec {
@@ -441,6 +444,96 @@ export class Store {
     return row ? rowToProject(row) : null
   }
 
+  /** Rename only the display metadata; the root path and project id are immutable. */
+  renameProject(id: string, name: string): ProjectRecord {
+    const trimmed = name.trim()
+    if (trimmed === '') throw new ValidationError('project name must not be empty')
+    const res = this.db
+      .prepare('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?')
+      .run(trimmed, nowIso(), id)
+    if (res.changes === 0) throw new NotFoundError('project', id)
+    const updated = this.getProject(id)
+    if (!updated) throw new InternalError('project disappeared during rename')
+    return updated
+  }
+
+  // -- persistent Build sessions --------------------------------------------
+
+  /**
+   * Return the project's Build session, creating it on the first Build.
+   * The first workspace wins: a later call with a different root must not
+   * silently move an established project's builds.
+   */
+  ensureProjectSession(projectId: string, workspaceRoot: string): ProjectSessionRecord {
+    const existing = this.getProjectSession(projectId)
+    if (existing) return existing
+    const now = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO project_sessions
+           (id, project_id, workspace_root, active_run_id, build_count, last_goal, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, 0, NULL, ?, ?)`,
+      )
+      .run(newId('psess'), projectId, workspaceRoot, now, now)
+    const created = this.getProjectSession(projectId)
+    if (!created) throw new InternalError('project session insert disappeared')
+    return created
+  }
+
+  getProjectSession(projectId: string): ProjectSessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM project_sessions WHERE project_id = ?').get(projectId) as Row | undefined
+    return row ? rowToProjectSession(row) : null
+  }
+
+  getProjectSessionById(id: string): ProjectSessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM project_sessions WHERE id = ?').get(id) as Row | undefined
+    return row ? rowToProjectSession(row) : null
+  }
+
+  /** Count a newly created Build and remember its goal and newest run anchor. */
+  recordProjectBuild(projectId: string, spec: { runId: string; goal: string }): ProjectSessionRecord {
+    const session = this.getProjectSession(projectId)
+    if (!session) throw new NotFoundError('project session', projectId)
+    this.db
+      .prepare(
+        `UPDATE project_sessions
+            SET build_count = build_count + 1, last_goal = ?, active_run_id = ?, updated_at = ?
+          WHERE project_id = ?`,
+      )
+      .run(spec.goal, spec.runId, nowIso(), projectId)
+    const updated = this.getProjectSession(projectId)
+    if (!updated) throw new InternalError('project session disappeared during build record')
+    return updated
+  }
+
+  setProjectSessionActiveRun(projectId: string, runId: string | null): void {
+    this.db
+      .prepare('UPDATE project_sessions SET active_run_id = ?, updated_at = ? WHERE project_id = ?')
+      .run(runId, nowIso(), projectId)
+  }
+
+  /** Clear the anchor from whichever session points at this run. */
+  clearProjectSessionActiveRunForRun(runId: string): void {
+    this.db
+      .prepare('UPDATE project_sessions SET active_run_id = NULL, updated_at = ? WHERE active_run_id = ?')
+      .run(nowIso(), runId)
+  }
+
+  /** Prior runs of one Build session, newest first. */
+  listProjectSessionRuns(sessionId: string, limit: number, excludeRunId?: string): RunRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runs
+          WHERE project_session_id = ? ${excludeRunId !== undefined ? 'AND id != ?' : ''}
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?`,
+      )
+      .all(
+        ...(excludeRunId !== undefined ? [sessionId, excludeRunId, limit] : [sessionId, limit]),
+      ) as Row[]
+    return rows.map(rowToRun)
+  }
+
   listShips(): ShipRecord[] {
     return (this.db.prepare('SELECT * FROM ships ORDER BY id').all() as Row[]).map(rowToShip)
   }
@@ -558,8 +651,8 @@ export class Store {
       .prepare(
         `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json, manager_ship_id,
                            budget_json, supervisor_pid, created_at, started_at, completed_at, final_summary,
-                           workspace_root, origin_session_id)
-         VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?)`,
+                           workspace_root, origin_session_id, project_session_id)
+         VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?)`,
       )
       .run(
         id,
@@ -573,6 +666,7 @@ export class Store {
         now,
         spec.workspaceRoot ?? null,
         spec.originSessionId ?? null,
+        spec.projectSessionId ?? null,
       )
     return this.getRun(id)
   }
@@ -2441,6 +2535,19 @@ function rowToProject(r: Row): ProjectRecord {
   }
 }
 
+function rowToProjectSession(r: Row): ProjectSessionRecord {
+  return {
+    id: str(r, 'id'),
+    projectId: str(r, 'project_id'),
+    workspaceRoot: str(r, 'workspace_root'),
+    activeRunId: nstr(r, 'active_run_id'),
+    buildCount: num(r, 'build_count'),
+    lastGoal: nstr(r, 'last_goal'),
+    createdAt: str(r, 'created_at'),
+    updatedAt: str(r, 'updated_at'),
+  }
+}
+
 function rowToShip(r: Row): ShipRecord {
   const role = str(r, 'role')
   const workspacePolicy = str(r, 'workspace_policy')
@@ -2492,6 +2599,7 @@ function rowToRun(r: Row): RunRecord {
     supervisorHeartbeatAt: nnum(r, 'supervisor_heartbeat_at'),
     workspaceRoot: nstr(r, 'workspace_root'),
     originSessionId: nstr(r, 'origin_session_id'),
+    projectSessionId: nstr(r, 'project_session_id'),
     createdAt: str(r, 'created_at'),
     startedAt: nstr(r, 'started_at'),
     completedAt: nstr(r, 'completed_at'),

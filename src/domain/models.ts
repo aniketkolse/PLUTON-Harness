@@ -72,6 +72,23 @@ export interface ProjectRecord {
   updatedAt: string
 }
 
+/**
+ * The durable anchor for successive Build runs in one project (PLUTON 4.1
+ * Phase 4). One row per project; `workspaceRoot` is the stable Build workspace
+ * and `buildCount` is the plan revision seen by the manager.
+ */
+export interface ProjectSessionRecord {
+  id: string
+  projectId: string
+  workspaceRoot: string
+  /** Informational anchor for the newest Build; run state is authoritative. */
+  activeRunId: string | null
+  buildCount: number
+  lastGoal: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ShipRecord {
   id: string
   projectId: string
@@ -118,6 +135,8 @@ export interface RunRecord {
   workspaceRoot: string | null
   /** Chat session that started this run, so background work stays bound to it. */
   originSessionId: string | null
+  /** Persistent Build session this run belongs to (NULL for legacy runs). */
+  projectSessionId: string | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null
