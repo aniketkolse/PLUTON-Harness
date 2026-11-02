@@ -36,6 +36,15 @@ import { mcpServe } from './commands/mcp.ts'
 import { resumeRun, runRun, type RunSummary } from './commands/run.ts'
 import { createShip, editShip, engineList, listShips, modelList, showShip } from './commands/ship.ts'
 import {
+  formatProjectCurrentHuman,
+  formatProjectListHuman,
+  projectAdd,
+  projectCurrent,
+  projectList,
+  projectRemove,
+  projectSwitch,
+} from './commands/project.ts'
+import {
   providerAdd,
   providerList,
   providerModels,
@@ -72,12 +81,15 @@ const program = new Command()
   .version(PLUTON_VERSION)
   .option('--json', 'machine-readable output: one JSON document on stdout (also via PLUTON_JSON=1)')
   .option('--config <path>', 'path to pluton.yaml (default: walk up from CWD)')
+  .option('--project <id>', 'target project ID, slug, or directory path (default: active project or CWD)')
 
-// Honor --config before commander parses argv so every subcommand sees it via PLUTON_ENV.
+// Honor --config and --project before commander parses argv so every subcommand sees it via PLUTON_*.
 for (let i = 0; i < process.argv.length; i++) {
   if (process.argv[i] === '--config' && i + 1 < process.argv.length) {
     process.env.PLUTON_CONFIG = process.argv[i + 1]
-    break
+  }
+  if (process.argv[i] === '--project' && i + 1 < process.argv.length) {
+    process.env.PLUTON_PROJECT = process.argv[i + 1]
   }
 }
 
@@ -325,6 +337,69 @@ program
         .filter((s) => s.length > 0)
         .join('\n')
       emitOk(io, json, human, result)
+    })
+  })
+
+// ---------------------------------------------------------------------------
+// project — manage registered projects and active project pointer
+// ---------------------------------------------------------------------------
+
+const projectCmd = program
+  .command('project')
+  .description('manage registered projects and active project pointer')
+
+projectCmd
+  .command('list')
+  .description('list registered Pluton projects with active and CWD markers')
+  .action(async (_opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const res = projectList(process.cwd(), { json })
+      emitOk(io, json, formatProjectListHuman(res), res)
+    })
+  })
+
+projectCmd
+  .command('switch <project>')
+  .description('switch the global active Pluton project')
+  .action(async (projectIdOrSlug: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const entry = projectSwitch(projectIdOrSlug)
+      emitOk(io, json, `Switched active project to '${entry.name}' (${entry.id})`, entry)
+    })
+  })
+
+projectCmd
+  .command('current')
+  .description('show the currently resolved project and resolution source')
+  .action(async (_opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const resolved = projectCurrent(process.cwd(), process.env.PLUTON_PROJECT)
+      emitOk(io, json, formatProjectCurrentHuman(resolved), resolved)
+    })
+  })
+
+projectCmd
+  .command('add <path>')
+  .description('register a directory containing pluton.yaml as a Pluton project')
+  .action(async (dirPath: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const entry = projectAdd(dirPath)
+      emitOk(io, json, `Registered project '${entry.name}' (${entry.id}) at ${entry.rootDir}`, entry)
+    })
+  })
+
+projectCmd
+  .command('remove <project>')
+  .description('remove a project from the registry (does not delete project files on disk)')
+  .action(async (projectIdOrSlug: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const res = projectRemove(projectIdOrSlug)
+      emitOk(io, json, `Removed project '${projectIdOrSlug}' from registry.`, res)
     })
   })
 
