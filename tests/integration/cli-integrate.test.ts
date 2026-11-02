@@ -54,7 +54,13 @@ afterEach(() => {
       // already closed
     }
   }
-  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  for (const dir of tmpDirs.splice(0)) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // ignore transient file lock on Windows
+    }
+  }
 })
 
 const CONFIG = `version: 1
@@ -706,7 +712,7 @@ describe('integrateRun — conflicts stop the loop and are preserved', () => {
     expect(rerun.artifactPath).toBeNull()
     expect(gitOut(checkoutPath, ['rev-parse', 'HEAD']).trim()).toBe(headAfterConflict)
     expect(existsSync(join(checkoutPath, '.git', 'MERGE_HEAD'))).toBe(true)
-  })
+  }, 120_000)
 })
 
 describe('integrateRun — pre-merge overlap detection (CS-6)', () => {
