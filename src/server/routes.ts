@@ -10,7 +10,7 @@ import type { Store } from '../store/store.ts'
 import { NotFoundError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
 import type { ApprovalRecord, ShipRecord, RunRecord } from '../domain/models.ts'
-import { stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
+import { loadConfig, stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
 import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
 import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
@@ -26,6 +26,16 @@ import type { ExecutionBridgeSpec } from '../execution/native.ts'
 import { GitWorkspaceManager } from '../workspace/manager.ts'
 import { diffWorktreePatch } from '../workspace/trusted-git.ts'
 import { PLUTON_VERSION } from '../version.ts'
+import {
+  providerAdd,
+  providerList,
+  providerRemove,
+  providerRemoveKey,
+  providerSetKey,
+  providerValidate,
+} from '../cli/commands/provider.ts'
+import { editShip } from '../cli/commands/ship.ts'
+import { getProvider, hasProviderCredential, listProviders } from '../providers/store.ts'
 import { safeResolvePath, protectedWorkspaceSegment } from './security.ts'
 import { buildRunActivity } from './activity.ts'
 import { pickNativeFolder } from './folder-picker.ts'
@@ -1025,12 +1035,16 @@ export class ApiRouter {
         const modelsByEngine: Record<string, unknown[]> = {}
         for (const engineKind of engineKinds) {
           const matchingShip = ships.find((m) => m.engineKind === engineKind)
+          const matchingShipConfig = matchingShip ? this.ctx.loaded?.config?.ships?.[matchingShip.id] : undefined
           const unavailableFor = (reason: string): unknown[] =>
             matchingShip
               ? [{ id: matchingShip.model, source: 'static', available: false, reason }]
               : []
           try {
-            const adapter = getEngineAdapter(engineKind)
+            const adapter = getEngineAdapter(engineKind, {
+              rootDir: this.ctx.loaded?.rootDir,
+              providerId: matchingShipConfig?.provider,
+            })
             let listed: unknown[]
             if (typeof adapter.listModelsWithAvailability === 'function') {
               listed = await adapter.listModelsWithAvailability()
@@ -1066,6 +1080,41 @@ export class ApiRouter {
                 : unavailableFor(err instanceof Error ? err.message : String(err))
           }
         }
+
+        const rootDir = this.ctx.loaded?.rootDir
+        const configuredProviders = rootDir ? listProviders(rootDir) : []
+        if (configuredProviders.length > 0) {
+          const providerModels: unknown[] = []
+          for (const prov of configuredProviders) {
+            try {
+              const adapter = getEngineAdapter(prov.engine, {
+                rootDir: this.ctx.loaded?.rootDir,
+                providerId: prov.id,
+              })
+              let listed: unknown[]
+              if (typeof adapter.listModelsWithAvailability === 'function') {
+                listed = await adapter.listModelsWithAvailability()
+              } else {
+                const models = await adapter.listModels()
+                listed = models.map((m) => ({ ...m, available: true }))
+              }
+              for (const item of (listed as Array<Record<string, unknown>>)) {
+                providerModels.push({
+                  ...item,
+                  provider: prov.id,
+                  providerName: prov.display_name,
+                  engine: prov.engine,
+                })
+              }
+            } catch {
+              // Stored provider may be offline or lacking key; continue
+            }
+          }
+          if (providerModels.length > 0) {
+            modelsByEngine['openai-compatible'] = providerModels
+          }
+        }
+
         if (this.customModels.length > 0) {
           modelsByEngine['custom'] = this.customModels.map((m) => ({ ...m, available: true }))
         }
@@ -1083,7 +1132,7 @@ export class ApiRouter {
       const modelMatch = pathname.match(/^\/api\/(?:ships|muses)\/([^/]+)\/model$/)
       if (modelMatch && method === 'POST') {
         const shipId = modelMatch[1]!
-        const payload = await this.readJsonBody<{ model?: string }>(req)
+        const payload = await this.readJsonBody<{ model?: string; provider?: string | null; engine?: string }>(req)
         const requested = payload.model?.trim()
         if (!requested) {
           this.sendJson(res, 400, { ok: false, error: 'model is required' })
@@ -1094,34 +1143,95 @@ export class ApiRouter {
           this.sendJson(res, 404, { ok: false, error: `ship '${shipId}' not found` })
           return true
         }
+
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        let targetProvider: string | undefined
+        let targetEngine = payload.engine?.trim() || ship.engineKind
+
+        if (payload.provider !== undefined && payload.provider !== null && payload.provider !== '') {
+          const provId = payload.provider.trim()
+          const providerRecord = getProvider(rootDir, provId)
+          if (!providerRecord) {
+            this.sendJson(res, 400, { ok: false, error: `unknown provider '${provId}'` })
+            return true
+          }
+          if (payload.engine && payload.engine !== providerRecord.engine) {
+            this.sendJson(res, 400, {
+              ok: false,
+              error: `provider '${provId}' targets engine '${providerRecord.engine}', not '${payload.engine}'`,
+            })
+            return true
+          }
+          targetProvider = provId
+          targetEngine = providerRecord.engine
+        } else if (payload.provider === null || payload.provider === '') {
+          targetProvider = undefined
+        } else {
+          targetProvider = this.ctx.loaded.config.ships?.[ship.id]?.provider
+        }
+
         try {
           const isCustom = this.customModels.some((m) => m.id === requested)
-          const adapter = this.adapterForShip(ship, this.ctx.loaded.rootDir)
+          const adapter = getEngineAdapter(targetEngine, {
+            rootDir,
+            providerId: targetProvider,
+          })
           if (!isCustom && adapter.capabilities().modelList) {
             const available = await adapter.listModels()
             const known = available.some((m) => m.id === requested || m.label === requested)
             if (!known && available.length > 0) {
               this.sendJson(res, 400, {
                 ok: false,
-                error: `model '${requested}' is not offered by engine '${ship.engineKind}'`,
+                error: `model '${requested}' is not offered by engine '${targetEngine}'`,
                 available: available.map((m) => m.id),
               })
               return true
             }
           }
-        } catch {
+        } catch (checkErr) {
+          if (checkErr instanceof PlutonError && checkErr.code === 'validation_failed') {
+            this.sendJson(res, 400, { ok: false, error: checkErr.message })
+            return true
+          }
           // If model check fails (e.g. offline/probe error), proceed with requested model
         }
+
+        if (this.ctx.loaded.config.ships?.[ship.id]) {
+          try {
+            editShip(
+              {
+                rootDir: this.ctx.loaded.rootDir,
+                configPath: this.ctx.loaded.configPath,
+                loaded: this.ctx.loaded,
+              },
+              ship.id,
+              {
+                model: requested,
+                provider: targetProvider,
+                engine: targetEngine,
+              },
+            )
+            this.ctx.loaded = loadConfig(rootDir)
+          } catch (editErr) {
+            if (editErr instanceof PlutonError) {
+              this.sendJson(res, 400, { ok: false, error: editErr.message })
+              return true
+            }
+            throw editErr
+          }
+        }
+
         // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
-        // Every Ship owns its model: changing one never rewrites another.
-        this.ctx.store.updateShipModel(ship.id, requested)
+        this.ctx.store.updateShipModel(ship.id, requested, targetEngine)
         const restarted = await this.restartEngineSessionForShip(ship.id, requested)
         this.sendJson(res, 200, {
           ok: true,
           shipId: ship.id,
           museId: ship.id,
           model: requested,
+          provider: targetProvider ?? null,
+          engine: targetEngine,
           engineSessionRestarted: restarted,
         })
         return true
@@ -1267,11 +1377,137 @@ export class ApiRouter {
         return true
       }
 
+      // 26. Provider Management
+      if (pathname === '/api/providers' && method === 'GET') {
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const providers = providerList(rootDir)
+        this.sendJson(res, 200, { ok: true, providers })
+        return true
+      }
+
+      if (pathname === '/api/providers' && method === 'POST') {
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const payload = await this.readJsonBody<{
+          id?: string
+          engine?: string
+          baseUrl?: string
+          displayName?: string
+          authStyle?: 'bearer' | 'header'
+          authHeader?: string
+          authPrefix?: string
+          modelsPath?: string
+          chatPath?: string
+          headers?: Record<string, string>
+          timeoutMs?: number
+          apiKey?: string
+        }>(req)
+
+        if (!payload || typeof payload !== 'object') {
+          throw new ValidationError('expected JSON object body')
+        }
+        if (!payload.id || typeof payload.id !== 'string') {
+          throw new ValidationError('missing or invalid provider id')
+        }
+        if (!payload.engine || typeof payload.engine !== 'string') {
+          throw new ValidationError('missing or invalid engine')
+        }
+        if (!payload.baseUrl || typeof payload.baseUrl !== 'string') {
+          throw new ValidationError('missing or invalid baseUrl')
+        }
+
+        let addResult: { provider: unknown }
+        try {
+          addResult = providerAdd(rootDir, {
+            id: payload.id,
+            engine: payload.engine,
+            displayName: payload.displayName,
+            baseUrl: payload.baseUrl,
+            authStyle: payload.authStyle,
+            authHeader: payload.authHeader,
+            authPrefix: payload.authPrefix,
+            modelsPath: payload.modelsPath,
+            chatPath: payload.chatPath,
+            headers: payload.headers,
+            timeoutMs: payload.timeoutMs,
+          })
+        } catch (err) {
+          if (err instanceof PlutonError) throw err
+          throw new ValidationError(err instanceof Error ? err.message : String(err))
+        }
+
+        if (payload.apiKey && typeof payload.apiKey === 'string') {
+          providerSetKey(rootDir, payload.id, payload.apiKey)
+        }
+
+        this.sendJson(res, 200, { ok: true, provider: addResult.provider })
+        return true
+      }
+
+      const providerKeyMatch = pathname.match(/^\/api\/providers\/([^/]+)\/key$/)
+      if (providerKeyMatch && method === 'POST') {
+        const providerId = decodeURIComponent(providerKeyMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const payload = await this.readJsonBody<{ apiKey?: string }>(req)
+        if (!payload?.apiKey || typeof payload.apiKey !== 'string') {
+          throw new ValidationError('missing or invalid apiKey')
+        }
+        const result = providerSetKey(rootDir, providerId, payload.apiKey)
+        this.sendJson(res, 200, { ok: true, configured: result.configured })
+        return true
+      }
+
+      if (providerKeyMatch && method === 'DELETE') {
+        const providerId = decodeURIComponent(providerKeyMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const result = providerRemoveKey(rootDir, providerId)
+        this.sendJson(res, 200, { ok: true, removed: result.removed })
+        return true
+      }
+
+      const providerValidateMatch = pathname.match(/^\/api\/providers\/([^/]+)\/validate$/)
+      if (providerValidateMatch && method === 'POST') {
+        const providerId = decodeURIComponent(providerValidateMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const report = await providerValidate(rootDir, providerId)
+        this.sendJson(res, 200, { ok: true, report })
+        return true
+      }
+
+      const providerItemMatch = pathname.match(/^\/api\/providers\/([^/]+)$/)
+      if (providerItemMatch && method === 'GET') {
+        const providerId = decodeURIComponent(providerItemMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const provider = getProvider(rootDir, providerId)
+        if (!provider) {
+          throw new NotFoundError('provider', providerId)
+        }
+        this.sendJson(res, 200, {
+          ok: true,
+          provider: {
+            ...provider,
+            hasCredential: hasProviderCredential(rootDir, providerId),
+          },
+        })
+        return true
+      }
+
+      if (providerItemMatch && method === 'DELETE') {
+        const providerId = decodeURIComponent(providerItemMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const result = providerRemove(rootDir, providerId)
+        this.sendJson(res, 200, { ok: true, removed: result.removed })
+        return true
+      }
+
       // Not found in API routes
       this.sendJson(res, 404, { ok: false, error: `API route '${pathname}' not found` })
       return true
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      if (err instanceof PlutonError && err.code === 'not_found') {
+        this.sendJson(res, 404, { ok: false, error: message })
+        return true
+      }
       // A refusal that means "someone else is driving" is a conflict, not a
       // server fault: the run-ownership claim refusal (`ConflictError`,
       // `request_conflict`) maps to 409 so a second client can tell the two
@@ -1602,6 +1838,7 @@ export class ApiRouter {
       })
       this.nativeProviders.set(workspaceRoot, provider)
     }
+    const shipConfig = this.ctx.loaded?.config?.ships?.[ship.id]
     return nativeAdapterFor(ship, {
       provider,
       isolatedCheckout: false,
@@ -1620,6 +1857,10 @@ export class ApiRouter {
             ? { bridge: this.executionBridgeEndpoint() }
             : {}),
         }),
+      engineOptions: {
+        rootDir: this.ctx.loaded?.rootDir,
+        providerId: shipConfig?.provider,
+      },
     })
   }
 

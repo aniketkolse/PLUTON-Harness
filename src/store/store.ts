@@ -450,9 +450,12 @@ export class Store {
     return row ? rowToShip(row) : null
   }
 
-  updateShipModel(id: string, model: string): void {
+  updateShipModel(id: string, model: string, engineKind?: string): void {
     const now = nowIso()
-    const res = this.db.prepare('UPDATE ships SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
+    const res =
+      engineKind !== undefined
+        ? this.db.prepare('UPDATE ships SET model = ?, engine_kind = ?, updated_at = ? WHERE id = ?').run(model, engineKind, now, id)
+        : this.db.prepare('UPDATE ships SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
     if (res.changes === 0) {
       throw new NotFoundError('ship', id)
     }
