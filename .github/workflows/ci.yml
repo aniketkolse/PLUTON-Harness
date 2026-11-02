@@ -39,6 +39,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Enable unprivileged user namespaces (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
+          if [ "$restrict" = "1" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          chmod 0755 native/landlock-run/landlock-run-linux-x64 || true
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -78,6 +88,15 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Enable unprivileged user namespaces (Linux)
+        run: |
+          set -euo pipefail
+          restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
+          if [ "$restrict" = "1" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          chmod 0755 native/landlock-run/landlock-run-linux-x64 || true
 
       - name: Run E2E tests
         run: npm run test:e2e

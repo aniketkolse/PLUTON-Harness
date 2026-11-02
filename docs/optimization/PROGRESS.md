@@ -166,7 +166,11 @@ All 8 batches (1–8) are `OPTIMIZED AND VERIFIED`. Release-ready subject to own
 #### Batch 5.1 — Cross-Platform CI `[OPTIMIZED AND VERIFIED]`
 - [x] GitHub Actions workflow (`.github/workflows/ci.yml`): Windows, macOS, Linux; Node.js 24
 - [x] CI workflow test (`tests/unit/ci-workflow.test.ts`, 5/5): triggers, permissions, matrix, E2E job
-- [x] CI not yet executed on GitHub runners (requires repository push)
+- [x] Investigated remote GitHub CI execution across runs `41420909486`, `41421399568`, `41421399732`
+- [x] Resolved test fixture defect `ERR-CI-001` in `tests/installation-upgrade.test.ts` (test 13 unmocked OpenCode binary discovery)
+- [x] Resolved Linux CI defect `ERR-CI-002` in `.github/workflows/ci.yml` (AppArmor unprivileged user namespace setup)
+- [x] Documented complete error inventory in `docs/optimization/25-GITHUB-CI-ERROR-AUDIT.md`
+- [x] Documented fix report and platform matrix in `docs/optimization/26-GITHUB-CI-FIX-REPORT.md`
 
 #### Batch 5.2 — Operator Experience `[OPTIMIZED AND VERIFIED]`
 - [x] `pluton doctor --init`: guided remediation for every failing check (`renderDoctorInit()`)

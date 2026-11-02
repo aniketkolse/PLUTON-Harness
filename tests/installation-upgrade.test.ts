@@ -33,7 +33,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { collectDoctorChecks } from '../src/cli/commands/doctor.ts'
 import { doctorExitCode } from '../src/cli/commands/doctor.ts'
 import { runInit } from '../src/cli/commands/init.ts'
@@ -42,6 +43,18 @@ import { run } from '../src/util/exec.ts'
 
 const repoRoot = resolve(process.cwd())
 const tmpDirs: string[] = []
+const FAKE_OPENCODE_BIN = fileURLToPath(new URL('./helpers/fake-opencode-cli.mjs', import.meta.url))
+let origOpenCodeBin: string | undefined
+
+beforeAll(() => {
+  origOpenCodeBin = process.env.PLUTON_OPENCODE_BIN
+  process.env.PLUTON_OPENCODE_BIN = FAKE_OPENCODE_BIN
+})
+
+afterAll(() => {
+  if (origOpenCodeBin !== undefined) process.env.PLUTON_OPENCODE_BIN = origOpenCodeBin
+  else delete process.env.PLUTON_OPENCODE_BIN
+})
 
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
