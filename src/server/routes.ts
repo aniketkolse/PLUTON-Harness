@@ -63,6 +63,9 @@ import { WorkerMessageBus } from '../orchestrator/messages.ts'
 import { WakeupRegistry } from '../orchestrator/wakeups.ts'
 import type { TaskGraph } from '../orchestrator/task-graph.ts'
 import { buildTaskDetail } from './task-detail.ts'
+import { ProjectContextPool, type ProjectContextItem } from './project-pool.ts'
+import { registerProject } from '../projects/registry.ts'
+import { slugify } from '../domain/ids.ts'
 import type {
   HealthResponse,
   McpServerStatus,
@@ -79,6 +82,8 @@ export interface RouteContext {
   broadcaster: ServerEventBroadcaster
   pickFolderFn?: typeof pickNativeFolder
   runner?: SessionRunner
+  projectPool?: ProjectContextPool
+  customHome?: string
 }
 
 /**
@@ -205,11 +210,94 @@ export class ApiRouter {
         return true
       }
 
-      // 2. Workspace Summary (optionally scoped to a session's workspace)
+      // Projects: list
+      if (method === 'GET' && pathname === '/api/projects') {
+        const pool = this.ctx.projectPool
+        const projects = pool
+          ? pool.listProjects()
+          : [
+              {
+                id: this.ctx.projectId,
+                name: this.ctx.loaded.config.project.name,
+                slug: slugify(this.ctx.loaded.config.project.name || this.ctx.projectId),
+                rootDir: this.ctx.loaded.rootDir,
+                configPath: this.ctx.loaded.configPath,
+                defaultBranch: this.ctx.loaded.config.project.default_branch,
+                registeredAt: new Date().toISOString(),
+                lastOpenedAt: new Date().toISOString(),
+                isActive: true,
+                activeRunsCount: 0,
+              },
+            ]
+        this.sendJson(res, 200, {
+          ok: true,
+          activeProjectId: pool ? pool.getDefaultProjectId() : this.ctx.projectId,
+          projects,
+        })
+        return true
+      }
+
+      // Projects: register from path
+      if (method === 'POST' && pathname === '/api/projects') {
+        const payload = await this.readJsonBody<{ path?: string }>(req)
+        if (!payload.path || typeof payload.path !== 'string') {
+          this.sendJson(res, 400, { ok: false, error: 'path is required' })
+          return true
+        }
+        const pool = this.ctx.projectPool
+        const registered = pool
+          ? pool.registerNewProject(payload.path)
+          : registerProject(payload.path, this.ctx.customHome)
+        this.sendJson(res, 200, { ok: true, project: registered })
+        return true
+      }
+
+      // Projects: current project context metadata
+      if (method === 'GET' && pathname === '/api/projects/current') {
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        this.sendJson(res, 200, {
+          ok: true,
+          project: {
+            id: targetProj.id,
+            name: targetProj.name,
+            rootDir: targetProj.rootDir,
+            configPath: targetProj.configPath,
+            defaultBranch: targetProj.loaded.config.project.default_branch,
+          },
+        })
+        return true
+      }
+
+      // Projects: switch client project context
+      if (method === 'POST' && pathname === '/api/projects/switch') {
+        const payload = await this.readJsonBody<{ projectId?: string }>(req)
+        if (!payload.projectId || typeof payload.projectId !== 'string') {
+          this.sendJson(res, 400, { ok: false, error: 'projectId is required' })
+          return true
+        }
+        const targetProj = this.getTargetProject(
+          req,
+          new URL(`http://localhost/?projectId=${encodeURIComponent(payload.projectId)}`),
+        )
+        this.sendJson(res, 200, {
+          ok: true,
+          activeProjectId: targetProj.id,
+          project: {
+            id: targetProj.id,
+            name: targetProj.name,
+            rootDir: targetProj.rootDir,
+            defaultBranch: targetProj.loaded.config.project.default_branch,
+          },
+        })
+        return true
+      }
+
+      // 2. Workspace Summary (optionally scoped to a session's workspace or project)
       if (method === 'GET' && pathname === '/api/workspace') {
-        const store = this.ctx.store
-        const project = store.getProject(this.ctx.projectId)
-        const ships = this.getStoreShips()
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const store = targetProj.store
+        const project = store.getProject(targetProj.id)
+        const ships = store.listShips?.() ?? store.listMuses?.() ?? []
         // syncShips disables (never deletes) rows that left pluton.yaml. A
         // disabled row still resolves for old sessions, but it is not part of
         // the current team and must not reappear as a configurable Settings or
@@ -221,17 +309,17 @@ export class ApiRouter {
         // matching a hand-written allowlist, which silently missed `active`
         // (the primary live state) and made a reload adopt a stale run.
         const activeRun = runs.find((r) => !isTerminalRunState(r.state)) ?? null
-        const approvals = store.listApprovalsByProject(this.ctx.projectId, { status: 'pending' })
+        const approvals = store.listApprovalsByProject(targetProj.id, { status: 'pending' })
 
         const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
         const sessionScoped = sessionId !== undefined && sessionId !== null
-        const resolved = sessionId ? this.sessionWorkspaceRoot(sessionId) : resolveWorkspaceRoot(this.ctx.loaded.rootDir)
-        const sessionRecord = sessionId ? this.ctx.store.getChatSessionOrNull(sessionId) : null
+        const resolved = sessionId ? this.sessionWorkspaceRoot(sessionId) : resolveWorkspaceRoot(targetProj.loaded.rootDir)
+        const sessionRecord = sessionId ? store.getChatSessionOrNull(sessionId) : null
         const summary: WorkspaceSummary = {
-          name: project?.name ?? this.ctx.loaded.config.project.name,
+          name: project?.name ?? targetProj.loaded.config.project.name,
           rootDir: resolved,
-          projectId: this.ctx.projectId,
-          defaultBranch: project?.defaultBranch ?? this.ctx.loaded.config.project.default_branch,
+          projectId: targetProj.id,
+          defaultBranch: project?.defaultBranch ?? targetProj.loaded.config.project.default_branch,
           ships: roster.map((m) => ({
             id: m.id,
             slug: m.slug,
@@ -277,10 +365,11 @@ export class ApiRouter {
         }
       }
 
-      // 2c. Workspace file list (session-scoped when sessionId supplied)
+      // 2c. Workspace file list (session-scoped when sessionId supplied, or project-scoped)
       if (method === 'GET' && pathname === '/api/files') {
+        const targetProj = this.getTargetProject(req, parsedUrl)
         const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
-        const rootDir = this.workspaceRootFor(sessionId ?? null)
+        const rootDir = this.workspaceRootFor(sessionId ?? null, targetProj)
         const files = this.listWorkspaceFiles(rootDir)
         this.sendJson(res, 200, { ok: true, files, rootDir })
         return true
@@ -293,7 +382,8 @@ export class ApiRouter {
           this.sendJson(res, 400, { ok: false, error: 'path query parameter is required' })
           return true
         }
-        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null)
+        const targetProj = this.getTargetProject(req, parsedUrl)
+        const rootDir = this.workspaceRootFor(parsedUrl.searchParams.get('sessionId') ?? null, targetProj)
         const resolved = this.resolveWorkspaceFile(rootDir, target)
         if (!resolved.ok) {
           this.sendJson(res, resolved.status, { ok: false, error: resolved.error })
@@ -1793,9 +1883,39 @@ export class ApiRouter {
     return resolveWorkspaceRoot(session.workspaceRoot)
   }
 
+  private getTargetProject(req: IncomingMessage, parsedUrl: URL): ProjectContextItem | {
+    id: string
+    name: string
+    rootDir: string
+    configPath: string
+    loaded: LoadedConfig
+    store: Store
+    broadcaster: ServerEventBroadcaster
+    logWatcher?: unknown
+  } {
+    const requested =
+      parsedUrl.searchParams.get('projectId') ??
+      parsedUrl.searchParams.get('project') ??
+      (req.headers['x-pluton-project'] as string | undefined)
+
+    if (this.ctx.projectPool) {
+      return this.ctx.projectPool.resolveContext(requested || this.ctx.projectId)
+    }
+
+    return {
+      id: this.ctx.projectId,
+      name: this.ctx.loaded.config.project.name,
+      rootDir: this.ctx.loaded.rootDir,
+      configPath: this.ctx.loaded.configPath,
+      loaded: this.ctx.loaded,
+      store: this.ctx.store,
+      broadcaster: this.ctx.broadcaster,
+    }
+  }
+
   /** Workspace for an optional session id: no id means the project root. */
-  private workspaceRootFor(sessionId: string | null): string {
-    if (sessionId === null) return resolveWorkspaceRoot(this.ctx.loaded.rootDir)
+  private workspaceRootFor(sessionId: string | null, targetProject?: { loaded: LoadedConfig }): string {
+    if (sessionId === null) return resolveWorkspaceRoot((targetProject ?? this.ctx).loaded.rootDir)
     return this.sessionWorkspaceRoot(sessionId)
   }
 

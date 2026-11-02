@@ -6,6 +6,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, posix, win32 } from 'node:path'
 import { request } from 'node:http'
+import { plutonHomeDir } from '../projects/registry.ts'
 import type { HealthResponse, ServerInstanceInfo } from './types.ts'
 
 export function serverRunDir(rootDir: string): string {
@@ -14,6 +15,14 @@ export function serverRunDir(rootDir: string): string {
 
 export function serverInstancePath(rootDir: string): string {
   return join(serverRunDir(rootDir), 'server.json')
+}
+
+export function globalServerRunDir(customHome?: string): string {
+  return join(plutonHomeDir(customHome), 'run')
+}
+
+export function globalServerInstancePath(customHome?: string): string {
+  return join(globalServerRunDir(customHome), 'server.json')
 }
 
 /**
@@ -73,20 +82,57 @@ export function releaseServerClaim(rootDir: string, force = false): void {
   }
 }
 
-export function writeServerInstance(rootDir: string, info: ServerInstanceInfo): void {
+export function writeServerInstance(rootDir: string, info: ServerInstanceInfo, customHome?: string): void {
   const dir = serverRunDir(rootDir)
   mkdirSync(dir, { recursive: true })
   writeFileSync(serverInstancePath(rootDir), JSON.stringify(info, null, 2), {
     encoding: 'utf8',
     mode: 0o600,
   })
+
+  // Mirror globally for cross-project server discovery
+  try {
+    const globalDir = globalServerRunDir(customHome)
+    mkdirSync(globalDir, { recursive: true })
+    writeFileSync(globalServerInstancePath(customHome), JSON.stringify(info, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+  } catch {
+    // Non-fatal if global home is read-only
+  }
 }
 
-export function readServerInstance(rootDir: string): ServerInstanceInfo | null {
-  const file = serverInstancePath(rootDir)
-  if (!existsSync(file)) return null
+export function readServerInstance(rootDir?: string): ServerInstanceInfo | null {
+  if (rootDir) {
+    const file = serverInstancePath(rootDir)
+    if (!existsSync(file)) return null
+    try {
+      const raw = readFileSync(file, 'utf8')
+      const parsed = JSON.parse(raw) as Partial<ServerInstanceInfo>
+      if (
+        typeof parsed.pid === 'number' &&
+        typeof parsed.port === 'number' &&
+        typeof parsed.token === 'string' &&
+        typeof parsed.url === 'string' &&
+        typeof parsed.rootDir === 'string'
+      ) {
+        return parsed as ServerInstanceInfo
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  return readGlobalServerInstance()
+}
+
+export function readGlobalServerInstance(customHome?: string): ServerInstanceInfo | null {
+  const globalFile = globalServerInstancePath(customHome)
+  if (!existsSync(globalFile)) return null
   try {
-    const raw = readFileSync(file, 'utf8')
+    const raw = readFileSync(globalFile, 'utf8')
     const parsed = JSON.parse(raw) as Partial<ServerInstanceInfo>
     if (
       typeof parsed.pid === 'number' &&
@@ -103,11 +149,20 @@ export function readServerInstance(rootDir: string): ServerInstanceInfo | null {
   }
 }
 
-export function clearServerInstance(rootDir: string): void {
+export function clearServerInstance(rootDir: string, customHome?: string): void {
   const file = serverInstancePath(rootDir)
   if (existsSync(file)) {
     try {
       unlinkSync(file)
+    } catch {
+      // Ignore cleanup error
+    }
+  }
+
+  const globalFile = globalServerInstancePath(customHome)
+  if (existsSync(globalFile)) {
+    try {
+      unlinkSync(globalFile)
     } catch {
       // Ignore cleanup error
     }

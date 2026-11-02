@@ -12,6 +12,7 @@ import { InternalError } from '../domain/errors.ts'
 import { ServerEventBroadcaster } from './events.ts'
 import { clearServerInstance, writeServerInstance } from './instance.ts'
 import { ServerLogWatcher } from './log-watcher.ts'
+import { ProjectContextPool } from './project-pool.ts'
 import { ApiRouter, type RouteContext } from './routes.ts'
 import {
   generateServerToken,
@@ -35,6 +36,8 @@ export interface AppServerOptions {
   logWatcherIntervalMs?: number
   /** Test seam: replaces native folder picker. */
   pickFolderFn?: RouteContext['pickFolderFn']
+  /** Custom home directory for Pluton settings and project registry */
+  customHome?: string
 }
 
 export interface AppServerInstance {
@@ -44,25 +47,31 @@ export interface AppServerInstance {
   url: string
   info: ServerInstanceInfo
   broadcaster: ServerEventBroadcaster
+  projectPool: ProjectContextPool
   router: ApiRouter
   close: () => Promise<void>
 }
 
 export async function startAppServer(options: AppServerOptions): Promise<AppServerInstance> {
   const token = options.token ?? generateServerToken()
-  const broadcaster = new ServerEventBroadcaster(15000, options.store, options.projectId)
+  const projectPool = new ProjectContextPool({
+    initialStore: options.store,
+    initialProjectId: options.projectId,
+    initialLoaded: options.loaded,
+    customHome: options.customHome,
+    logWatcherIntervalMs: options.logWatcherIntervalMs,
+    pickFolderFn: options.pickFolderFn,
+  })
+  const initialProject = projectPool.resolveContext(options.projectId)
+  const broadcaster = initialProject.broadcaster
   const router = new ApiRouter({
     store: options.store,
     projectId: options.projectId,
     loaded: options.loaded,
     broadcaster,
+    projectPool,
+    customHome: options.customHome,
     ...(options.pickFolderFn !== undefined ? { pickFolderFn: options.pickFolderFn } : {}),
-  })
-  const logWatcher = new ServerLogWatcher({
-    store: options.store,
-    projectId: options.projectId,
-    broadcaster,
-    ...(options.logWatcherIntervalMs !== undefined ? { pollIntervalMs: options.logWatcherIntervalMs } : {}),
   })
 
   let boundPort = options.port ?? 0
@@ -112,7 +121,9 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
 
     // 5. Server-Sent Events stream
     if (req.method === 'GET' && pathname === '/api/events') {
-      broadcaster.addClient(res)
+      const targetProjectId = parsedUrl.searchParams.get('projectId') ?? parsedUrl.searchParams.get('project')
+      const target = projectPool.resolveContext(targetProjectId || options.projectId)
+      target.broadcaster.addClient(res)
       return
     }
 
@@ -175,17 +186,13 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
   }
 
   // Register running instance for discovery
-  writeServerInstance(options.loaded.rootDir, info)
+  writeServerInstance(options.loaded.rootDir, info, options.customHome)
 
   const cleanup = (): void => {
-    clearServerInstance(options.loaded.rootDir)
+    clearServerInstance(options.loaded.rootDir, options.customHome)
   }
 
   process.once('exit', cleanup)
-
-  // Tail the durable event log from here on (unref'd timer) and turn new
-  // run./task. events into live SSE frames for connected clients.
-  logWatcher.start()
 
   let isClosing = false
   const close = async (): Promise<void> => {
@@ -193,9 +200,9 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     isClosing = true
     process.removeListener('exit', cleanup)
     cleanup()
-    logWatcher.stop()
-    broadcaster.close()
     await router.close()
+    await projectPool.close()
+    broadcaster.close()
     await new Promise<void>((resolveClose) => {
       server.close(() => {
         resolveClose()
@@ -210,6 +217,7 @@ export async function startAppServer(options: AppServerOptions): Promise<AppServ
     url,
     info,
     broadcaster,
+    projectPool,
     router,
     close,
   }
