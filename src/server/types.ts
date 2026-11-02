@@ -59,6 +59,14 @@ export interface WorkspaceSummary {
   sessionId?: string | null
   workspaceRoot?: string | null
   sessionScoped?: boolean
+  /** Durable Build anchor; null until the first Build runs in this project. */
+  projectSession?: {
+    id: string
+    workspaceRoot: string
+    buildCount: number
+    activeRunId: string | null
+    lastGoal: string | null
+  } | null
 }
 
 export interface SessionDetailView {

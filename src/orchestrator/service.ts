@@ -511,11 +511,18 @@ export function startRunInBackground(
   const runtime = ctx.loaded.config.runtime
   const budget = runBudgetFromRuntime(runtime)
 
-  const effectiveCtx: ProjectContext = opts.workspaceRoot && opts.workspaceRoot !== ctx.rootDir
-    ? { ...ctx, rootDir: opts.workspaceRoot }
+  // Successive runs in one project are Builds of one persistent session: the
+  // first explicit (or project root) workspace establishes it, and later runs
+  // that omit the parameter continue that workspace instead of guessing.
+  const requestedRoot = opts.workspaceRoot ?? null
+  const session = store.ensureProjectSession(projectId, requestedRoot ?? ctx.rootDir)
+  const workspaceRoot = requestedRoot ?? session.workspaceRoot
+
+  const effectiveCtx: ProjectContext = workspaceRoot !== ctx.rootDir
+    ? { ...ctx, rootDir: workspaceRoot }
     : ctx
 
-  const extraRoots = collectRunExtraRoots(effectiveCtx, [ctx.rootDir, opts.workspaceRoot])
+  const extraRoots = collectRunExtraRoots(effectiveCtx, [ctx.rootDir, workspaceRoot])
   const native = createRunNativeProvider(effectiveCtx, store, projectId, extraRoots)
 
   const payload: JsonValue = {
@@ -524,8 +531,8 @@ export function startRunInBackground(
     managerShipId: manager.id,
     budget: { ...budget },
   }
-  const createRun = (): RunRecord =>
-    store.createRun({
+  const createRun = (): RunRecord => {
+    const created = store.createRun({
       projectId,
       goal,
       origin: 'cli',
@@ -533,9 +540,13 @@ export function startRunInBackground(
       acceptanceCriteria: opts.acceptance,
       managerShipId: manager.id,
       budget,
-      workspaceRoot: opts.workspaceRoot ?? ctx.rootDir,
+      workspaceRoot,
       originSessionId: opts.originSessionId,
+      projectSessionId: session.id,
     })
+    store.recordProjectBuild(projectId, { runId: created.id, goal })
+    return created
+  }
 
   let run: RunRecord
   let duplicate = false
@@ -577,6 +588,16 @@ export function startRunInBackground(
     }
   }
   native.setRunId(run.id)
+  store.appendEvent({
+    projectId,
+    runId: run.id,
+    type: 'run.project_session_attached',
+    payload: {
+      projectSessionId: session.id,
+      buildCount: store.getProjectSession(projectId)?.buildCount ?? 0,
+      priorRunIds: store.listProjectSessionRuns(session.id, 10, run.id).map((prior) => prior.id),
+    },
+  })
 
   const done = (async (): Promise<RunSummary> => {
     try {
@@ -647,8 +668,15 @@ export async function runRun(
     const runtime = ctx.loaded.config.runtime
     const budget = runBudgetFromRuntime(runtime)
 
-    const extraRoots = collectRunExtraRoots(ctx)
-    native = createRunNativeProvider(ctx, store, projectId, extraRoots)
+    // CLI runs join the same persistent project session as graphical Builds.
+    const session = store.ensureProjectSession(projectId, ctx.rootDir)
+    const workspaceRoot = session.workspaceRoot
+    const effectiveCtx: ProjectContext = workspaceRoot !== ctx.rootDir
+      ? { ...ctx, rootDir: workspaceRoot }
+      : ctx
+
+    const extraRoots = collectRunExtraRoots(effectiveCtx, [ctx.rootDir, workspaceRoot])
+    native = createRunNativeProvider(effectiveCtx, store, projectId, extraRoots)
 
     const payload: JsonValue = {
       goal,
@@ -656,8 +684,8 @@ export async function runRun(
       managerShipId: manager.id,
       budget: { ...budget },
     }
-    const createRun = (): RunRecord =>
-      store.createRun({
+    const createRun = (): RunRecord => {
+      const created = store.createRun({
         projectId,
         goal,
         origin: 'cli',
@@ -665,8 +693,12 @@ export async function runRun(
         acceptanceCriteria: opts.acceptance,
         managerShipId: manager.id,
         budget,
-        workspaceRoot: ctx.rootDir,
+        workspaceRoot,
+        projectSessionId: session.id,
       })
+      store.recordProjectBuild(projectId, { runId: created.id, goal })
+      return created
+    }
 
     let run: RunRecord
     let duplicate = false
@@ -699,6 +731,16 @@ export async function runRun(
       return summaryFromRecords(store, run)
     }
     native.setRunId(run.id)
+    store.appendEvent({
+      projectId,
+      runId: run.id,
+      type: 'run.project_session_attached',
+      payload: {
+        projectSessionId: session.id,
+        buildCount: store.getProjectSession(projectId)?.buildCount ?? 0,
+        priorRunIds: store.listProjectSessionRuns(session.id, 10, run.id).map((prior) => prior.id),
+      },
+    })
 
     const limits = toolBridgeLimitsFromRuntime(runtime)
     const wakeups = new WakeupRegistry()
@@ -711,7 +753,7 @@ export async function runRun(
     const bridgeUrl = `${http.url as string}mcp`
     try {
       const supervisor = createRunSupervisor({
-        ctx,
+        ctx: effectiveCtx,
         store,
         projectId,
         run,

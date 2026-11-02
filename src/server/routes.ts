@@ -65,6 +65,7 @@ import type { TaskGraph } from '../orchestrator/task-graph.ts'
 import { buildTaskDetail } from './task-detail.ts'
 import { ProjectContextPool, type ProjectContextItem } from './project-pool.ts'
 import { registerProject } from '../projects/registry.ts'
+import { renameProjectIdentity } from '../projects/rename.ts'
 import { slugify } from '../domain/ids.ts'
 import type {
   HealthResponse,
@@ -253,6 +254,26 @@ export class ApiRouter {
         return true
       }
 
+      // Projects: rename display identity (never the filesystem path)
+      const projectRenameMatch = pathname.match(/^\/api\/projects\/([^/]+)$/)
+      if (method === 'PATCH' && projectRenameMatch) {
+        const projectRef = decodeURIComponent(projectRenameMatch[1]!)
+        const payload = await this.readJsonBody<{ name?: string }>(req)
+        if (typeof payload.name !== 'string' || payload.name.trim() === '') {
+          this.sendJson(res, 400, { ok: false, error: 'name is required' })
+          return true
+        }
+        const pool = this.ctx.projectPool
+        const entry = pool
+          ? pool.renameProject(projectRef, payload.name)
+          : renameProjectIdentity(this.ctx.loaded.rootDir, payload.name, this.ctx.customHome)
+        if (entry.id === this.ctx.projectId) {
+          this.ctx.loaded = loadConfig(entry.rootDir)
+        }
+        this.sendJson(res, 200, { ok: true, project: entry })
+        return true
+      }
+
       // Projects: current project context metadata
       if (method === 'GET' && pathname === '/api/projects/current') {
         const targetProj = this.getTargetProject(req, parsedUrl)
@@ -314,7 +335,12 @@ export class ApiRouter {
 
         const sessionId = parsedUrl.searchParams.get('sessionId') ?? undefined
         const sessionScoped = sessionId !== undefined && sessionId !== null
-        const resolved = sessionId ? this.sessionWorkspaceRoot(sessionId) : resolveWorkspaceRoot(targetProj.loaded.rootDir)
+        const projectSession = store.getProjectSession(targetProj.id)
+        // Without a chat-session override the project's persistent Build
+        // workspace is the truthful root: that is where later builds run.
+        const resolved = sessionId
+          ? this.sessionWorkspaceRoot(sessionId)
+          : projectSession?.workspaceRoot ?? resolveWorkspaceRoot(targetProj.loaded.rootDir)
         const sessionRecord = sessionId ? store.getChatSessionOrNull(sessionId) : null
         const summary: WorkspaceSummary = {
           name: project?.name ?? targetProj.loaded.config.project.name,
@@ -344,6 +370,15 @@ export class ApiRouter {
           sessionId: sessionScoped ? sessionId ?? null : (sessionRecord?.id ?? null),
           workspaceRoot: sessionScoped ? sessionRecord?.workspaceRoot ?? null : null,
           sessionScoped,
+          projectSession: projectSession === null
+            ? null
+            : {
+                id: projectSession.id,
+                workspaceRoot: projectSession.workspaceRoot,
+                buildCount: projectSession.buildCount,
+                activeRunId: projectSession.activeRunId,
+                lastGoal: projectSession.lastGoal,
+              },
         }
         this.sendJson(res, 200, { ok: true, workspace: summary })
         return true
@@ -647,6 +682,7 @@ export class ApiRouter {
             sessionId?: string
             workspaceRoot?: string
             projectId?: string
+            projectName?: string
           }>(req)
           const targetProj = this.getTargetProject(
             req,
@@ -659,42 +695,73 @@ export class ApiRouter {
             this.sendJson(res, 400, { ok: false, error: 'goal is required' })
             return true
           }
+          // The first Build may name the project; later Builds omit the field.
+          // Rename writes the YAML, SQLite and registry together before the run
+          // is created, and never moves the workspace.
+          const requestedName = typeof payload.projectName === 'string' ? payload.projectName.trim() : ''
+          if (requestedName !== '') {
+            if (this.ctx.projectPool) {
+              this.ctx.projectPool.renameProject(targetProj.id, requestedName)
+            } else {
+              const renamed = renameProjectIdentity(targetProj.rootDir, requestedName, this.ctx.customHome)
+              if (renamed.id === this.ctx.projectId) this.ctx.loaded = loadConfig(renamed.rootDir)
+            }
+          }
           const ships = targetProj.store.listShips?.() ?? targetProj.store.listMuses?.() ?? []
           const manager = ships.find((m) => m.role === 'supervisor') ?? ships[0]
           if (!manager) {
             this.sendJson(res, 400, { ok: false, error: 'no manager ship configured' })
             return true
           }
-          let workspaceRoot: string
+          // An explicit per-run workspace is honored for this run only; the
+          // persistent session keeps the workspace established by the first
+          // Build. Omitted means "continue where this project already builds".
+          let requestedRoot: string | null = null
           try {
-            workspaceRoot = payload.workspaceRoot
+            requestedRoot = payload.workspaceRoot
               ? resolveWorkspaceRoot(payload.workspaceRoot)
               : payload.sessionId
                 ? this.workspaceRootFor(payload.sessionId, targetProj)
-                : resolveWorkspaceRoot(targetProj.loaded.rootDir)
+                : null
+            const session = targetProj.store.ensureProjectSession(
+              targetProj.id,
+              requestedRoot ?? resolveWorkspaceRoot(targetProj.loaded.rootDir),
+            )
+            const workspaceRoot = requestedRoot ?? session.workspaceRoot
+            const run = targetProj.store.createRun({
+              projectId: targetProj.id,
+              goal,
+              origin: 'api',
+              requestedBy: 'operator:ui',
+              managerShipId: payload.managerShipId ?? payload.managerMuseId ?? manager.id,
+              acceptanceCriteria: ['Task executed via graphical workspace'],
+              budget: {
+                maxConcurrentWorkers: 3,
+                maxTasks: 20,
+                maxDelegationDepth: 3,
+                maxRunMinutes: 60,
+                defaultTaskMinutes: 10,
+              },
+              workspaceRoot,
+              originSessionId: payload.sessionId ?? null,
+              projectSessionId: session.id,
+            })
+            const projectSession = targetProj.store.recordProjectBuild(targetProj.id, { runId: run.id, goal })
+            const priorRunIds = targetProj.store
+              .listProjectSessionRuns(session.id, 10, run.id)
+              .map((prior) => prior.id)
+            targetProj.store.appendEvent({
+              projectId: targetProj.id,
+              runId: run.id,
+              type: 'run.project_session_attached',
+              payload: { projectSessionId: session.id, buildCount: projectSession.buildCount, priorRunIds },
+            })
+            this.sendJson(res, 201, { ok: true, run, projectSession })
+            return true
           } catch (err) {
             this.sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : 'invalid workspace' })
             return true
           }
-          const run = targetProj.store.createRun({
-            projectId: targetProj.id,
-            goal,
-            origin: 'api',
-            requestedBy: 'operator:ui',
-            managerShipId: payload.managerShipId ?? payload.managerMuseId ?? manager.id,
-            acceptanceCriteria: ['Task executed via graphical workspace'],
-            budget: {
-              maxConcurrentWorkers: 3,
-              maxTasks: 20,
-              maxDelegationDepth: 3,
-              maxRunMinutes: 60,
-              defaultTaskMinutes: 10,
-            },
-            workspaceRoot,
-            originSessionId: payload.sessionId ?? null,
-          })
-          this.sendJson(res, 201, { ok: true, run })
-          return true
         }
       }
 
