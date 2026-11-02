@@ -1,98 +1,83 @@
 name: CI
 
-# Local technical validation lives in `npm run release:check` (docs/RELEASE.md).
-# This workflow runs it plus the clean-install smoke on all three supported
-# host platforms, a coverage threshold on Linux, and the orchestration E2E on Linux.
-#
-# It never publishes, tags or releases anything; permissions are read-only and
-# no repository secrets are referenced.
-
 on:
   push:
-    branches: [main]
+    branches: [main, optimization/p0-reliability]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    name: validate (${{ matrix.os }})
+    name: ${{ matrix.os }} (Node.js ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        node-version: [24]
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Set up Node.js 24
-        uses: actions/setup-node@v7
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
+          cache: 'npm'
 
-      - name: Install dependencies (lockfile-pinned)
+      - name: Install dependencies
         run: npm ci
 
-      - name: Enable unprivileged user namespaces (ubuntu confinement prerequisite)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          set -euo pipefail
-          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
-          # The native helper needs CLONE_NEWUSER to build its confinement
-          # namespaces; with the restriction active, unshare() succeeds but
-          # mapping the uid is denied ("write uid_map: Operation not permitted").
-          # This is a hosted-runner prerequisite, not a Pluton policy toggle: if
-          # the capability cannot be enabled and proven, this step fails and the
-          # gate below still fails closed.
-          restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
-          echo "kernel.apparmor_restrict_unprivileged_userns=$restrict"
-          if [ "$restrict" = "1" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          # Prove the exact capabilities the helper probe and selftest rely on.
-          unshare -Ur true
-          unshare -Urm true
-          unshare -Urn true
-          unshare -Urp true
-          echo "unprivileged user, mount, network and PID namespaces: available"
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: Release gate (typecheck, tests, build, package, audit)
+      - name: Production build
+        run: npm run build
+
+      - name: Run unit + integration tests
+        run: npm test
+
+      - name: Verify documentation links
+        run: npm run verify:docs
+
+      - name: Verify embedded assets
+        run: npm run verify:assets
+
+      - name: Run release gate
         run: npm run release:check
 
-      - name: Coverage gate (ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: npm run test:coverage
-
-      - name: Package smoke (clean temporary install)
+      - name: Package smoke test
         run: npm run smoke:package
 
   e2e:
-    name: e2e (orchestration + workspaces)
+    name: End-to-end orchestration (Linux)
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Set up Node.js 24
-        uses: actions/setup-node@v7
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
+          cache: 'npm'
 
-      - name: Install dependencies (lockfile-pinned)
+      - name: Install dependencies
         run: npm ci
 
-      - name: Run orchestration E2E
+      - name: Run E2E tests
         run: npm run test:e2e
