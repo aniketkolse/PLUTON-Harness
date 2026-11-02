@@ -3,9 +3,9 @@
 **Date:** 2026-11-02  
 **Milestone:** PLUTON 4.0 — Pre-Release Verification & Stability Gate  
 **Branch:** `optimization/p0-reliability`  
-**Release Candidate Commit:** `9a32bfd` (PLUTON Phase 4 Batch 6: MCP Ecosystem Maturity)  
-**Working Tree:** Dirty (uncommitted Phase 4 & Phase 5 changes)  
-**Status:** READY WITH BLOCKERS  
+**Release Candidate Commit:** `0b1948c` (docs: Phase 4 & Phase 5 audits, regression reports, and release checklist)  
+**Working Tree:** Clean (Phase 4 & Phase 5 committed across 7 granular commits, pushed to remote)  
+**Status:** READY — AWAITING CI RESULTS & PUBLICATION AUTHORIZATION  
 
 ---
 
@@ -16,7 +16,8 @@
 | Version | 0.1.0 |
 | Package name | pluton-harness |
 | Branch | optimization/p0-reliability |
-| Base commit | 9a32bfd |
+| Commit | 0b1948c |
+| Remote status | Up to date with origin/optimization/p0-reliability |
 | Node.js requirement | >=24.0.0 |
 | License | Apache-2.0 |
 
@@ -28,10 +29,10 @@
 | :--- | :--- | :--- |
 | `npm run typecheck` | PASS | 0 TypeScript errors |
 | `npm run build` | PASS | 0 errors |
-| `npm test` | PASS | 169 files, 1570 passed, 10 skipped |
-| `npm run verify:docs` | PASS | 108 files, 48 links, 0 broken |
+| `npm test` | PASS | 169 files, 1572 passed, 10 skipped |
+| `npm run verify:docs` | PASS | 109 files, 48 links, 0 broken |
 | `npm run verify:assets` | PASS | 60 checks |
-| `npm run release:check -- --allow-dirty` | PASS | 16/16, 1 not tested, 0 failed |
+| `npm run release:check` (clean tree) | PASS | 16/16 passed, 1 not tested, 0 failed, 0 blockers; PUBLICATION: ELIGIBLE |
 
 **Skipped tests (10):** Platform-guarded POSIX/Linux tests on Windows host.
 
@@ -43,11 +44,11 @@
 
 | Platform | Status | Evidence |
 | :--- | :--- | :--- |
-| Windows (windows-latest) | BLOCKED | CI workflow defined in `.github/workflows/ci.yml`, not yet executed on GitHub runners |
-| macOS (macos-latest) | BLOCKED | CI workflow defined, not yet executed |
-| Linux (ubuntu-latest) | BLOCKED | CI workflow defined, not yet executed |
+| Windows (windows-latest) | TRIGGERED | Pushed to origin/optimization/p0-reliability; awaiting runner results |
+| macOS (macos-latest) | TRIGGERED | Pushed to origin/optimization/p0-reliability; awaiting runner results |
+| Linux (ubuntu-latest) | TRIGGERED | Pushed to origin/optimization/p0-reliability; awaiting runner results |
 
-**Blocker reason:** CI workflow has not been triggered because repository changes have not been pushed to GitHub. Per constraints, no push without explicit authorization. Cross-platform verification cannot be claimed until CI runs on actual runners.
+**Remote status:** Commits `9b1130b` through `0b1948c` pushed to GitHub with owner authorization. Workflow `.github/workflows/ci.yml` triggers on push. Cross-platform verification recorded once remote runners complete.
 
 **CI workflow configuration:**
 - Matrix: windows-latest, macos-latest, ubuntu-latest × Node.js 24
@@ -155,12 +156,12 @@ const suppressedId =
 
 ## 10. Required Owner Approvals
 
-| # | Approval | Rationale |
-| :--- | :--- | :--- |
-| 1 | **Push repository changes** | Working tree is dirty with Phase 4 & 5 changes. Push required to trigger CI on GitHub runners. |
-| 2 | **First public npm publish** | `package.json` has no `private` flag. `release:check` reports "PUBLICATION: BLOCKED — --allow-dirty override in effect". Publish requires clean commit tree + owner authorization. |
-| 3 | **CI execution on macOS/Linux** | Cross-platform verification requires actual CI runner execution. Cannot be claimed from Windows host alone. |
-| 4 | **POSIX permission check** | Release check 11 is "NOT TESTED" on Windows. Requires Linux/macOS CI job to verify 0600 file permissions. |
+| # | Approval | Status | Rationale |
+| :--- | :--- | :--- | :--- |
+| 1 | **Push repository changes** | COMPLETE | 7 granular commits pushed to origin/optimization/p0-reliability |
+| 2 | **First public npm publish** | PENDING | Package is eligible (checks pass); requires owner decision to publish |
+| 3 | **CI execution on macOS/Linux** | IN PROGRESS | Pushed; awaiting runner results |
+| 4 | **POSIX permission check** | IN PROGRESS | Verified via Linux/macOS CI runner job |
 
 ---
 
@@ -168,31 +169,30 @@ const suppressedId =
 
 | Criterion | Status |
 | :--- | :--- |
-| Working tree understood | PASS — dirty with documented Phase 4/5 changes |
-| Release candidate identified | PASS — commit 9a32bfd + uncommitted changes |
-| Cross-platform CI actually passed | BLOCKED — not yet executed on GitHub runners |
+| Working tree understood | PASS — clean; all Phase 4 & 5 changes committed in 7 granular commits |
+| Release candidate identified | PASS — commit 0b1948c (tracked by origin) |
+| Cross-platform CI actually passed | PENDING — CI triggered on GitHub runners |
 | Flaky test resolved | PASS — duplicate-intent suppression test fixed, 10/10 runs |
 | Clean package installation | PASS — version, init, doctor all verified |
-| Release checks pass | PASS — 16/16, 1 not tested (POSIX on Windows) |
+| Release checks pass | PASS — 16/16 passed, 1 not tested (POSIX on Windows), 0 blockers |
 | No P0/P1 defects | PASS — none identified |
 | Reliability guarantees preserved | PASS — all Phase 4/5 guarantees intact |
 
-**Overall: READY WITH BLOCKERS**
+**Overall: READY — AWAITING CI RESULTS & PUBLICATION DECISION**
 
-The release candidate is technically sound but cannot be declared fully READY until:
-1. Repository changes are pushed to trigger CI on GitHub runners (owner authorization required)
-2. CI passes on Windows, macOS, and Linux
-3. Clean commit tree is established for publication
+The release candidate is technically verified and publication-eligible:
+1. Repository changes are committed and pushed to `optimization/p0-reliability`
+2. Local release gate reports `TECHNICAL VALIDATION: PASS` and `PUBLICATION: ELIGIBLE`
+3. CI workflow is triggered across Windows, macOS, and Linux runners
+4. Clean package smoke test passes (4.27 MB package, 0 production vulnerabilities)
 
 ---
 
-## 12. Exact Actions Requiring Owner Authorization
+## 12. Remaining Actions for Owner Decision
 
-1. **Push changes to `optimization/p0-reliability` branch** — enables CI execution on GitHub runners
-2. **Review CI results** on Windows, macOS, and Linux
-3. **Establish clean commit tree** — commit Phase 4 & 5 changes
-4. **Re-run `release:check` without `--allow-dirty`** — on clean tree
-5. **Authorize first npm publish** — `npm publish` (package is not `private`)
-6. **Create release tag** — `git tag v0.1.0`
+1. **Review remote CI results** on Windows, macOS, and Linux
+2. **Authorize first npm publish** — `npm publish` (when ready)
+3. **Merge branch to `main`** — `git checkout main && git merge optimization/p0-reliability`
+4. **Create release tag** — `git tag v0.1.0`
 
 ---
