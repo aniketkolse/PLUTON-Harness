@@ -494,6 +494,95 @@ export function buildTaskRecoveryPrompt(
   return `${text.slice(0, maxChars)}\n[truncated by Pluton: recovery prompt exceeded max_prompt_chars]`
 }
 
+/** One prior Build as the manager needs to see it: durable, bounded facts. */
+export interface BuildLineageTask {
+  title: string
+  state: string
+}
+
+export interface BuildLineageEntry {
+  runId: string
+  goal: string
+  state: string
+  summary?: string | null
+  tasks: readonly BuildLineageTask[]
+}
+
+export interface BuildLineageInput {
+  buildNumber: number
+  workspaceRoot: string
+  priorBuilds: readonly BuildLineageEntry[]
+  maxChars?: number
+}
+
+/** Default cap for the refinement section injected into the manager prompt. */
+export const BUILD_LINEAGE_MAX_CHARS = 2_500
+
+function lineageLine(value: string): string {
+  return stripControlChars(value).replace(/\s+/g, ' ').trim()
+}
+
+function lineageClip(value: string, max: number): string {
+  const text = lineageLine(value)
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
+}
+
+/**
+ * Build the persistent-Build refinement section for the manager prompt.
+ *
+ * Pure and bounded so the same evidence can be unit-tested without an engine.
+ * "Unfinished" means a non-terminal task; completed work is named only in the
+ * histogram so the manager is told to reuse it, never to recreate it.
+ */
+export function buildBuildLineageSection(input: BuildLineageInput): string {
+  const maxChars = input.maxChars ?? BUILD_LINEAGE_MAX_CHARS
+  const lines: string[] = [
+    `Persistent Build session (build ${input.buildNumber}, workspace ${lineageLine(input.workspaceRoot)}).`,
+  ]
+
+  if (input.priorBuilds.length === 0) {
+    lines.push('No prior builds in this project.')
+  } else {
+    lines.push('Previous builds in this project:')
+    for (const prior of input.priorBuilds) {
+      let completed = 0
+      let failed = 0
+      let unsettled = 0
+      for (const task of prior.tasks) {
+        if (task.state === 'completed') completed += 1
+        else if (task.state === 'failed') failed += 1
+        else if (!TERMINAL_TASK_STATES.has(task.state as TaskState)) unsettled += 1
+      }
+      lines.push(
+        `- ${prior.runId} [${prior.state}] goal: ${lineageClip(prior.goal, 240)} ` +
+          `| tasks: ${completed} completed, ${failed} failed, ${unsettled} unsettled`,
+      )
+      if (prior.summary !== null && prior.summary !== undefined && prior.summary.trim() !== '') {
+        lines.push(`  outcome: ${lineageClip(prior.summary, 300)}`)
+      }
+      const unfinished = prior.tasks
+        .filter((task) => !TERMINAL_TASK_STATES.has(task.state as TaskState))
+        .map((task) => lineageClip(task.title, 80))
+      if (unfinished.length > 0) {
+        const shown = unfinished.slice(0, 5).join('; ')
+        lines.push(
+          `  unfinished: ${shown}${unfinished.length > 5 ? `; … ${String(unfinished.length - 5)} more` : ''}`,
+        )
+      }
+    }
+  }
+
+  lines.push(
+    input.priorBuilds.length === 0
+      ? 'Instruction: This is the first Build for this project. Inspect the workspace before planning, and create the durable plan that later Builds will refine.'
+      : 'Instruction: This Build continues an existing project. Inspect the workspace and the durable task records first; reuse completed work and create tasks only for the remaining or new delta. Do not recreate or re-run work that is already completed.',
+  )
+
+  const text = lines.join('\n')
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars)}\n[truncated by Pluton: build lineage exceeded ${String(maxChars)} chars]`
+}
+
 export function buildManagerPrompt(
   goal: string,
   managerShip: ShipRecord,
@@ -502,6 +591,7 @@ export function buildManagerPrompt(
   maxChars: number,
   existingTasks?: readonly TaskRecord[],
   assessmentSection?: string,
+  refinementSection?: string,
 ): string {
   const team = ships.map((m) => `- ${m.slug} (${m.role}, engine ${m.engineKind}, model ${m.model}, workspace ${m.workspacePolicy})`)
   const lines = [
@@ -515,6 +605,9 @@ export function buildManagerPrompt(
   }
   if (assessmentSection !== undefined && assessmentSection !== '') {
     lines.push('', assessmentSection)
+  }
+  if (refinementSection !== undefined && refinementSection !== '') {
+    lines.push('', refinementSection)
   }
   lines.push('', 'Team:', ...team)
   if (existingTasks !== undefined && existingTasks.length > 0) {
@@ -2113,6 +2206,31 @@ export class RunSupervisor {
     })
   }
 
+  /**
+   * Durable prior-Build evidence for the manager prompt. Legacy runs have no
+   * session anchor, so they plan exactly as before.
+   */
+  private buildPersistentBuildLineage(): string | null {
+    const run = this.store.getRun(this.runId)
+    if (run.projectSessionId === null) return null
+    const session = this.store.getProjectSessionById(run.projectSessionId)
+    if (session === null) return null
+    const priorBuilds: BuildLineageEntry[] = this.store
+      .listProjectSessionRuns(session.id, 5, run.id)
+      .map((prior) => ({
+        runId: prior.id,
+        goal: prior.goal,
+        state: prior.state,
+        summary: prior.finalSummary,
+        tasks: this.store.listTasks(prior.id).map((task) => ({ title: task.title, state: task.state })),
+      }))
+    return buildBuildLineageSection({
+      buildNumber: session.buildCount,
+      workspaceRoot: run.workspaceRoot ?? session.workspaceRoot,
+      priorBuilds,
+    })
+  }
+
   private async runManagerSession(): Promise<PromptOutcome> {
     const run = this.store.getRun(this.runId)
     const ship = this.store.getShip(run.managerShipId)
@@ -2145,6 +2263,7 @@ export class RunSupervisor {
       payload: { step: `session started (${adapter.kind})` },
     })
     const existingTasks = this.store.listTasks(this.runId)
+    const refinementSection = this.buildPersistentBuildLineage()
     // Batch 5: context instrumentation — measure manager prompt size and truncation.
     const managerPromptBuildStart = this.now()
     const prompt = buildManagerPrompt(
@@ -2155,6 +2274,7 @@ export class RunSupervisor {
       this.limits.maxBriefChars,
       existingTasks.length > 0 ? existingTasks : undefined,
       this.managerAssessmentSection ?? undefined,
+      refinementSection ?? undefined,
     )
     const managerPromptBuildDurationMs = this.now() - managerPromptBuildStart
     this.appendEvent(
@@ -2165,6 +2285,7 @@ export class RunSupervisor {
         textTruncated: prompt.endsWith('[truncated by Pluton: prompt exceeded max_prompt_chars]'),
         existingTaskCount: existingTasks.length,
         hasAssessmentSection: this.managerAssessmentSection !== null,
+        hasBuildLineage: refinementSection !== null,
         buildDurationMs: managerPromptBuildDurationMs,
       },
     )
