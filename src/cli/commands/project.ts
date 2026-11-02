@@ -3,12 +3,14 @@ import { existsSync, realpathSync } from 'node:fs'
 import { findProjectRoot } from '../../config/load.ts'
 import { NotFoundError } from '../../domain/errors.ts'
 import {
+  findProjectEntry,
   getActiveProjectId,
   getProjectRegistry,
   registerProject,
   setActiveProject,
   unregisterProject,
 } from '../../projects/registry.ts'
+import { renameProjectIdentity } from '../../projects/rename.ts'
 import { resolveProjectContext } from '../../projects/resolution.ts'
 import type { ProjectRegistryEntry, ResolvedProjectContext } from '../../projects/types.ts'
 
@@ -111,4 +113,17 @@ export function projectRemove(
     throw new NotFoundError('project', projectIdOrSlug)
   }
   return { ok: true, removed: true }
+}
+
+export function projectRename(
+  projectIdOrSlug: string,
+  newName: string,
+  customHome?: string,
+): ProjectRegistryEntry {
+  const reg = getProjectRegistry(customHome)
+  const entry = findProjectEntry(projectIdOrSlug, reg)
+  if (!entry) {
+    throw new NotFoundError('project', projectIdOrSlug)
+  }
+  return renameProjectIdentity(entry.rootDir, newName, customHome)
 }

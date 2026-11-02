@@ -89,6 +89,16 @@ pluton project remove <id|name> [--json]
 ```
 Deregisters the project from Pluton's index. Does not delete user repository files on disk.
 
+### Renaming a Project
+```bash
+pluton project rename <id|name> <new-name>
+```
+Atomically updates the project display identity across:
+1. `pluton.yaml` (`project.name`), preserving formatting and YAML comments.
+2. Local SQLite store (`projects.name`).
+3. Central registry (`~/.pluton/projects.json` name and slug).
+The project's filesystem path, canonical ID, and active runs are preserved without moving directories.
+
 ### Global Project Flag
 Every primary Pluton CLI command accepts the global `--project <id|name>` option:
 ```bash
@@ -112,9 +122,10 @@ pluton status --all-projects
 Pluton coordinates concurrent execution across projects while preventing intra-project file contention:
 
 1. **Cross-Project Concurrency**: Background builds (`pluton run`) running in separate projects execute concurrently without blocking or event leakage. Each project operates against its own isolated SQLite store (`.pluton/pluton.db`), SSE broadcaster, and execution log watcher.
-2. **Persistent Workspace Reuse**: Subsequent builds within an existing project reuse the persistent workspace without redundant confirmation prompts.
-3. **Intra-Project Concurrency Control**: Starting a concurrent build on an active workspace within the same project is detected and protected with an immediate `409 Conflict` (or worktree isolation), preventing corrupted git index states and colliding file edits.
-4. **Fencing and Heartbeats**: SQLite heartbeat and supervisor claim fencing (`claimRunSupervisor`) guarantee that concurrent supervisor loops never collide.
+2. **Persistent Workspace Reuse**: The first Build in a project establishes the active `project_sessions` workspace and increments `build_count`. Subsequent builds reuse the persistent workspace without redundant confirmation prompts (`buildCount > 0`).
+3. **Dynamic Planning Refinement**: When a new Build starts within an established project session, the supervisor extracts prior-build lineage (up to 5 recent builds, task status histograms, and unfinished task titles) and instructs the manager to refine the existing architecture and plan rather than recreating from scratch.
+4. **Intra-Project Concurrency Control**: Starting a concurrent build on an active workspace within the same project is detected and protected with an immediate `409 Conflict` (or worktree isolation), preventing corrupted git index states and colliding file edits.
+5. **Fencing and Heartbeats**: SQLite heartbeat and supervisor claim fencing (`claimRunSupervisor`) guarantee that concurrent supervisor loops never collide.
 
 ---
 
@@ -126,6 +137,12 @@ Pluton's web workspace provides unified multi-project access hosted by a single 
 - Located in the application header (`projectSelectDropdown`, `projectSelectBtn`).
 - Displays the active project name, root directory, and dropdown menu of all registered projects.
 - Clicking any project switches the active project in the browser session immediately.
+
+### Project Identity & Persistent Settings
+- Settings tab includes the Project Identity card (`#projectIdentityCard`, `#projectNameInput`, `#btnSaveProjectName`).
+- Operators can rename project display names in-place via `PATCH /api/projects/:id`.
+- The initial Build dialog allows naming the project (`#buildConfirmProjectName`) before kicking off the first build.
+- Shows persistent project session metadata (`#projectIdentityMeta`), including build counts, creation timestamps, and root workspace directory.
 
 ### Client-Scoped Project Context
 - Web client operations pass the selected project ID in HTTP headers (`X-Pluton-Project: <id>`) and query parameters (`?projectId=<id>` or `?project=<id>`).

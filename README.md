@@ -96,6 +96,7 @@ pluton doctor                      # checks OS/runtime, Git, tmux, engines, nati
 pluton init                        # write pluton.yaml + .pluton/roles in the current project (native default)
 pluton project list                # list registered projects in central registry (~/.pluton/projects.json)
 pluton project switch <id>         # switch active project in central registry
+pluton project rename <id> <name>  # rename project across config, SQLite store, and registry
 pluton chat [ship]                 # chat with an operator Ship (default: supervisor) or `pluton ship chat <ship>`
 pluton run --goal "Implement auth" # supervised run: the manager Ship plans and delegates on the host
 pluton verify --run <id>           # run the project's verification checks, apply the verdict

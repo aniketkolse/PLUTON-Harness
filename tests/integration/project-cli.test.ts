@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { realpathSync } from 'node:fs'
-import { projectList, projectSwitch, projectCurrent, projectAdd, projectRemove } from '../../src/cli/commands/project.ts'
+import { projectList, projectSwitch, projectCurrent, projectAdd, projectRemove, projectRename } from '../../src/cli/commands/project.ts'
 
 describe('CLI Project Commands', () => {
   let tempHome: string
@@ -87,5 +87,17 @@ describe('CLI Project Commands', () => {
     const list = projectList(projectDirB, { json: true }, tempHome)
     expect(list.projects).toHaveLength(1)
     expect(list.projects[0]?.name).toBe('Cli Beta')
+  })
+
+  it('renames a registered project without moving its directory', () => {
+    const addedA = projectAdd(projectDirA, tempHome)
+
+    const renamed = projectRename(addedA.id, 'Renamed Alpha', tempHome)
+    expect(renamed.name).toBe('Renamed Alpha')
+    expect(renamed.slug).toBe('renamed-alpha')
+    expect(renamed.rootDir).toBe(projectDirA)
+
+    const current = projectCurrent(projectDirA, undefined, tempHome)
+    expect(current.name).toBe('Renamed Alpha')
   })
 })

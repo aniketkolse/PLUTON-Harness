@@ -42,6 +42,7 @@ import {
   projectCurrent,
   projectList,
   projectRemove,
+  projectRename,
   projectSwitch,
 } from './commands/project.ts'
 import {
@@ -401,6 +402,17 @@ projectCmd
     await runCommand(io, json, async () => {
       const res = projectRemove(projectIdOrSlug)
       emitOk(io, json, `Removed project '${projectIdOrSlug}' from registry.`, res)
+    })
+  })
+
+projectCmd
+  .command('rename <project> <new-name>')
+  .description('rename a project display identity across config, store, and registry')
+  .action(async (projectIdOrSlug: string, newName: string, _opts: unknown, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const entry = projectRename(projectIdOrSlug, newName)
+      emitOk(io, json, `Renamed project to '${entry.name}' (${entry.slug})`, entry)
     })
   })
 
