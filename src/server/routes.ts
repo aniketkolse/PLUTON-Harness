@@ -138,7 +138,8 @@ export class ApiRouter {
   /** Live MCP registrations, keyed by the chat session that owns them. */
   private readonly mcpRegistrations = new Map<string, McpRegistration>()
   /** Runs started from the SPA's Build mode, so Stop can cancel the right one. */
-  private readonly activeRunTasks = new Map<string, { runId: string; projectId: string; workspaceRoot: string }>()
+  private readonly activeRunTasks = new Map<string, string>()
+  private readonly activeRunWorkspaces = new Map<string, { runId: string; projectId: string; workspaceRoot: string }>()
   /**
    * Live native execution providers, one per distinct workspace root. The
    * provider enforces that every session's cwd is inside a root it was built
@@ -1396,7 +1397,7 @@ export class ApiRouter {
         }
 
         const effectiveRoot = resolveWorkspaceRoot(run.workspaceRoot ?? runProj.loaded.rootDir)
-        for (const active of this.activeRunTasks.values()) {
+        for (const active of this.activeRunWorkspaces.values()) {
           if (active.projectId === runProj.id && active.workspaceRoot === effectiveRoot && active.runId !== runId) {
             this.sendJson(res, 409, {
               ok: false,
@@ -1410,13 +1411,16 @@ export class ApiRouter {
         // same path `pluton run --resume` uses, with skipManager off so the
         // manager Ship actually plans the run. Progress reaches the SPA over
         // the existing run_state/task_state SSE frames.
-        this.activeRunTasks.set(runId, { runId, projectId: runProj.id, workspaceRoot: effectiveRoot })
+        this.activeRunTasks.set(runId, runId)
+        this.activeRunWorkspaces.set(runId, { runId, projectId: runProj.id, workspaceRoot: effectiveRoot })
         void resumeRun(this.runProjectContext(run, runProj), runId, { skipManager: false }, this.runDeps(runProj)).then(
           () => {
             this.activeRunTasks.delete(runId)
+            this.activeRunWorkspaces.delete(runId)
           },
           (err) => {
             this.activeRunTasks.delete(runId)
+            this.activeRunWorkspaces.delete(runId)
             this.failRun(runId, err, 'start_failure', runProj)
           },
         )
@@ -1447,6 +1451,7 @@ export class ApiRouter {
         }
         const cancelled = requestRunCancel(runProj.store, runId, 'operator:spa')
         this.activeRunTasks.delete(runId)
+        this.activeRunWorkspaces.delete(runId)
         this.sendJson(res, 200, { ok: true, cancelled, runId })
         return true
       }
@@ -1821,7 +1826,8 @@ export class ApiRouter {
     proj?: { id?: string; projectId?: string; store: Store; broadcaster: ServerEventBroadcaster },
     workspaceRoot?: string,
   ): void {
-    this.activeRunTasks.set(started.runId, {
+    this.activeRunTasks.set(started.runId, started.runId)
+    this.activeRunWorkspaces.set(started.runId, {
       runId: started.runId,
       projectId: proj?.id ?? (proj as any)?.projectId ?? this.ctx.projectId,
       workspaceRoot: workspaceRoot ?? this.ctx.loaded.rootDir,
@@ -1829,9 +1835,11 @@ export class ApiRouter {
     void started.done.then(
       () => {
         this.activeRunTasks.delete(started.runId)
+        this.activeRunWorkspaces.delete(started.runId)
       },
       (err: unknown) => {
         this.activeRunTasks.delete(started.runId)
+        this.activeRunWorkspaces.delete(started.runId)
         this.failRun(started.runId, err, 'background_crash', proj)
       },
     )
@@ -2325,6 +2333,7 @@ export class ApiRouter {
       this.dropMcpRegistration(sessionId)
     }
     this.activeRunTasks.clear()
+    this.activeRunWorkspaces.clear()
     if (this.toolHttp !== null) {
       const http = this.toolHttp
       this.toolHttp = null

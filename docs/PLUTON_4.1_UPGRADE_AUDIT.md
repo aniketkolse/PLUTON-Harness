@@ -853,3 +853,17 @@ truncation, and a hidden plan UI.
 No product code was modified in Phase 0. The working tree remains otherwise clean.
 Phase 1 must not begin until the operator reviews this audit and authorizes the next
 phase.
+
+---
+
+## 16. Implementation Progress & Upgrade Deliverables
+
+- **Phase 1 (External Model Provider Architecture)**: **Implemented**. Added native credential store (`.pluton/provider-homes/` 0600), `openai-compatible` engine adapter with SSE streaming and `/models` discovery, CLI provider management (`pluton provider list|add|key|validate|remove`), and strict module boundaries.
+- **Phase 2 (Provider REST API & Searchable Model UI)**: **Implemented**. Added `/api/providers*` REST endpoints, dynamic Ship model switching (`/api/ships/:id/model`), Settings AI Providers table, Add Provider dialog, Set Key modal, and Searchable Model Selection modal with fuzzy search.
+- **Phase 3 (Project Persistence & Dynamic Multi-Builds)**: **Implemented**.
+  - Central project registry (`~/.pluton/projects.json`) with canonical `project_<timestamp><hex>` IDs and atomic persistence.
+  - 4-tier hybrid resolution engine (`--project` > CWD inside project > `~/.pluton/active-project` > `ProjectRequiredError`).
+  - CLI project suite (`pluton project list|current|switch|add|remove`) and global `--project` / `pluton status --all-projects` support.
+  - Multi-project context pool (`ProjectContextPool`) hosting all registered projects under a unified server instance.
+  - Concurrent multi-build coordination across projects with zero event cross-talk, persistent workspace reuse across sequential runs, and intra-project conflict protection (409 Conflict).
+  - Web workspace project selector dropdown (`projectSelectDropdown`, `projectSelectBtn`), client-scoped project switching without global pointer mutation, and project-filtered SSE event streams.

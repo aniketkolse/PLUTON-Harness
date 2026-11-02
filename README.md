@@ -48,6 +48,9 @@ provides the missing control plane for local multi-agent development:
 > and standard HTTP model providers (`engine: openai-compatible`, see [`docs/PROVIDERS.md`](docs/PROVIDERS.md)).
 > The deterministic `mock` adapter exists for tests and development only; it is not a substitute
 > for a real run. Qwen Code support was removed in the OpenCode-only migration.
+>
+> **Multi-project support:** Pluton supports central project registration, 4-tier hybrid resolution,
+> concurrent cross-project builds, and web workspace project switching. See [`docs/PROJECTS.md`](docs/PROJECTS.md).
 
 Native execution needs no Docker daemon, container image or WSL2 virtual machine. See
 [`docs/NATIVE_EXECUTION.md`](docs/NATIVE_EXECUTION.md) for modes, the capability matrix and exact
@@ -91,6 +94,8 @@ pluton --tui                       # launches interactive terminal chat TUI inst
 ```bash
 pluton doctor                      # checks OS/runtime, Git, tmux, engines, native policy and config
 pluton init                        # write pluton.yaml + .pluton/roles in the current project (native default)
+pluton project list                # list registered projects in central registry (~/.pluton/projects.json)
+pluton project switch <id>         # switch active project in central registry
 pluton chat [ship]                 # chat with an operator Ship (default: supervisor) or `pluton ship chat <ship>`
 pluton run --goal "Implement auth" # supervised run: the manager Ship plans and delegates on the host
 pluton verify --run <id>           # run the project's verification checks, apply the verdict
@@ -98,6 +103,7 @@ pluton attach <ship>               # live host tmux session (tmux is visibility,
 pluton integrate --run <id>        # merge verified task branches into the integration checkout (never main)
 pluton approvals list              # operator inbox: list/approve/deny pending approvals
 pluton status                      # shows recent runs and task counts from durable state
+pluton status --all-projects       # shows recent runs across all registered projects
 ```
 
 ## Desktop Delivery Architecture & Packaging (ADR-0015)
