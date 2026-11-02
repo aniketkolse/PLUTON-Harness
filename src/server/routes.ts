@@ -2233,48 +2233,17 @@ export class ApiRouter {
     rootDir: string,
     target: string,
   ): { ok: true; canonical: string; size: number } | { ok: false; status: number; error: string } {
-    const resolved = safeResolvePath(rootDir, target)
-    if (!resolved) {
-      return { ok: false, status: 403, error: 'access denied: path outside workspace' }
-    }
-    const protectedSegment = protectedWorkspaceSegment(relative(rootDir, resolved))
-    if (protectedSegment !== null) {
-      return {
-        ok: false,
-        status: 403,
-        error: `access denied: '${protectedSegment}' is a protected workspace path`,
-      }
-    }
-    let canonical: string
-    let canonicalRoot: string
-    try {
-      canonicalRoot = realpathSync(rootDir)
-      canonical = realpathSync(resolved)
-    } catch {
-      return { ok: false, status: 404, error: 'file not found' }
-    }
-    const canonicalRel = relative(canonicalRoot, canonical)
-    if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
-      return { ok: false, status: 403, error: 'access denied: path resolves outside workspace (via a link)' }
-    }
-    const canonicalProtected = protectedWorkspaceSegment(canonicalRel)
-    if (canonicalProtected !== null) {
-      return {
-        ok: false,
-        status: 403,
-        error: `access denied: '${canonicalProtected}' is a protected workspace path`,
-      }
-    }
-    let stat
-    try {
-      stat = statSync(canonical)
-    } catch {
-      return { ok: false, status: 404, error: 'file not found' }
-    }
-    if (stat.isDirectory()) {
-      return { ok: false, status: 404, error: 'file not found' }
-    }
-    return { ok: true, canonical, size: stat.size }
+    return resolveWorkspaceFile(rootDir, target)
+  }
+
+  /**
+   * Resolve one workspace directory with the same strict containment guarantees.
+   */
+  private resolveWorkspaceDir(
+    rootDir: string,
+    target: string,
+  ): { ok: true; canonical: string; canonicalRel: string } | { ok: false; status: number; error: string } {
+    return resolveWorkspaceDir(rootDir, target)
   }
 
   private listWorkspaceFiles(rootDir: string, maxFiles = 300): string[] {
@@ -2624,4 +2593,112 @@ export async function handleQuestionDecision(
     approval: fallback.approval,
     unblockedTasks: opts.decision === 'approved' ? fallback.unblockedTasks : [],
   }
+}
+
+/**
+ * Resolve one workspace file path with lexical and canonical containment.
+ */
+export function resolveWorkspaceFile(
+  rootDir: string,
+  target: string,
+): { ok: true; canonical: string; size: number } | { ok: false; status: number; error: string } {
+  const resolved = safeResolvePath(rootDir, target)
+  if (!resolved) {
+    return { ok: false, status: 403, error: 'access denied: path outside workspace' }
+  }
+  const protectedSegment = protectedWorkspaceSegment(relative(rootDir, resolved))
+  if (protectedSegment !== null) {
+    return {
+      ok: false,
+      status: 403,
+      error: `access denied: '${protectedSegment}' is a protected workspace path`,
+    }
+  }
+  let canonical: string
+  let canonicalRoot: string
+  try {
+    canonicalRoot = realpathSync(rootDir)
+    canonical = realpathSync(resolved)
+  } catch {
+    return { ok: false, status: 404, error: 'file not found' }
+  }
+  const canonicalRel = relative(canonicalRoot, canonical)
+  if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
+    return { ok: false, status: 403, error: 'access denied: path resolves outside workspace (via a link)' }
+  }
+  const canonicalProtected = protectedWorkspaceSegment(canonicalRel)
+  if (canonicalProtected !== null) {
+    return {
+      ok: false,
+      status: 403,
+      error: `access denied: '${canonicalProtected}' is a protected workspace path`,
+    }
+  }
+  let stat
+  try {
+    stat = statSync(canonical)
+  } catch {
+    return { ok: false, status: 404, error: 'file not found' }
+  }
+  if (stat.isDirectory()) {
+    return { ok: false, status: 404, error: 'file not found' }
+  }
+  return { ok: true, canonical, size: stat.size }
+}
+
+/**
+ * Resolve one workspace directory with lexical and canonical containment.
+ */
+export function resolveWorkspaceDir(
+  rootDir: string,
+  target: string,
+): { ok: true; canonical: string; canonicalRel: string } | { ok: false; status: number; error: string } {
+  const normTarget = target === '' || target === '.' ? '.' : target
+  const resolved = safeResolvePath(rootDir, normTarget)
+  if (!resolved) {
+    return { ok: false, status: 403, error: 'access denied: path outside workspace' }
+  }
+  const relLexical = relative(rootDir, resolved)
+  if (relLexical !== '') {
+    const protectedSegment = protectedWorkspaceSegment(relLexical)
+    if (protectedSegment !== null) {
+      return {
+        ok: false,
+        status: 403,
+        error: `access denied: '${protectedSegment}' is a protected workspace path`,
+      }
+    }
+  }
+  let canonical: string
+  let canonicalRoot: string
+  try {
+    canonicalRoot = realpathSync(rootDir)
+    canonical = realpathSync(resolved)
+  } catch {
+    return { ok: false, status: 404, error: 'directory not found' }
+  }
+  const canonicalRel = relative(canonicalRoot, canonical)
+  if (canonicalRel.startsWith('..') || isAbsolute(canonicalRel)) {
+    return { ok: false, status: 403, error: 'access denied: path resolves outside workspace (via a link)' }
+  }
+  if (canonicalRel !== '') {
+    const canonicalProtected = protectedWorkspaceSegment(canonicalRel)
+    if (canonicalProtected !== null) {
+      return {
+        ok: false,
+        status: 403,
+        error: `access denied: '${canonicalProtected}' is a protected workspace path`,
+      }
+    }
+  }
+  let stat
+  try {
+    stat = statSync(canonical)
+  } catch {
+    return { ok: false, status: 404, error: 'directory not found' }
+  }
+  if (!stat.isDirectory()) {
+    return { ok: false, status: 404, error: 'not a directory' }
+  }
+  return { ok: true, canonical, canonicalRel }
 }
