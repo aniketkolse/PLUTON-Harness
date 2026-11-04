@@ -129,6 +129,9 @@ describe('Ship model & provider assignment route', () => {
       expect(shipRecord).not.toBeNull()
       expect(shipRecord?.model).toBe('fast-llm/gpt-4o-mini')
       expect(shipRecord?.engineKind).toBe('openai-compatible')
+      // The provider identity travels with the model: without it a later
+      // session would fall back to OpenCode and burn the wrong quota.
+      expect(shipRecord?.provider).toBe('fast-llm')
     } finally {
       await cleanup()
     }
@@ -148,6 +151,84 @@ describe('Ship model & provider assignment route', () => {
       const data = (await res.json()) as { ok: boolean; error: string }
       expect(data.ok).toBe(false)
       expect(data.error).toContain('non-existent-provider')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('switches back from an external provider to a built-in engine on an engine hint alone', async () => {
+    const { rootDir, store, fetchApi, cleanup } = await setupServer()
+    try {
+      const provider: ProviderConfig = {
+        id: 'fast-llm',
+        engine: 'openai-compatible',
+        display_name: 'Fast LLM',
+        base_url: 'http://127.0.0.1:9999/v1',
+        auth: { style: 'bearer' },
+        models_path: '/models',
+        chat_path: '/chat/completions',
+      }
+      saveProvider(rootDir, provider)
+
+      const outbound = await fetchApi('/api/ships/supervisor/model', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'fast-llm/gpt-4o-mini',
+          provider: 'fast-llm',
+          engine: 'openai-compatible',
+        }),
+      })
+      expect(outbound.status).toBe(200)
+      expect(store.getShip('supervisor')?.provider).toBe('fast-llm')
+
+      // The SPA sends the chosen engine for a built-in model but no provider:
+      // the persisted external provider must not block the switch back.
+      const back = await fetchApi('/api/ships/supervisor/model', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'mock/model-a', engine: 'mock' }),
+      })
+      expect(back.status).toBe(200)
+      const data = (await back.json()) as { ok: boolean; engine?: string; provider?: string | null }
+      expect(data.ok).toBe(true)
+      expect(data.engine).toBe('mock')
+
+      const shipRecord = store.getShip('supervisor')
+      expect(shipRecord?.engineKind).toBe('mock')
+      expect(shipRecord?.provider ?? null).toBeNull()
+      const yamlContent = readFileSync(join(rootDir, 'pluton.yaml'), 'utf8')
+      expect(yamlContent).toContain('model: mock/model-a')
+      expect(yamlContent).not.toContain('provider: fast-llm')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it("refuses to route a configured provider's model through OpenCode", async () => {
+    const { rootDir, fetchApi, cleanup } = await setupServer()
+    try {
+      const provider: ProviderConfig = {
+        id: 'fast-llm',
+        engine: 'openai-compatible',
+        display_name: 'Fast LLM',
+        base_url: 'http://127.0.0.1:9999/v1',
+        auth: { style: 'bearer' },
+        models_path: '/models',
+        chat_path: '/chat/completions',
+      }
+      saveProvider(rootDir, provider)
+
+      const res = await fetchApi('/api/ships/supervisor/model', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'fast-llm/gpt-4o-mini',
+          provider: 'opencode',
+          engine: 'opencode',
+        }),
+      })
+      expect(res.status).toBe(400)
+      const data = (await res.json()) as { ok: boolean; error: string }
+      expect(data.ok).toBe(false)
+      expect(data.error).toContain('fast-llm')
     } finally {
       await cleanup()
     }

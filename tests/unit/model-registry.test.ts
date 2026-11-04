@@ -234,6 +234,32 @@ describe('ModelRegistry', () => {
     expect(registry.get('engine-a', id)?.label).toBe('first')
   })
 
+  it('replaces one provider scope without touching another provider on the same engine', () => {
+    const clock = fixedClock()
+    const registry = new ModelRegistry({ now: clock.now })
+    const fastA = 'fast-llm/model-a'
+    const fastB = 'fast-llm/model-b'
+    const slowA = 'slow-llm/model-a'
+
+    registry.replaceEngineModels('openai-compatible', [model(fastA), model(fastB)], clock.iso(), 'fast-llm')
+    registry.replaceEngineModels('openai-compatible', [model(slowA)], clock.iso(), 'slow-llm')
+
+    expect(registry.get('openai-compatible', fastA)?.provider).toBe('fast-llm')
+    expect(registry.get('openai-compatible', slowA)?.provider).toBe('slow-llm')
+    expect(registry.size).toBe(3)
+
+    // A fast-llm refresh that reports nothing must not erase slow-llm's models.
+    const changes = registry.replaceEngineModels('openai-compatible', [], clock.advance(), 'fast-llm')
+    expect(changes.map((change) => change.modelId).sort()).toEqual([fastA, fastB])
+    expect(registry.get('openai-compatible', fastA)).toBeNull()
+    expect(registry.get('openai-compatible', fastB)).toBeNull()
+    expect(registry.get('openai-compatible', slowA)).not.toBeNull()
+
+    // ...and a slow-llm refresh cannot delete another scope either.
+    registry.replaceEngineModels('openai-compatible', [], clock.advance(), 'slow-llm')
+    expect(registry.size).toBe(0)
+  })
+
   it('upserts one model without touching the rest of the inventory', () => {
     const clock = fixedClock()
     const registry = new ModelRegistry({ now: clock.now })

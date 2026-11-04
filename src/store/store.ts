@@ -167,6 +167,7 @@ export interface ShipSyncSpec {
   displayName: string
   role: string
   engineKind: string
+  provider?: string | null
   model: string
   instructionsFile: string | null
   workspacePolicy: string
@@ -543,12 +544,21 @@ export class Store {
     return row ? rowToShip(row) : null
   }
 
-  updateShipModel(id: string, model: string, engineKind?: string): void {
+  updateShipModel(id: string, model: string, engineKind?: string, provider?: string | null): void {
     const now = nowIso()
-    const res =
-      engineKind !== undefined
-        ? this.db.prepare('UPDATE ships SET model = ?, engine_kind = ?, updated_at = ? WHERE id = ?').run(model, engineKind, now, id)
-        : this.db.prepare('UPDATE ships SET model = ?, updated_at = ? WHERE id = ?').run(model, now, id)
+    let query = 'UPDATE ships SET model = ?'
+    const params: Array<string | null> = [model]
+    if (engineKind !== undefined) {
+      query += ', engine_kind = ?'
+      params.push(engineKind)
+    }
+    if (provider !== undefined) {
+      query += ', provider = ?'
+      params.push(provider)
+    }
+    query += ', updated_at = ? WHERE id = ?'
+    params.push(now, id)
+    const res = this.db.prepare(query).run(...params)
     if (res.changes === 0) {
       throw new NotFoundError('ship', id)
     }
@@ -559,15 +569,16 @@ export class Store {
     return withTx(this.db, () => {
       const now = nowIso()
       const upsert = this.db.prepare(
-        `INSERT INTO ships (id, project_id, slug, display_name, role, engine_kind, model, instructions_file,
+        `INSERT INTO ships (id, project_id, slug, display_name, role, engine_kind, provider, model, instructions_file,
                             workspace_policy, permissions_json, approval_mode, engine_home, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            project_id = excluded.project_id,
            slug = excluded.slug,
            display_name = excluded.display_name,
            role = excluded.role,
            engine_kind = excluded.engine_kind,
+           provider = excluded.provider,
            model = excluded.model,
            instructions_file = excluded.instructions_file,
            workspace_policy = excluded.workspace_policy,
@@ -585,6 +596,7 @@ export class Store {
           s.displayName,
           s.role,
           s.engineKind,
+          s.provider ?? null,
           s.model,
           s.instructionsFile ?? null,
           s.workspacePolicy,
@@ -2559,6 +2571,7 @@ function rowToShip(r: Row): ShipRecord {
     displayName: str(r, 'display_name'),
     role: role as ShipRecord['role'],
     engineKind: str(r, 'engine_kind'),
+    provider: nstr(r, 'provider'),
     model: str(r, 'model'),
     instructionsFile: nstr(r, 'instructions_file'),
     workspacePolicy: workspacePolicy as ShipRecord['workspacePolicy'],

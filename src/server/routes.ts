@@ -10,12 +10,15 @@ import type { Store } from '../store/store.ts'
 import { NotFoundError, PlutonError, ValidationError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
 import type { ApprovalRecord, ShipRecord, RunRecord } from '../domain/models.ts'
+import { shipSpecs } from '../bootstrap.ts'
 import { loadConfig, stateDir, workspaceDir, type LoadedConfig } from '../config/load.ts'
 import { createEngineApprovalChannel, settleApprovalWaiter, type EnginePermissionChannel } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, registerBuiltinEngines } from '../engines/registry.ts'
+import { resolveExecutionRoute } from '../engines/execution-router.ts'
 import { SHIP_WORKER_MODELS } from '../engines/opencode/adapter.ts'
 import type { EngineAdapter, EngineSession, McpServerSpec } from '../engines/contract/types.ts'
 import { nativeAdapterFor } from '../execution/adapter.ts'
+import { adapterForResolvedRoute } from '../execution/routed-adapter.ts'
 import {
   appendExecutionEvent,
   createNativeExecutionProvider,
@@ -36,6 +39,7 @@ import {
 } from '../cli/commands/provider.ts'
 import { editShip } from '../cli/commands/ship.ts'
 import { getProvider, hasProviderCredential, listProviders } from '../providers/store.ts'
+import { importOpenCodeProviders } from '../providers/opencode-import.ts'
 import { safeResolvePath, protectedWorkspaceSegment } from './security.ts'
 import { buildRunActivity } from './activity.ts'
 import { pickNativeFolder } from './folder-picker.ts'
@@ -126,6 +130,14 @@ interface PermissionPolicies {
   terminalAndBash: boolean
 }
 
+function configMtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 export class ApiRouter {
   private readonly ctx: RouteContext
   public readonly runner: SessionRunner
@@ -148,6 +160,8 @@ export class ApiRouter {
    * session workspace.
    */
   private readonly nativeProviders = new Map<string, NativeExecutionProvider>()
+  /** Last observed mtime of the active pluton.yaml; 0 means "not checked yet". */
+  private configMtimeMs = 0
 
   /** Runtime settings and account state for SPA configuration (ADR-0014). */
   private accountSettings = {
@@ -168,6 +182,7 @@ export class ApiRouter {
   constructor(ctx: RouteContext) {
     this.ctx = ctx
     registerBuiltinEngines()
+    this.configMtimeMs = configMtime(this.ctx.loaded.configPath)
     this.runner =
       ctx.runner ??
       new SessionRunner({
@@ -187,6 +202,45 @@ export class ApiRouter {
     return store.listShips?.() ?? store.listMuses?.() ?? []
   }
 
+  /**
+   * Pick up edits to `pluton.yaml` without a restart.
+   *
+   * Ship identity (engine, model, provider) comes from the file; an operator
+   * edit must reach the running server, and Ships removed from the file are
+   * disabled rather than deleted. Cached native execution providers are
+   * invalidated because their configuration was captured at construction.
+   */
+  private maybeReloadConfig(): void {
+    const pool = this.ctx.projectPool
+    if (pool !== undefined) {
+      if (pool.refreshStaleConfigs()) {
+        this.invalidateNativeProviders()
+        const active = pool.resolveContext(this.ctx.projectId)
+        this.ctx.loaded = active.loaded
+        this.configMtimeMs = configMtime(active.configPath)
+      }
+      return
+    }
+
+    const mtime = configMtime(this.ctx.loaded.configPath)
+    if (mtime === this.configMtimeMs) return
+    const loaded = loadConfig(this.ctx.loaded.rootDir)
+    this.ctx.loaded = loaded
+    this.ctx.store.syncShips(this.ctx.projectId, shipSpecs(loaded))
+    this.configMtimeMs = mtime
+    this.invalidateNativeProviders()
+  }
+
+  private invalidateNativeProviders(): void {
+    const providers = [...this.nativeProviders.values()]
+    this.nativeProviders.clear()
+    for (const provider of providers) {
+      void provider.close().catch(() => {
+        // Best-effort cleanup; a busy provider may close on process exit.
+      })
+    }
+  }
+
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const parsedUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
     const pathname = parsedUrl.pathname
@@ -197,6 +251,7 @@ export class ApiRouter {
     }
 
     try {
+      this.maybeReloadConfig()
       // 1. Health
       if (method === 'GET' && pathname === '/api/health') {
         const body: HealthResponse = {
@@ -1295,7 +1350,7 @@ export class ApiRouter {
           try {
             const adapter = getEngineAdapter(engineKind, {
               rootDir: targetProj.loaded?.rootDir,
-              providerId: matchingShipConfig?.provider,
+              providerId: matchingShip?.provider ?? matchingShipConfig?.provider,
             })
             let listed: unknown[]
             if (typeof adapter.listModelsWithAvailability === 'function') {
@@ -1333,14 +1388,14 @@ export class ApiRouter {
           }
         }
 
-        const rootDir = this.ctx.loaded?.rootDir
+        const rootDir = targetProj.loaded?.rootDir ?? this.ctx.loaded?.rootDir
         const configuredProviders = rootDir ? listProviders(rootDir) : []
         if (configuredProviders.length > 0) {
           const providerModels: unknown[] = []
           for (const prov of configuredProviders) {
             try {
               const adapter = getEngineAdapter(prov.engine, {
-                rootDir: this.ctx.loaded?.rootDir,
+                rootDir,
                 providerId: prov.id,
               })
               let listed: unknown[]
@@ -1351,15 +1406,34 @@ export class ApiRouter {
                 listed = models.map((m) => ({ ...m, available: true }))
               }
               for (const item of (listed as Array<Record<string, unknown>>)) {
+                const rawId = String(item['id'] ?? '')
+                const compositeId = rawId.startsWith(`${prov.id}/`) ? rawId : `${prov.id}/${rawId}`
                 providerModels.push({
                   ...item,
+                  id: compositeId,
+                  label: (item['label'] as string | undefined) ?? rawId,
                   provider: prov.id,
                   providerName: prov.display_name,
                   engine: prov.engine,
                 })
               }
-            } catch {
-              // Stored provider may be offline or lacking key; continue
+            } catch (provErr) {
+              // Provider may be offline or lacking key: list its configured static models
+              const configured = prov.models ?? []
+              const reason = provErr instanceof Error ? provErr.message : String(provErr)
+              for (const rawId of configured) {
+                const compositeId = rawId.startsWith(`${prov.id}/`) ? rawId : `${prov.id}/${rawId}`
+                providerModels.push({
+                  id: compositeId,
+                  label: rawId,
+                  available: false,
+                  reason,
+                  source: 'static',
+                  provider: prov.id,
+                  providerName: prov.display_name,
+                  engine: prov.engine,
+                })
+              }
             }
           }
           if (providerModels.length > 0) {
@@ -1398,29 +1472,53 @@ export class ApiRouter {
         }
 
         const rootDir = targetProj.loaded?.rootDir ?? process.cwd()
-        let targetProvider: string | undefined
-        let targetEngine = payload.engine?.trim() || ship.engineKind
 
-        if (payload.provider !== undefined && payload.provider !== null && payload.provider !== '') {
-          const provId = payload.provider.trim()
-          const providerRecord = getProvider(rootDir, provId)
-          if (!providerRecord) {
-            this.sendJson(res, 400, { ok: false, error: `unknown provider '${provId}'` })
+        // Resolve the explicit execution route before any state changes. The
+        // composite identity (engineKind, providerId, modelId) is authoritative:
+        // an external provider's model must never be handed to OpenCode, and a
+        // Ship's engine is only a fallback hint when the request carries no
+        // provider identity of its own.
+        const requestedEngine = payload.engine?.trim() || null
+        const inheritedProvider =
+          ship.provider ?? targetProj.loaded?.config.ships?.[ship.id]?.provider ?? null
+        // An explicitly requested engine supersedes an inherited provider that
+        // targets a different engine. Without this a Ship sitting on an
+        // external provider could not switch back to a built-in engine: the
+        // request (model + engine only, as the SPA sends) would be rejected as
+        // a provider/engine conflict.
+        const inheritedProviderFitsEngine =
+          requestedEngine === null ||
+          (inheritedProvider !== null && getProvider(rootDir, inheritedProvider)?.engine === requestedEngine)
+        const explicitProvider =
+          payload.provider === undefined
+            ? inheritedProviderFitsEngine
+              ? inheritedProvider
+              : null
+            : payload.provider === null || payload.provider === ''
+              ? null
+              : payload.provider.trim()
+
+        let targetProvider: string | undefined
+        let targetEngine: string
+        let targetRoute: ReturnType<typeof resolveExecutionRoute> | undefined
+        try {
+          const route = resolveExecutionRoute({
+            rootDir,
+            model: requested,
+            providerId: explicitProvider,
+            engineKind: requestedEngine ?? (explicitProvider === null ? ship.engineKind : null),
+            shipRole: ship.role,
+            approvalMode: ship.approvalMode,
+          })
+          targetRoute = route
+          targetEngine = route.identity.engineKind
+          targetProvider = route.provider ? route.identity.providerId : undefined
+        } catch (resolveErr) {
+          if (resolveErr instanceof PlutonError) {
+            this.sendJson(res, 400, { ok: false, error: resolveErr.message })
             return true
           }
-          if (payload.engine && payload.engine !== providerRecord.engine) {
-            this.sendJson(res, 400, {
-              ok: false,
-              error: `provider '${provId}' targets engine '${providerRecord.engine}', not '${payload.engine}'`,
-            })
-            return true
-          }
-          targetProvider = provId
-          targetEngine = providerRecord.engine
-        } else if (payload.provider === null || payload.provider === '') {
-          targetProvider = undefined
-        } else {
-          targetProvider = this.ctx.loaded.config.ships?.[ship.id]?.provider
+          throw resolveErr
         }
 
         try {
@@ -1431,7 +1529,15 @@ export class ApiRouter {
           })
           if (!isCustom && adapter.capabilities().modelList) {
             const available = await adapter.listModels()
-            const known = available.some((m) => m.id === requested || m.label === requested)
+            const checkModelId = targetRoute?.providerModelId ?? requested
+            const known = available.some(
+              (m) =>
+                m.id === requested ||
+                m.id === checkModelId ||
+                m.label === requested ||
+                m.label === checkModelId ||
+                (targetProvider !== undefined && `${targetProvider}/${m.id}` === requested),
+            )
             if (!known && available.length > 0) {
               this.sendJson(res, 400, {
                 ok: false,
@@ -1460,7 +1566,7 @@ export class ApiRouter {
               ship.id,
               {
                 model: requested,
-                provider: targetProvider,
+                provider: targetProvider ?? null,
                 engine: targetEngine,
               },
             )
@@ -1476,7 +1582,7 @@ export class ApiRouter {
 
         // Persisted on the Ship record (the same store write `pluton chat`'s
         // `/model` command performs) and applied to the live engine session.
-        targetProj.store.updateShipModel(ship.id, requested, targetEngine)
+        targetProj.store.updateShipModel(ship.id, requested, targetEngine, targetProvider ?? null)
         const restarted = await this.restartEngineSessionForShip(ship.id, requested)
         this.sendJson(res, 200, {
           ok: true,
@@ -1672,6 +1778,16 @@ export class ApiRouter {
       }
 
       // 26. Provider Management
+      if (pathname === '/api/providers/import' && method === 'POST') {
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const payload = await this.readJsonBody<{ configPaths?: string[] }>(req).catch(() => ({} as { configPaths?: string[] }))
+        const report = importOpenCodeProviders(rootDir, {
+          ...(payload?.configPaths !== undefined ? { configPaths: payload.configPaths } : {}),
+        })
+        this.sendJson(res, 200, { ok: true, report })
+        return true
+      }
+
       if (pathname === '/api/providers' && method === 'GET') {
         const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
         const providers = providerList(rootDir)
@@ -2173,7 +2289,11 @@ export class ApiRouter {
    * host-process fallback: SPA chat cannot bypass the execution policy through
    * a plain adapter.
    */
-  private adapterForShip(ship: ShipRecord, workspaceRoot: string): EngineAdapter {
+  private adapterForShip(
+    ship: ShipRecord,
+    workspaceRoot: string,
+    modelOverride?: string,
+  ): EngineAdapter {
     let provider = this.nativeProviders.get(workspaceRoot)
     if (provider === undefined) {
       provider = createNativeExecutionProvider({
@@ -2187,7 +2307,49 @@ export class ApiRouter {
       this.nativeProviders.set(workspaceRoot, provider)
     }
     const shipConfig = this.ctx.loaded?.config?.ships?.[ship.id]
-    return nativeAdapterFor(ship, {
+    // The persisted Ship record is authoritative for the selected provider
+    // (the model-switch route writes it); configuration is only a fallback for
+    // rows created before the provider column existed.
+    const effectiveProvider = ship.provider ?? shipConfig?.provider
+    const model = (modelOverride ?? ship.model)?.trim() || ''
+
+    if (!model) {
+      return nativeAdapterFor(ship, {
+        provider,
+        isolatedCheckout: false,
+        specFor: (req) =>
+          nativeSpecForShip({
+            config: this.ctx.loaded.config,
+            rootDir: this.ctx.loaded.rootDir,
+            projectId: this.ctx.projectId,
+            ship,
+            workdir: req.workdir,
+            engineHome: req.configDir,
+            isolatedCheckout: false,
+            sessionKind: 'chat',
+            extraAllowedRoots: [workspaceRoot],
+            ...(this.executionBridgeEndpoint() !== undefined
+              ? { bridge: this.executionBridgeEndpoint() }
+              : {}),
+          }),
+        engineOptions: {
+          rootDir: this.ctx.loaded?.rootDir,
+          providerId: effectiveProvider,
+        },
+      })
+    }
+
+    const route = resolveExecutionRoute({
+      rootDir: this.ctx.loaded.rootDir,
+      model,
+      providerId: effectiveProvider,
+      engineKind: ship.engineKind,
+      shipRole: ship.role,
+      approvalMode: ship.approvalMode,
+    })
+    return adapterForResolvedRoute({
+      route,
+      ship,
       provider,
       isolatedCheckout: false,
       specFor: (req) =>
@@ -2195,7 +2357,7 @@ export class ApiRouter {
           config: this.ctx.loaded.config,
           rootDir: this.ctx.loaded.rootDir,
           projectId: this.ctx.projectId,
-          ship,
+          ship: { ...ship, engineKind: route.identity.engineKind },
           workdir: req.workdir,
           engineHome: req.configDir,
           isolatedCheckout: false,
@@ -2207,7 +2369,7 @@ export class ApiRouter {
         }),
       engineOptions: {
         rootDir: this.ctx.loaded?.rootDir,
-        providerId: shipConfig?.provider,
+        providerId: route.provider?.id,
       },
     })
   }
@@ -2228,7 +2390,7 @@ export class ApiRouter {
       const ship = this.ctx.store.getShip(shipId)
       if (ship === null) continue
       const sessionWorkspace = this.workspaceRootFor(sessionId)
-      const adapter = this.adapterForShip(ship, sessionWorkspace)
+      const adapter = this.adapterForShip(ship, sessionWorkspace, model)
       const approvals = createEngineApprovalChannel({
         store: this.ctx.store,
         projectId: this.ctx.projectId,

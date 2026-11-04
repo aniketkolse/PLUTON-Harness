@@ -244,9 +244,12 @@ export class ChatSession {
     return this.shipModel
   }
 
-  async switchModel(newModel: string): Promise<void> {
+  async switchModel(newModel: string, nextAdapter?: EngineAdapter): Promise<void> {
     if (this.engineSession) {
       await this.engineSession.close()
+    }
+    if (nextAdapter !== undefined) {
+      this.deps.adapter = nextAdapter
     }
     this.deps.ship.model = newModel
     const ship = {
@@ -878,8 +881,12 @@ export class ChatSession {
   }
 
   private scheduleRedraw(): void {
-    const frame = this.renderFrame()
-    this.deps.io.redraw(frame)
+    try {
+      const frame = this.renderFrame()
+      this.deps.io.redraw(frame)
+    } catch {
+      // Store or IO may already be closed
+    }
   }
 
   private buildOrchestraData(): OrchestraInspectorData {
@@ -1019,7 +1026,12 @@ export class ChatSession {
 
   private renderFrame(): { lines: string[]; cursor: { row: number; col: number } } {
     const { columns, rows } = this.deps.io.size()
-    const projectName = this.deps.store.getProject(this.deps.projectId)?.name ?? this.deps.projectId
+    let projectName = this.deps.projectId
+    try {
+      projectName = this.deps.store.getProject(this.deps.projectId)?.name ?? this.deps.projectId
+    } catch {
+      // Store may already be closed
+    }
 
     const statusView: StatusView = {
       shipSlug: this.deps.ship.slug,

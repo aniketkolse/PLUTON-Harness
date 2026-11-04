@@ -389,7 +389,17 @@ export class OpenAICompatibleClient {
           `provider '${this.engineKind}' request timed out after ${this.timeoutMs}ms`,
         )
       }
-      const message = err instanceof Error ? err.message : String(err)
+      let message = err instanceof Error ? err.message : String(err)
+      if (err instanceof Error && err.cause instanceof Error) {
+        message = `${message} (${err.cause.message})`
+      } else if (
+        err instanceof Error &&
+        typeof err.cause === 'object' &&
+        err.cause !== null &&
+        'message' in err.cause
+      ) {
+        message = `${message} (${String((err.cause as { message: unknown }).message)})`
+      }
       throw new EngineProtocolError(
         `provider '${this.engineKind}' request failed: ${oneLine(
           redactSecrets(message, [this.opts.apiKey]),

@@ -160,6 +160,26 @@ describe('ship create and edit with provider', () => {
     expect(reloaded.config.ships['worker-b']?.provider).toBe('provider-c')
   })
 
+  it('edits an existing ship to clear its provider', () => {
+    configureProvider('provider-b')
+    const ctx = { rootDir: root, configPath, loaded: loadConfig(root) }
+    createShip(ctx, {
+      id: 'worker-b',
+      engine: 'openai-compatible',
+      provider: 'provider-b',
+      model: 'vendor/model-1',
+      role: 'coder',
+    })
+
+    const updatedCtx = { rootDir: root, configPath, loaded: loadConfig(root) }
+    const edited = editShip(updatedCtx, 'worker-b', { provider: null })
+    expect(edited.ship.provider).toBeUndefined()
+    expect(edited.changed).toContain('provider')
+
+    const reloaded = loadConfig(root)
+    expect(reloaded.config.ships['worker-b']?.provider).toBeUndefined()
+  })
+
   it('listShips and showShip expose provider field', async () => {
     configureProvider('provider-a')
     const ctx = { rootDir: root, configPath, loaded: loadConfig(root) }

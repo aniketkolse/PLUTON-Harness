@@ -122,7 +122,8 @@ export interface EditShipPatch {
   displayName?: string
   role?: string
   engine?: string
-  provider?: string
+  /** `null` clears the provider so the Ship falls back to its engine's default. */
+  provider?: string | null
   model?: string
   instructionsFile?: string
   workspacePolicy?: string
@@ -145,7 +146,8 @@ export function editShip(
     throw new ValidationError(`unknown ship '${id}'; configured ships: ${known}`)
   }
   const targetEngine = patch.engine ?? ctx.loaded.config.ships[id]?.engine
-  const targetProvider = patch.provider !== undefined ? patch.provider : ctx.loaded.config.ships[id]?.provider
+  const targetProvider =
+    patch.provider === undefined ? ctx.loaded.config.ships[id]?.provider : patch.provider ?? undefined
   if (targetEngine !== undefined) {
     if (targetProvider !== undefined || targetEngine === 'openai-compatible') {
       resolveProviderForEngine(ctx.rootDir, targetEngine, targetProvider)
@@ -169,7 +171,16 @@ export function editShip(
   if (patch.displayName !== undefined) setField('display_name', patch.displayName)
   if (patch.role !== undefined) setField('role', patch.role)
   if (patch.engine !== undefined) setField('engine', patch.engine)
-  if (patch.provider !== undefined) setField('provider', patch.provider)
+  if (patch.provider !== undefined) {
+    if (patch.provider === null) {
+      if (doc.hasIn([key, id, 'provider'])) {
+        doc.deleteIn([key, id, 'provider'])
+        changed.push('provider')
+      }
+    } else {
+      setField('provider', patch.provider)
+    }
+  }
   if (patch.model !== undefined) setField('model', patch.model)
   if (patch.instructionsFile !== undefined) setField('instructions_file', patch.instructionsFile)
   if (patch.workspacePolicy !== undefined) setField('workspace_policy', patch.workspacePolicy)

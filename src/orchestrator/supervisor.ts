@@ -9,6 +9,8 @@ import {
 } from '../domain/errors.ts'
 import type { ApprovalRecord, JsonValue, ShipRecord, RunRecord, TaskRecord, ShipRole } from '../domain/models.ts'
 import { engineAdapterForShip, type EngineIsolationFacts } from '../engines/approval.ts'
+import { resolveExecutionRoute } from '../engines/execution-router.ts'
+import { adapterForResolvedRoute } from '../execution/routed-adapter.ts'
 import { redactProseSecrets } from '../util/redact.ts'
 import { stripControlChars } from '../util/sanitize.ts'
 import {
@@ -70,7 +72,11 @@ import { buildSchedulePlan, scheduledDecision, readRunAssessment, type Schedulin
  */
 
 /** Builds the per-Ship adapter; `session.isolatedCheckout` is a proven runtime fact. */
-export type SupervisorAdapterFactory = (ship: ShipRecord, session: EngineIsolationFacts) => EngineAdapter
+export type SupervisorAdapterFactory = (
+  ship: ShipRecord,
+  session: EngineIsolationFacts,
+  model?: string,
+) => EngineAdapter
 
 /**
  * Live inspector event for one worker (task). The server maps these onto the
@@ -762,7 +768,30 @@ export class RunSupervisor {
     this.loopPollMs = opts.loopPollMs ?? DEFAULT_LOOP_POLL_MS
     this.drainBoundMs = opts.drainBoundMs ?? DEFAULT_DRAIN_BOUND_MS
     this.adapterFor =
-      opts.adapterFor ?? ((ship, session) => engineAdapterForShip(ship, { isolatedCheckout: session.isolatedCheckout }))
+      opts.adapterFor ??
+      ((ship, session, model) => {
+        const effectiveModel = (model ?? ship.model)?.trim() || ''
+        if (!effectiveModel) {
+          return engineAdapterForShip(ship, { isolatedCheckout: session.isolatedCheckout })
+        }
+        const route = resolveExecutionRoute({
+          rootDir: opts.projectRootDir ?? opts.rootDir,
+          model: effectiveModel,
+          providerId: ship.provider,
+          engineKind: ship.engineKind,
+          shipRole: ship.role,
+          approvalMode: ship.approvalMode,
+          isolatedCheckout: session.isolatedCheckout,
+        })
+        return adapterForResolvedRoute({
+          route,
+          ship,
+          isolatedCheckout: session.isolatedCheckout,
+          specFor: () => {
+            throw new Error('specFor not configured in uncontained supervisor adapter fallback')
+          },
+        })
+      })
     this.workspaceManager = opts.workspaceManager ?? null
     this.engineEnv = opts.engineEnv ?? (() => ({}))
     this.mcpServerFor = opts.mcpServerFor ?? (() => null)
@@ -1452,7 +1481,7 @@ export class RunSupervisor {
         workdir = ensured.workdir
       }
 
-      const adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null })
+      const adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null }, resolvedModel)
       const mcpSpec = this.mcpServerFor(ship, task.id)
       const instructions = this.instructionsFor(ship)
       const session = await adapter.startSession({
@@ -2237,7 +2266,7 @@ export class RunSupervisor {
     if (!ship || !ship.enabled) {
       throw new NotFoundError('manager ship', run.managerShipId)
     }
-    const adapter = this.adapterFor(ship, { isolatedCheckout: false })
+    const adapter = this.adapterFor(ship, { isolatedCheckout: false }, ship.model)
     const mcpSpec = this.mcpServerFor(ship, null)
     const instructions = this.instructionsFor(ship)
     const session = await adapter.startSession({

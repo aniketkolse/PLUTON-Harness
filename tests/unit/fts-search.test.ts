@@ -20,6 +20,53 @@ function seedShip(store: Store, projectId: string): void {
   ])
 }
 
+/**
+ * Seed a Ship on a database opened at an old migration target. `syncShips`
+ * writes the current schema (including the v16 provider column), which does
+ * not exist yet at v11 — so the fixture inserts only the v11 columns.
+ */
+function seedShipAtV11(store: Store, projectId: string): void {
+  const ts = new Date().toISOString()
+  store.db
+    .prepare(
+      `INSERT INTO ships (id, project_id, slug, display_name, role, engine_kind, model, instructions_file,
+                          workspace_policy, permissions_json, approval_mode, engine_home, enabled, created_at, updated_at)
+       VALUES ('supervisor', ?, 'supervisor', 'Supervisor', 'supervisor', 'mock', 'gpt-4o', NULL,
+               'coordinator-read-only', '[]', 'ask-for-sensitive-actions', '/home/supervisor', 1, ?, ?)`,
+    )
+    .run(projectId, ts, ts)
+}
+
+/**
+ * Seed a Run on a database opened at an old migration target. `createRun`
+ * writes the current schema (including columns added after v11), so the
+ * fixture inserts only the v11 columns.
+ */
+function seedRunAtV11(store: Store, projectId: string): string {
+  const id = 'run_fts_pre_v12'
+  const ts = new Date().toISOString()
+  store.db
+    .prepare(
+      `INSERT INTO runs (id, project_id, goal, origin, requested_by, state, acceptance_json,
+                         manager_ship_id, budget_json, created_at, workspace_root, origin_session_id)
+       VALUES (?, ?, 'Investigate system performance', 'cli', 'operator', 'created', '["done"]',
+               'supervisor', ?, ?, NULL, NULL)`,
+    )
+    .run(
+      id,
+      projectId,
+      JSON.stringify({
+        maxTasks: 5,
+        maxConcurrentWorkers: 1,
+        maxDelegationDepth: 0,
+        maxRunMinutes: 10,
+        defaultTaskMinutes: 5,
+      }),
+      ts,
+    )
+  return id
+}
+
 describe('FTS5 Full-Text Search', () => {
   let store: Store
 
@@ -46,7 +93,7 @@ describe('FTS5 Full-Text Search', () => {
     expect(prevStore.schemaVersion).toBe(11)
 
     const project = prevStore.ensureProject({ name: 'fts-test', rootPath: '/fts', configPath: '/fts/pluton.yaml', defaultBranch: 'main' })
-    seedShip(prevStore, project.id)
+    seedShipAtV11(prevStore, project.id)
     const session = prevStore.createChatSession({ projectId: project.id, title: 'Chat 1', shipId: 'supervisor' })
     prevStore.appendChatMessage({
       sessionId: session.id,
@@ -54,24 +101,10 @@ describe('FTS5 Full-Text Search', () => {
       text: 'Find this historical pre-migration keyword in chat',
     })
 
-    const run = prevStore.createRun({
-      projectId: project.id,
-      goal: 'Investigate system performance',
-      origin: 'cli',
-      requestedBy: 'operator',
-      managerShipId: 'supervisor',
-      acceptanceCriteria: ['done'],
-      budget: {
-        maxTasks: 5,
-        maxConcurrentWorkers: 1,
-        maxDelegationDepth: 0,
-        maxRunMinutes: 10,
-        defaultTaskMinutes: 5,
-      },
-    })
+    const runId = seedRunAtV11(prevStore, project.id)
     prevStore.appendEvent({
       projectId: project.id,
-      runId: run.id,
+      runId,
       type: 'run.diagnostic',
       payload: { message: 'pre-migration diagnostic event log entry' },
     })
@@ -86,7 +119,7 @@ describe('FTS5 Full-Text Search', () => {
 
     const eventHits = prevStore.searchEvents('diagnostic event')
     expect(eventHits.length).toBe(1)
-    expect(eventHits[0]?.runId).toBe(run.id)
+    expect(eventHits[0]?.runId).toBe(runId)
     prevStore.close()
   })
 

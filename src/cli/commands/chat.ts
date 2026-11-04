@@ -14,6 +14,8 @@ import { createEngineApprovalChannel } from '../../engines/interactive-approval.
 import type { EngineAdapter, McpServerSpec } from '../../engines/contract/types.ts'
 import { bootstrapStore } from '../../bootstrap.ts'
 import type { Store } from '../../store/store.ts'
+import { resolveExecutionRoute } from '../../engines/execution-router.ts'
+import { adapterForResolvedRoute } from '../../execution/routed-adapter.ts'
 import { nativeAdapterFor } from '../../execution/adapter.ts'
 import {
   appendExecutionEvent,
@@ -204,7 +206,18 @@ export async function chatRun(
         })
       const provider = nativeProvider
       const shipConfig = ctx.loaded.config.ships[ship.id]
-      adapter = nativeAdapterFor(ship, {
+      const effectiveProvider = ship.provider ?? shipConfig?.provider
+      const route = resolveExecutionRoute({
+        rootDir: ctx.rootDir,
+        model: ship.model,
+        providerId: effectiveProvider,
+        engineKind: ship.engineKind,
+        shipRole: ship.role,
+        approvalMode: ship.approvalMode,
+      })
+      adapter = adapterForResolvedRoute({
+        route,
+        ship,
         provider,
         isolatedCheckout: false,
         specFor: (req) =>
@@ -212,7 +225,7 @@ export async function chatRun(
             config: ctx.loaded.config,
             rootDir: ctx.rootDir,
             projectId,
-            ship,
+            ship: { ...ship, engineKind: route.identity.engineKind },
             workdir: req.workdir,
             engineHome: req.configDir,
             isolatedCheckout: false,
@@ -221,7 +234,7 @@ export async function chatRun(
           }),
         engineOptions: {
           rootDir: ctx.rootDir,
-          providerId: shipConfig?.provider,
+          providerId: route.provider?.id,
         },
       })
     }
@@ -284,20 +297,32 @@ export async function chatRun(
               if (activeRunId === runId) {
                 activeRunId = null
               }
-              sessionInstance?.commitLine(`run ${runId} finished: ${summary.outcome ?? summary.state}`)
+              try {
+                sessionInstance?.commitLine(`run ${runId} finished: ${summary.outcome ?? summary.state}`)
+              } catch {
+                // Session may be closed
+              }
             },
             (err) => {
               if (activeRunId === runId) {
                 activeRunId = null
               }
               const msg = err instanceof Error ? err.message : String(err)
-              sessionInstance?.commitLine(`run ${runId} failed: ${msg}`)
+              try {
+                sessionInstance?.commitLine(`run ${runId} failed: ${msg}`)
+              } catch {
+                // Session may be closed
+              }
               // A rejected background promise means this run has no live
               // driver left: settle the durable row here too, or it strands
               // `created`/`active` with no path to completion (shared rule
               // with the API route). The chat line above stays the record of
               // the user-visible outcome.
-              settleRunCrashed(store, projectId, runId, err)
+              try {
+                settleRunCrashed(store, projectId, runId, err)
+              } catch {
+                // Store may already be closed
+              }
             },
           )
           return { runId }
@@ -527,11 +552,31 @@ export async function chatRun(
           return `Current model for ${ship.slug}: ${ship.model}${activeRunInfo}`
         }
 
+        let route: ReturnType<typeof resolveExecutionRoute> | undefined
+        try {
+          const shipConfig = ctx.loaded.config.ships[ship.id]
+          route = resolveExecutionRoute({
+            rootDir: ctx.rootDir,
+            model: trimmed,
+            providerId: ship.provider ?? shipConfig?.provider,
+            engineKind: ship.engineKind,
+            shipRole: ship.role,
+            approvalMode: ship.approvalMode,
+          })
+        } catch (err) {
+          if (err instanceof ValidationError) return `Cannot switch model: ${err.message}`
+          throw err
+        }
+
+        const targetEngine = route.identity.engineKind
+        const targetProvider = route.provider ? route.identity.providerId : null
+
         const caps = adapter.capabilities()
-        if (caps.modelList) {
+        if (caps.modelList && targetEngine === ship.engineKind) {
           try {
             const list = await adapter.listModels()
-            const match = list.find((m) => m.id === trimmed || m.label === trimmed)
+            const checkModelId = route.providerModelId
+            const match = list.find((m) => m.id === trimmed || m.id === checkModelId || m.label === trimmed || m.label === checkModelId)
             if (!match && list.length > 0) {
               const available = list.map((m) => m.id).join(', ')
               return `Model '${trimmed}' is not supported by engine '${ship.engineKind}'. Available models: ${available}`
@@ -542,10 +587,39 @@ export async function chatRun(
         }
 
         try {
-          store.updateShipModel(ship.id, trimmed)
+          store.updateShipModel(ship.id, trimmed, targetEngine, targetProvider)
           ship.model = trimmed
+          ship.engineKind = targetEngine
+          ship.provider = targetProvider
           if (sessionInstance) {
-            await sessionInstance.switchModel(trimmed)
+            let nextAdapter = adapter
+            if (nativeProvider !== null) {
+              const provider = nativeProvider
+              nextAdapter = adapterForResolvedRoute({
+                route,
+                ship,
+                provider,
+                isolatedCheckout: false,
+                specFor: (req) =>
+                  nativeSpecForShip({
+                    config: ctx.loaded.config,
+                    rootDir: ctx.rootDir,
+                    projectId,
+                    ship: { ...ship, engineKind: targetEngine },
+                    workdir: req.workdir,
+                    engineHome: req.configDir,
+                    isolatedCheckout: false,
+                    sessionKind: 'chat',
+                    ...(executionBridge !== undefined ? { bridge: executionBridge } : {}),
+                  }),
+                engineOptions: {
+                  rootDir: ctx.rootDir,
+                  providerId: targetProvider ?? undefined,
+                },
+              })
+              adapter = nextAdapter
+            }
+            await sessionInstance.switchModel(trimmed, nextAdapter)
           }
           return `Switched model for ${ship.slug} to ${trimmed}. Subsequent turns will use this model.`
         } catch (err) {

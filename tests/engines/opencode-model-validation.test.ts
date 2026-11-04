@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { join } from 'node:path'
 import {
   OpenCodeAdapter,
   SHIP_WORKER_MODELS,
@@ -183,7 +184,17 @@ describe('OpenCode Model Catalog Validation', () => {
     const router = new ApiRouter({
       store: mockStore,
       projectId: 'p1',
-      loaded: {} as any,
+      // `getTargetProject` reports the project identity from the loaded
+      // config when no project pool is present, so the fixture carries the
+      // minimal shape the route reads.
+      loaded: {
+        rootDir: process.cwd(),
+        configPath: join(process.cwd(), 'pluton.yaml'),
+        config: {
+          project: { name: 'p1', repository: '.', default_branch: 'main', verification: [] },
+          ships: {},
+        },
+      } as any,
       broadcaster: {} as any,
     })
 

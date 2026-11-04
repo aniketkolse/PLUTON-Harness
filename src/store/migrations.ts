@@ -528,6 +528,16 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_runs_project_session ON runs(project_session_id, created_at)`,
     ],
   },
+  {
+    version: 16,
+    name: 'ship-provider',
+    // Records the explicit provider identity (e.g. '9router', 'ollama') for a
+    // Ship so external models are never routed to OpenCode when OpenCode quota
+    // is exhausted. Legacy rows default to NULL.
+    statements: [
+      `ALTER TABLE ships ADD COLUMN provider TEXT`,
+    ],
+  },
 ]
 
 export const SCHEMA_VERSION: number = MIGRATIONS.length === 0 ? 0 : (MIGRATIONS[MIGRATIONS.length - 1] as Migration).version

@@ -1082,7 +1082,8 @@ describe('PLUTON SPA — replaced assets', () => {
       expect(js).not.toContain('Model switch partially failed')
 
       // Only the changed Ship's row is updated in local state.
-      expect(js).toContain('return m && m.id === museId ? Object.assign({}, m, { model: modelId }) : m')
+      expect(js).toContain('if (!m || m.id !== museId) return m;')
+      expect(js).toContain('var next = Object.assign({}, m, { model: modelId });')
 
       // A failed switch surfaces the real error and leaves the old model.
       expect(js).toContain("toast('Model switch failed for ' + museId + ': ' + detail, true)")

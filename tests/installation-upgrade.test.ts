@@ -38,6 +38,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { collectDoctorChecks } from '../src/cli/commands/doctor.ts'
 import { doctorExitCode } from '../src/cli/commands/doctor.ts'
 import { runInit } from '../src/cli/commands/init.ts'
+import { SCHEMA_VERSION } from '../src/store/migrations.ts'
 import type { RunOptions, RunResult } from '../src/util/exec.ts'
 import { run } from '../src/util/exec.ts'
 
@@ -235,7 +236,7 @@ describe('installation & upgrade', () => {
     const db = new DatabaseSync(dbPath)
     // Create a minimal table so integrity_check passes
     db.exec('CREATE TABLE IF NOT EXISTS _test (id INTEGER PRIMARY KEY)')
-    db.exec('PRAGMA user_version = 14')
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.close()
 
     expect(existsSync(dbPath)).toBe(true)
@@ -244,7 +245,7 @@ describe('installation & upgrade', () => {
     const checks2 = await collectDoctorChecks({ cwd: root, runFn })
     const dbCheck2 = checks2.find((c) => c.id === 'database')
     expect(dbCheck2!.status).toBe('pass')
-    expect(dbCheck2!.message).toContain('schema v14')
+    expect(dbCheck2!.message).toContain(`schema v${SCHEMA_VERSION}`)
   })
 
   it('9. interrupted migration: database with future schema version is refused', async () => {

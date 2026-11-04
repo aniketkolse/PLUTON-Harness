@@ -54,10 +54,16 @@ export function registerEngine(factory: EngineFactory): void {
 }
 
 export function listEngineKinds(): EngineFactory[] {
+  if (factories.size === 0) {
+    registerBuiltinEngines()
+  }
   return [...factories.values()].sort((a, b) => a.kind.localeCompare(b.kind))
 }
 
 export function getEngineAdapter(kind: string, opts: EngineCreateOptions = {}): EngineAdapter {
+  if (factories.size === 0) {
+    registerBuiltinEngines()
+  }
   const f = factories.get(kind)
   if (!f) {
     const known = listEngineKinds().map((k) => k.kind).join(', ') || '(none registered)'
@@ -72,6 +78,9 @@ export function getEngineAdapter(kind: string, opts: EngineCreateOptions = {}): 
  * preparing a sandbox session for them would be a fake security boundary.
  */
 export function engineSpawnsProcess(kind: string): boolean {
+  if (factories.size === 0) {
+    registerBuiltinEngines()
+  }
   const f = factories.get(kind)
   if (!f) {
     const known = listEngineKinds().map((k) => k.kind).join(', ') || '(none registered)'

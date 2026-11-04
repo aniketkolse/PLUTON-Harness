@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { collectDoctorChecks, doctorExitCode } from '../../src/cli/commands/doctor.ts'
+import { SCHEMA_VERSION } from '../../src/store/migrations.ts'
 import type { RunOptions, RunResult } from '../../src/util/exec.ts'
 
 const tmpDirs: string[] = []
@@ -201,7 +202,7 @@ describe('doctor diagnostics', () => {
     mkdirSync(stateDir, { recursive: true })
     const dbPath = join(stateDir, 'pluton.sqlite')
     const db = new DatabaseSync(dbPath)
-    db.exec('PRAGMA user_version = 14')
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.close()
 
     const runFn = mockRun({
@@ -213,7 +214,7 @@ describe('doctor diagnostics', () => {
     const dbCheck = checks.find((c) => c.id === 'database')
     expect(dbCheck).toBeDefined()
     expect(dbCheck?.status).toBe('pass')
-    expect(dbCheck?.message).toContain('schema v14')
+    expect(dbCheck?.message).toContain(`schema v${SCHEMA_VERSION}`)
   })
 
   it('reports warn when database is behind current schema version', async () => {

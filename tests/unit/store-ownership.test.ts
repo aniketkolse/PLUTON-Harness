@@ -633,6 +633,8 @@ describe('migration v7', () => {
       'v12:full-text-search',
       'v13:verification-attempt-evidence',
       'v14:verification-evidence-identity',
+      'v15:project-sessions',
+      'v16:ship-provider',
     ])
 
     const store = new Store(db)

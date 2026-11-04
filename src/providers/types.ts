@@ -5,7 +5,7 @@ import { z } from 'zod'
  * Credentials live in `.pluton/provider-homes/<id>/credential.json` (0600)
  * and are addressed only by provider id.
  */
-export const PROVIDER_ID_RE = /^[a-z][a-z0-9-]{0,47}$/
+export const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/
 export const PROVIDER_REGISTRY_VERSION = 1
 
 /**
@@ -71,7 +71,7 @@ export const providerConfigSchema = z
   .object({
     id: z
       .string()
-      .refine(isValidProviderId, 'provider ids are lowercase slugs starting with a letter and must not look like a credential'),
+      .refine(isValidProviderId, 'provider ids are lowercase slugs starting with a letter or digit and must not look like a credential'),
     engine: z.string().min(1).max(64),
     display_name: z.string().min(1).max(200),
     base_url: z.string().refine(validateBaseUrl, {
@@ -81,6 +81,12 @@ export const providerConfigSchema = z
     auth: providerAuthSchema.default({ style: 'bearer' }),
     models_path: z.string().refine(validatePath, { message: 'models_path must be an absolute URL path' }).default('/models'),
     chat_path: z.string().refine(validatePath, { message: 'chat_path must be an absolute URL path' }).default('/chat/completions'),
+    /**
+     * Model ids reported by the provider, provider-local (no provider prefix).
+     * Imported from OpenCode so the picker still shows the catalogue while a
+     * loopback gateway is offline.
+     */
+    models: z.array(z.string().min(1).max(300)).max(5000).optional(),
     /** Non-secret headers sent with every request. Secrets belong in the credential file. */
     headers: z
       .record(z.string(), z.string())

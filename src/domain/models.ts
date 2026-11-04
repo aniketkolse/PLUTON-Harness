@@ -96,6 +96,8 @@ export interface ShipRecord {
   displayName: string
   role: ShipRole
   engineKind: string
+  /** Explicit provider identity (e.g. '9router', 'ollama'). Null for built-in/default provider. */
+  provider?: string | null
   /** Exact provider-qualified model id as the engine reports it (never normalized). */
   model: string
   instructionsFile: string | null

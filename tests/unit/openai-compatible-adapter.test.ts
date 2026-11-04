@@ -234,6 +234,42 @@ describe('openai-compatible adapter model discovery', () => {
     expect(availability[0]).toMatchObject({ id: 'vendor/model-a', available: false })
     expect(availability[0]?.reason).toContain('503')
   })
+
+  it('falls back to the imported model catalogue when the provider is offline', async () => {
+    configure({ models: ['ag/gemini-3.8-flash-high', 'ag/claude-opus-4-6-thinking'] })
+    const adapter = new OpenAICompatibleAdapter({
+      rootDir: root,
+      fetchFn: (async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:20128')
+      }) as typeof fetch,
+    })
+
+    const models = await adapter.listModels()
+    expect(models).toEqual([
+      { id: 'ag/gemini-3.8-flash-high', source: 'static', provider: 'alpha' },
+      { id: 'ag/claude-opus-4-6-thinking', source: 'static', provider: 'alpha' },
+    ])
+  })
+
+  it('shows imported models as unavailable when the provider cannot be reached', async () => {
+    configure({ models: ['ag/gemini-3.8-flash-high'] })
+    const adapter = new OpenAICompatibleAdapter({
+      rootDir: root,
+      fetchFn: (async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:20128')
+      }) as typeof fetch,
+    })
+
+    const availability = await adapter.listModelsWithAvailability()
+    expect(availability).toEqual([
+      {
+        id: 'ag/gemini-3.8-flash-high',
+        available: false,
+        reason: "provider 'openai-compatible' request failed: connect ECONNREFUSED 127.0.0.1:20128",
+        source: 'static',
+      },
+    ])
+  })
 })
 
 describe('openai-compatible adapter startSession validation', () => {

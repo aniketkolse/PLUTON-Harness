@@ -208,6 +208,35 @@ describe('ModelDiscoveryService', () => {
     expect(service.registry.get('engine-b', shared)?.label).toBe('beta')
   })
 
+  it('probes each provider scope on the same engine independently', async () => {
+    const clock = fixedClock()
+    const fast = 'fast-llm/model-a'
+    const slow = 'slow-llm/model-a'
+    const service = new ModelDiscoveryService({
+      engines: [
+        {
+          engineKind: 'openai-compatible',
+          providerId: 'fast-llm',
+          adapter: testAdapter('openai-compatible', async () => [model(fast)]),
+        },
+        {
+          engineKind: 'openai-compatible',
+          providerId: 'slow-llm',
+          adapter: testAdapter('openai-compatible', async () => [model(slow)]),
+        },
+      ],
+      now: clock.now,
+    })
+
+    const report = await service.refresh()
+
+    expect(report.results.map((result) => result.providerId)).toEqual(['fast-llm', 'slow-llm'])
+    expect(report.results.every((result) => result.ok)).toBe(true)
+    expect(service.registry.size).toBe(2)
+    expect(service.registry.get('openai-compatible', fast)?.provider).toBe('fast-llm')
+    expect(service.registry.get('openai-compatible', slow)?.provider).toBe('slow-llm')
+  })
+
   it('preserves partial metadata and never infers capabilities from names', async () => {
     const clock = fixedClock()
     const id = 'some-provider/research-coder-testing-ultra'

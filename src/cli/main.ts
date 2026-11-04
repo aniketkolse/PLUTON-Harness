@@ -47,6 +47,7 @@ import {
 } from './commands/project.ts'
 import {
   providerAdd,
+  providerImport,
   providerList,
   providerModels,
   providerRemove,
@@ -733,6 +734,37 @@ providerCmd
           ? 'no providers configured — run `pluton provider add <id> --engine <kind> --base-url <url>`'
           : table(rows)
       emitOk(io, json, human, { providers, count: providers.length })
+    })
+  })
+
+providerCmd
+  .command('import')
+  .description('import OpenAI-compatible providers and credentials from OpenCode configuration')
+  .option('--config <path>', 'path to specific opencode.json(c) file')
+  .option('--from <path>', 'path to specific opencode.json(c) file')
+  .action(async (opts: { config?: string; from?: string; file?: string }, cmd: Command) => {
+    const json = jsonMode(cmd)
+    await runCommand(io, json, async () => {
+      const ctx = requireProject(process.cwd())
+      const configPath = opts.from ?? opts.file ?? opts.config
+      const report = providerImport(ctx.rootDir, {
+        ...(configPath !== undefined ? { configPath } : {}),
+      })
+      const lines: string[] = []
+      if (report.imported.length === 0 && report.skipped.length === 0 && report.failed.length === 0) {
+        lines.push('no OpenCode providers found to import')
+      } else {
+        for (const entry of report.imported) {
+          lines.push(`imported provider '${entry.id}' with ${entry.models} models (credential: ${entry.credentialImported ? 'imported' : 'none'})`)
+        }
+        for (const entry of report.skipped) {
+          lines.push(`skipped provider '${entry.id}' (already configured; credential: ${entry.credentialImported ? 'imported' : 'preserved'})`)
+        }
+        for (const fail of report.failed) {
+          lines.push(`failed to import '${fail.id ?? fail.configPath}': ${fail.reason}`)
+        }
+      }
+      emitOk(io, json, lines.join('\n'), report)
     })
   })
 

@@ -184,6 +184,7 @@ export class ModelRegistry {
     engineKind: string,
     models: readonly EngineModel[],
     observedAt = this.nowIso(),
+    providerScope?: string,
   ): ModelRegistryChange[] {
     if (engineKind.length === 0) return []
     const existing = this.byEngine.get(engineKind)
@@ -191,6 +192,7 @@ export class ModelRegistry {
     if (existing !== undefined) {
       let newest: string | null = null
       for (const entry of existing.values()) {
+        if (providerScope !== undefined && entry.provider !== providerScope) continue
         if (newest === null || entry.lastRefreshedAt > newest) newest = entry.lastRefreshedAt
       }
       if (newest !== null && observedAt < newest) return []
@@ -207,6 +209,7 @@ export class ModelRegistry {
       const next = freezeEntry({
         ...cloneValue(model),
         engineKind,
+        ...(model.provider ? { provider: model.provider } : providerScope ? { provider: providerScope } : {}),
         availability:
           previous?.availability ??
           (model.availability !== undefined ? cloneValue(model.availability) : undefined),
@@ -241,6 +244,7 @@ export class ModelRegistry {
     }
 
     for (const [modelId, previous] of target) {
+      if (providerScope !== undefined && previous.provider !== providerScope) continue
       if (seen.has(modelId)) continue
       target.delete(modelId)
       changes.push({

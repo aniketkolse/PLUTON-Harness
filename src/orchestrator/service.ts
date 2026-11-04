@@ -35,11 +35,13 @@ import type { EngineAdapter, McpServerSpec } from '../engines/contract/types.ts'
 import { settleApprovalWaiter } from '../engines/interactive-approval.ts'
 import { getEngineAdapter, listEngineKinds } from '../engines/registry.ts'
 import { ModelRegistry } from '../engines/model-registry.ts'
-import { ModelDiscoveryService } from '../engines/model-discovery.ts'
+import { ModelDiscoveryService, type ModelDiscoveryEngine } from '../engines/model-discovery.ts'
 import { ModelHealthMonitor } from '../engines/model-health.ts'
 import type { ModelFallbackConfig } from '../engines/model-fallback.ts'
 import { resolveModelConfig } from '../config/model-config.ts'
-import { resolveProviderForEngine } from '../providers/store.ts'
+import { listProviders, resolveProviderForEngine } from '../providers/store.ts'
+import { resolveExecutionRoute } from '../engines/execution-router.ts'
+import { adapterForResolvedRoute } from '../execution/routed-adapter.ts'
 import { nativeAdapterFor } from '../execution/adapter.ts'
 import {
   appendExecutionEvent,
@@ -366,9 +368,45 @@ export function createRunSupervisor(args: {
   if (supervisorAdapterFor === undefined && args.nativeProvider != null) {
     const nativeProvider = args.nativeProvider
     const extraAllowedRoots = collectRunExtraRoots(ctx, [run.workspaceRoot])
-    supervisorAdapterFor = (ship, session) => {
+    supervisorAdapterFor = (ship, session, modelOverride) => {
       const shipConfig = ctx.loaded.config.ships[ship.id]
-      return nativeAdapterFor(ship, {
+      const effectiveProvider = ship.provider ?? shipConfig?.provider
+      const model = (modelOverride ?? ship.model)?.trim() || ''
+      if (!model) {
+        return nativeAdapterFor(ship, {
+          provider: nativeProvider,
+          isolatedCheckout: session.isolatedCheckout,
+          specFor: (req) =>
+            nativeSpecForShip({
+              config: ctx.loaded.config,
+              rootDir: ctx.rootDir,
+              projectId,
+              ship,
+              workdir: req.workdir,
+              engineHome: req.configDir,
+              isolatedCheckout: session.isolatedCheckout,
+              sessionKind: 'run',
+              ...(extraAllowedRoots.length > 0 ? { extraAllowedRoots } : {}),
+              ...(args.executionBridge !== undefined ? { bridge: args.executionBridge } : {}),
+            }),
+          engineOptions: {
+            rootDir: ctx.rootDir,
+            providerId: effectiveProvider ?? undefined,
+          },
+        })
+      }
+      const route = resolveExecutionRoute({
+        rootDir: ctx.rootDir,
+        model,
+        providerId: effectiveProvider,
+        engineKind: ship.engineKind,
+        shipRole: ship.role,
+        approvalMode: ship.approvalMode,
+        isolatedCheckout: session.isolatedCheckout,
+      })
+      return adapterForResolvedRoute({
+        route,
+        ship,
         provider: nativeProvider,
         isolatedCheckout: session.isolatedCheckout,
         specFor: (req) =>
@@ -376,7 +414,7 @@ export function createRunSupervisor(args: {
             config: ctx.loaded.config,
             rootDir: ctx.rootDir,
             projectId,
-            ship,
+            ship: { ...ship, engineKind: route.identity.engineKind },
             workdir: req.workdir,
             engineHome: req.configDir,
             isolatedCheckout: session.isolatedCheckout,
@@ -386,7 +424,7 @@ export function createRunSupervisor(args: {
           }),
         engineOptions: {
           rootDir: ctx.rootDir,
-          providerId: shipConfig?.provider,
+          providerId: route.provider?.id,
         },
       })
     }
@@ -401,19 +439,32 @@ export function createRunSupervisor(args: {
   // never discover or select its models: a mock entry with otherwise-complete
   // metadata would outrank real OpenCode models whose capability metadata is
   // still unknown.
-  const discoveryEngines = listEngineKinds()
-    .filter((f) => f.devOnly !== true)
-    .map((f) => {
-      try {
-        return {
-          engineKind: f.kind,
-          adapter: getEngineAdapter(f.kind, { rootDir: ctx.rootDir }),
-        }
-      } catch {
-        return null
-      }
-    })
-    .filter((e): e is { engineKind: string; adapter: EngineAdapter } => e !== null)
+  const configuredProviders = listProviders(ctx.rootDir)
+  const discoveryEngines: ModelDiscoveryEngine[] = []
+
+  for (const f of listEngineKinds().filter((k) => k.devOnly !== true)) {
+    if (f.kind === 'openai-compatible') continue
+    try {
+      discoveryEngines.push({
+        engineKind: f.kind,
+        adapter: getEngineAdapter(f.kind, { rootDir: ctx.rootDir }),
+      })
+    } catch {
+      // engine not installed or available
+    }
+  }
+
+  for (const prov of configuredProviders) {
+    try {
+      discoveryEngines.push({
+        engineKind: prov.engine,
+        providerId: prov.id,
+        adapter: getEngineAdapter(prov.engine, { rootDir: ctx.rootDir, providerId: prov.id }),
+      })
+    } catch {
+      // provider offline or unauthenticated
+    }
+  }
   const modelHealthMonitor = new ModelHealthMonitor({ registry: modelRegistry })
   const discovery = new ModelDiscoveryService({
     engines: discoveryEngines,

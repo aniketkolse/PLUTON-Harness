@@ -89,41 +89,105 @@ export class OpenAICompatibleAdapter implements EngineAdapter {
 
   async listModels(): Promise<EngineModel[]> {
     const provider = this.resolveProvider()
-    const client = this.clientFor(provider, this.credentialFor(provider))
-    const models = await client.listModels()
-    return models.map((model) => ({
-      id: model.id,
-      ...(model.label !== undefined ? { label: model.label } : {}),
-      source: 'engine' as const,
-      provider: provider.id,
-    }))
+    let live
+    try {
+      const client = this.clientFor(provider, this.credentialFor(provider))
+      live = await client.listModels()
+    } catch (err) {
+      const configured = provider.models ?? []
+      if (configured.length === 0) throw err
+      return configured.map((id) => ({ id, source: 'static' as const, provider: provider.id }))
+    }
+
+    const seen = new Set<string>()
+    const models: EngineModel[] = []
+    for (const model of live) {
+      if (seen.has(model.id)) continue
+      seen.add(model.id)
+      models.push({
+        id: model.id,
+        ...(model.label !== undefined ? { label: model.label } : {}),
+        source: 'engine' as const,
+        provider: provider.id,
+      })
+    }
+    for (const id of provider.models ?? []) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      models.push({ id, source: 'static' as const, provider: provider.id })
+    }
+    return models
   }
 
   async listModelsWithAvailability(candidateModels?: string[]): Promise<ModelAvailability[]> {
-    let discovered: EngineModel[]
+    let provider: ProviderConfig | null = null
     try {
-      discovered = await this.listModels()
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err)
-      return (candidateModels ?? []).map((id) => ({
-        id,
-        available: false,
-        reason,
-        source: 'engine' as const,
-      }))
+      provider = this.resolveProvider()
+    } catch {
+      // Ambiguous/missing provider: no catalogue can be attributed safely.
     }
 
-    if (candidateModels === undefined) {
-      return discovered.map((model) => ({
+    let discovered: EngineModel[] = []
+    let failureReason: string | undefined
+    try {
+      if (provider === null) throw new Error('no provider selected')
+      const client = this.clientFor(provider, this.credentialFor(provider))
+      discovered = (await client.listModels()).map((model) => ({
         id: model.id,
-        available: true,
-        label: model.label ?? model.id,
+        ...(model.label !== undefined ? { label: model.label } : {}),
         source: 'engine' as const,
+        provider: provider!.id,
+      }))
+    } catch (err) {
+      failureReason = err instanceof Error ? err.message : String(err)
+    }
+
+    const configured = provider?.models ?? []
+    if (candidateModels === undefined) {
+      if (failureReason !== undefined) {
+        return configured.map((id) => ({
+          id,
+          available: false,
+          reason: failureReason,
+          source: 'static' as const,
+        }))
+      }
+      const seen = new Set<string>()
+      const availability: ModelAvailability[] = []
+      for (const model of discovered) {
+        if (seen.has(model.id)) continue
+        seen.add(model.id)
+        availability.push({
+          id: model.id,
+          available: true,
+          label: model.label ?? model.id,
+          source: 'engine' as const,
+        })
+      }
+      for (const id of configured) {
+        if (seen.has(id)) continue
+        seen.add(id)
+        availability.push({
+          id,
+          available: false,
+          reason: `not reported by provider ${provider?.id ?? this.kind}`,
+          source: 'static' as const,
+        })
+      }
+      return availability
+    }
+
+    if (failureReason !== undefined) {
+      return candidateModels.map((id) => ({
+        id,
+        available: false,
+        reason: failureReason,
+        source: (configured.includes(id) ? 'static' : 'engine') as 'static' | 'engine',
       }))
     }
 
     const byId = new Map(discovered.map((model) => [model.id, model]))
-    const providerId = discovered[0]?.provider ?? this.opts.providerId ?? this.kind
+    const providerId = discovered[0]?.provider ?? provider?.id ?? this.opts.providerId ?? this.kind
     return candidateModels.map((id) => {
       const model = byId.get(id)
       if (model === undefined) {

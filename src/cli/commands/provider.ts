@@ -20,6 +20,10 @@ import {
   type ProviderAuthConfig,
   type ProviderConfig,
 } from '../../providers/types.ts'
+import {
+  importOpenCodeProviders,
+  type OpenCodeImportReport,
+} from '../../providers/opencode-import.ts'
 
 export interface ProviderSummary {
   id: string
@@ -203,4 +207,13 @@ export async function readKeyFromStdin(): Promise<string> {
     )
   }
   return trimmed
+}
+
+export function providerImport(
+  rootDir: string,
+  options: { configPath?: string } = {},
+): OpenCodeImportReport {
+  return importOpenCodeProviders(rootDir, {
+    ...(options.configPath !== undefined ? { configPaths: [options.configPath] } : {}),
+  })
 }

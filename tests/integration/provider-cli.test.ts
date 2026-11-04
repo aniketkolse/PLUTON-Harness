@@ -238,4 +238,36 @@ describe('provider CLI integration', () => {
     const listEnv = parseEnvelope(listRes.stdout)
     expect(listEnv.data?.['count']).toBe(0)
   })
+
+  it('imports providers from an opencode config file via provider import', async () => {
+    const opencodePath = join(projectDir, 'opencode.json')
+    writeFileSync(
+      opencodePath,
+      JSON.stringify({
+        provider: {
+          'cli-imported': {
+            npm: '@ai-sdk/openai-compatible',
+            options: {
+              baseURL: serverUrl,
+              apiKey: 'imported-cli-key',
+            },
+            models: { 'vendor/imported-model': {} },
+          },
+        },
+      }),
+      'utf8',
+    )
+
+    const importRes = await runCli(['provider', 'import', '--from', opencodePath, '--json'])
+    expect(importRes.exitCode).toBe(0)
+    const env = parseEnvelope(importRes.stdout)
+    expect(env.ok).toBe(true)
+    const report = env.data as { imported: Array<{ id: string }> }
+    expect(report.imported.map((e) => e.id)).toEqual(['cli-imported'])
+
+    const listRes = await runCli(['provider', 'list', '--json'])
+    const listEnv = parseEnvelope(listRes.stdout)
+    const providers = listEnv.data?.['providers'] as Array<{ id: string; hasCredential: boolean }>
+    expect(providers.find((p) => p.id === 'cli-imported')?.hasCredential).toBe(true)
+  })
 })

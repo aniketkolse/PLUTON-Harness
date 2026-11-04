@@ -70,7 +70,7 @@ export function providerCredentialPath(rootDir: string, providerId: string): str
 function assertProviderId(providerId: string): void {
   if (!isValidProviderId(providerId)) {
     throw new ValidationError(
-      `invalid provider id '${providerId}': ids are lowercase slugs (a-z, 0-9, -), starting with a letter, and must not look like a credential`,
+      `invalid provider id '${providerId}': ids are lowercase slugs (a-z, 0-9, -), starting with a letter or digit, and must not look like a credential`,
     )
   }
 }

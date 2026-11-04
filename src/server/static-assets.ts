@@ -197,7 +197,10 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
                 AI Providers
               </span>
-              <button id="btnOpenAddProvider" class="btn-xs btn-primary" type="button">+ Add Provider</button>
+              <div class="card-head-actions">
+                <button id="btnImportProviders" class="btn-xs btn-secondary" type="button">Import OpenCode</button>
+                <button id="btnOpenAddProvider" class="btn-xs btn-primary" type="button">+ Add Provider</button>
+              </div>
             </div>
             <div class="card-sub">Credentials stored securely in <code>.pluton/provider-homes/</code> (0600)</div>
             <div id="providerTable" class="provider-table"></div>
@@ -1033,7 +1036,7 @@ body {
 .icon-config { color: #a1a1aa; }
 .icon-file { color: #71717a; }
 .file-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
-.file-children { display: flex; flex-direction: column; padding-left: 12px; }
+.file-children { display: flex; flex-direction: column; padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, 0.05); margin-left: 8px; }
 .file-children.is-collapsed { display: none; }
 
 .file-search-bar {
@@ -1064,7 +1067,7 @@ body {
 }
 .file-search-input:focus {
   outline: none;
-  border-color: var(--border-focus, #6366f1);
+  border-color: var(--accent-cyan);
   background: rgba(255, 255, 255, 0.07);
 }
 .file-search-clear {
@@ -1108,7 +1111,7 @@ body {
   color: var(--text);
 }
 .file-search-match {
-  color: var(--accent-primary, #818cf8);
+  color: var(--accent-cyan);
   font-weight: 600;
 }
 .file-breadcrumbs {
@@ -1205,7 +1208,7 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-primary, #818cf8);
+  background: var(--accent-cyan);
   flex-shrink: 0;
 }
 .file-tab-close {
@@ -1489,7 +1492,7 @@ select.mini-select {
   cursor: pointer; transition: background 0.15s, border-color 0.15s; max-width: 240px;
 }
 .project-btn:hover { background: #222228; border-color: var(--border); }
-.project-icon { display: inline-flex; align-items: center; color: var(--accent-purple, #a78bfa); }
+.project-icon { display: inline-flex; align-items: center; color: var(--accent-purple-soft); }
 .project-icon svg { width: 14px; height: 14px; }
 .project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-menu {
@@ -1503,8 +1506,8 @@ select.mini-select {
   cursor: pointer; text-align: left; background: transparent; border: none; color: var(--text);
   transition: background 0.12s;
 }
-.project-menu-item:hover { background: #22222a; }
-.project-menu-item.is-active { background: #2a2838; }
+.project-menu-item:hover { background: var(--bg-hover); }
+.project-menu-item.is-active { background: var(--bg-active); border: 1px solid var(--border-strong); }
 .project-menu-item-name { font-weight: 600; font-size: 12px; display: flex; align-items: center; justify-content: space-between; }
 .project-menu-item-path { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .header-tools { display: flex; align-items: center; gap: 10px; }
@@ -2431,8 +2434,12 @@ details:not([open]) > .tool-card-head .tool-chevron {
   display: flex;
   flex-direction: column;
   background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-soft);
   overflow: hidden;
   cursor: pointer;
+}
+.worker-partition:last-child {
+  border-bottom: none;
 }
 .worker-partition:focus-within {
   outline: 2px solid var(--accent-cyan);
@@ -2447,11 +2454,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 6px 12px;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-soft);
   font-size: 11px;
   flex-shrink: 0;
+  min-width: 0;
 }
 .worker-partition-title {
   display: flex;
@@ -2462,15 +2471,19 @@ details:not([open]) > .tool-card-head .tool-chevron {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .worker-partition-name {
   font-family: var(--font-mono);
   font-size: 11px;
+  font-weight: 600;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  flex-shrink: 0;
 }
 .worker-partition-task {
   font-family: var(--font-mono);
@@ -2479,9 +2492,20 @@ details:not([open]) > .tool-card-head .tool-chevron {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .worker-partition-model {
   font-size: 10px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
 }
 .worker-empty {
   flex: 1 1 auto;
@@ -2778,20 +2802,23 @@ details:not([open]) > .tool-card-head .tool-chevron {
   .worker-detail-card { width: calc(100vw - 24px); max-height: 92vh; }
 }
 .worker-partition-workspace-line {
-  padding: 2px 12px 4px;
+  padding: 3px 12px;
   font-size: 10px;
-  color: var(--text-soft);
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.15);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   border-bottom: 1px solid var(--border-soft);
   flex-shrink: 0;
+  letter-spacing: 0.02em;
 }
 .worker-partition-meta {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 .worker-badge-status {
   font-size: 10px;
@@ -4581,12 +4608,17 @@ details:not([open]) > .tool-card-head .tool-chevron {
     list.innerHTML = entries.map(function (m) {
       var current = state.muse && m.id === state.muse.model;
       return '<div class="popover-item' + (current ? ' is-current' : '') + '" data-model="' + escapeHtml(m.id) +
-        '" data-engine="' + escapeHtml(m.engine) + '"><div class="popover-item-name">' + escapeHtml(m.label) +
+        '" data-engine="' + escapeHtml(m.engine) + '" data-provider="' + escapeHtml(m.provider || '') +
+        '"><div class="popover-item-name">' + escapeHtml(m.label) +
         '</div><div class="popover-item-engine">' + escapeHtml(m.engine) + '</div></div>';
     }).join('');
     Array.prototype.forEach.call(list.querySelectorAll('.popover-item'), function (node) {
       node.addEventListener('click', function () {
-        switchModel(node.getAttribute('data-model'));
+        switchModel(
+          node.getAttribute('data-model'),
+          node.getAttribute('data-provider') || undefined,
+          node.getAttribute('data-engine') || undefined
+        );
       });
     });
   }
@@ -4705,7 +4737,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     renderModelRegistry();
   }
 
-  async function switchModel(modelId) {
+  async function switchModel(modelId, providerId, engineId) {
     if (!state.muse) {
       try {
         var shipRes = await apiFetch('/api/ships');
@@ -4725,20 +4757,35 @@ details:not([open]) > .tool-card-head .tool-chevron {
       return;
     }
     var previous = state.muse.model;
+    var previousProvider = state.muse.provider !== undefined ? state.muse.provider : null;
+    var previousEngine = state.muse.engineKind;
     var museId = state.muse.id;
     try {
+      var reqBody = { model: modelId };
+      if (providerId !== undefined) reqBody.provider = providerId;
+      if (engineId !== undefined) reqBody.engine = engineId;
       await apiFetch('/api/muses/' + encodeURIComponent(state.muse.id) + '/model', {
         method: 'POST',
-        body: JSON.stringify({ model: modelId })
+        body: JSON.stringify(reqBody)
       });
       state.muse.model = modelId;
+      if (providerId !== undefined) state.muse.provider = providerId || null;
+      if (engineId !== undefined) state.muse.engineKind = engineId;
       if (state.workspace && state.workspace.muses) {
         var found = state.workspace.muses.find(function (m) { return m.id === museId; });
-        if (found) found.model = modelId;
+        if (found) {
+          found.model = modelId;
+          if (providerId !== undefined) found.provider = providerId || null;
+          if (engineId !== undefined) found.engineKind = engineId;
+        }
       }
       if (state.workspace && state.workspace.ships) {
         var foundShip = state.workspace.ships.find(function (s) { return s.id === museId; });
-        if (foundShip) foundShip.model = modelId;
+        if (foundShip) {
+          foundShip.model = modelId;
+          if (providerId !== undefined) foundShip.provider = providerId || null;
+          if (engineId !== undefined) foundShip.engineKind = engineId;
+        }
       }
       applyMuseModel();
       renderMuseModels();
@@ -4748,7 +4795,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       // it. No other operation in this UI has a safe inverse.
       toast('Model switched to ' + modelId, false, {
         label: 'Undo',
-        run: function () { switchMuseModel(museId, previous); },
+        run: function () { switchMuseModel(museId, previous, previousProvider, previousEngine); },
       });
     } catch (err) {
       toast('Model switch failed: ' + err.message, true);
@@ -4829,7 +4876,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
       var options = engineModels[m.engine] || [];
       var opts = options.map(function (opt) {
         var id = opt.id;
-        return '<option value="' + escapeHtml(id) + '"' + (id === m.model ? ' selected' : '') + '>' +
+        return '<option value="' + escapeHtml(id) + '" data-engine="' + escapeHtml(opt.engine || m.engine) +
+          '" data-provider="' + escapeHtml(opt.provider || '') + '"' + (id === m.model ? ' selected' : '') + '>' +
           escapeHtml(opt.label || id) + '</option>';
       }).join('');
       if (options.length === 0 || !options.some(function (o) { return o.id === m.model; })) {
@@ -4843,7 +4891,13 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }).join('');
     Array.prototype.forEach.call(node.querySelectorAll('select'), function (sel) {
       sel.addEventListener('change', function () {
-        switchMuseModel(sel.getAttribute('data-muse'), sel.value);
+        var chosen = sel.options[sel.selectedIndex];
+        switchMuseModel(
+          sel.getAttribute('data-muse'),
+          sel.value,
+          chosen ? (chosen.getAttribute('data-provider') || undefined) : undefined,
+          chosen ? (chosen.getAttribute('data-engine') || undefined) : undefined
+        );
       });
     });
     Array.prototype.forEach.call(node.querySelectorAll('.btn-ship-model-select'), function (btn) {
@@ -4863,10 +4917,19 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (!museId) return; // nothing addressable: the API itself 404s empty ids
     var switchSeq = ++modelSwitchSeq;
     var previous = null;
-    if (state.muse && state.muse.id === museId) previous = state.muse.model;
-    else if (state.workspace) {
+    var previousProvider;
+    var previousEngine;
+    if (state.muse && state.muse.id === museId) {
+      previous = state.muse.model;
+      previousProvider = state.muse.provider !== undefined ? state.muse.provider : null;
+      previousEngine = state.muse.engineKind;
+    } else if (state.workspace) {
       var prior = (state.workspace.muses || []).filter(function (m) { return m && m.id === museId; })[0];
-      if (prior) previous = prior.model;
+      if (prior) {
+        previous = prior.model;
+        previousProvider = prior.provider !== undefined ? prior.provider : null;
+        previousEngine = prior.engineKind;
+      }
     }
     try {
       var reqBody = { model: modelId };
@@ -4886,18 +4949,24 @@ details:not([open]) > .tool-card-head .tool-chevron {
     // Every Ship owns its model: only the changed Ship is updated.
     if (state.muse && state.muse.id === museId) {
       state.muse.model = modelId;
+      if (providerId !== undefined) state.muse.provider = providerId || null;
+      if (engineId !== undefined) state.muse.engineKind = engineId;
       applyMuseModel();
     }
     if (state.workspace && state.workspace.muses) {
       state.workspace.muses = state.workspace.muses.map(function (m) {
-        return m && m.id === museId ? Object.assign({}, m, { model: modelId }) : m;
+        if (!m || m.id !== museId) return m;
+        var next = Object.assign({}, m, { model: modelId });
+        if (providerId !== undefined) next.provider = providerId || null;
+        if (engineId !== undefined) next.engineKind = engineId;
+        return next;
       });
       renderMuseModels();
     }
     toast('Model switched to ' + modelId, false,
       previous && previous !== modelId ? {
         label: 'Undo',
-        run: function () { switchMuseModel(museId, previous); },
+        run: function () { switchMuseModel(museId, previous, previousProvider, previousEngine); },
       } : undefined);
   }
 
@@ -5121,6 +5190,28 @@ details:not([open]) > .tool-card-head .tool-chevron {
     } catch (err) {
       var node = el('providerTable');
       if (node) node.innerHTML = '<div class="empty-hint">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  async function triggerImportProviders() {
+    var btn = el('btnImportProviders');
+    if (btn) btn.disabled = true;
+    try {
+      var res = await apiFetch('/api/providers/import', { method: 'POST', body: JSON.stringify({}) });
+      if (res && res.report) {
+        var count = (res.report.imported || []).length;
+        if (count > 0) {
+          toast('Imported ' + count + ' provider(s) from OpenCode');
+        } else {
+          toast('No new OpenCode providers to import');
+        }
+      }
+      await loadProviders();
+      await loadModels();
+    } catch (err) {
+      toast('Failed to import OpenCode providers: ' + err.message, true);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -7365,7 +7456,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     // fallback when no display name was captured). Never both.
     title.innerHTML = '<span class="worker-partition-name" title="' + escapeHtml(worker.shipName || worker.role || 'worker') + '">' + escapeHtml(worker.shipName || worker.role || 'worker') + '</span>' +
       ' <span class="worker-partition-task" title="' + escapeHtml(worker.taskId) + '">' + escapeHtml(worker.taskId) + '</span>' +
-      (worker.model ? ' <span class="tag-mono worker-partition-model">' + escapeHtml(worker.model) + '</span>' : '');
+      (worker.model ? ' <span class="tag-mono worker-partition-model" title="' + escapeHtml(worker.model) + '">' + escapeHtml(worker.model) + '</span>' : '');
 
     var statusWrap = document.createElement('div');
     statusWrap.className = 'worker-partition-meta';
@@ -7412,7 +7503,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
         modelSpan.className = 'tag-mono worker-partition-model';
         title.appendChild(modelSpan);
       }
-      modelSpan.textContent = ' ' + worker.model;
+      modelSpan.textContent = worker.model;
+      modelSpan.title = worker.model;
     }
     if (worker.workspace) {
       var wsLine = partition.querySelector('.worker-partition-workspace-line');
@@ -8510,6 +8602,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (mcpBtn) mcpBtn.addEventListener('click', function () { toggleMcpPopover(); });
 
     // Provider management bindings
+    var btnImportProv = el('btnImportProviders');
+    if (btnImportProv) btnImportProv.addEventListener('click', triggerImportProviders);
     var btnOpenAddProv = el('btnOpenAddProvider');
     if (btnOpenAddProv) btnOpenAddProv.addEventListener('click', openAddProviderModal);
     var provAddClose = el('providerAddClose');

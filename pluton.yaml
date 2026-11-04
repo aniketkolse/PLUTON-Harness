@@ -4,7 +4,7 @@
 version: 1
 
 project:
-  name: Pluton
+  name: Cal ox anime
   repository: .
   default_branch: main
   verification: []
@@ -50,17 +50,17 @@ ships:
     model: opencode/deepseek-v4.1-flash-free
     instructions_file: .pluton/roles/manager.md
     workspace_policy: coordinator-read-only
-    permissions: [project.read, project.write, tests.run, research.report, review.report, verification.report, task.create, task.delegate, task.inspect, task.cancel, task.request_revision, result.collect, diff.inspect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list, scope.declare, scope.release, worker.message]
+    permissions: [ project.read, project.write, tests.run, research.report, review.report, verification.report, task.create, task.delegate, task.inspect, task.cancel, task.request_revision, result.collect, diff.inspect, verification.run, approval.request, ship.propose_create, project.status, run.list, run.inspect, run.start, approvals.list, scope.declare, scope.release, worker.message ]
     approval_mode: ask-for-sensitive-actions
 
   researcher:
     display_name: Researcher - X
     role: researcher
     engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/researcher.md
     workspace_policy: read-only
-    permissions: [project.read, research.report, diff.inspect, worker.message]
+    permissions: [ project.read, research.report, diff.inspect, worker.message ]
     approval_mode: ask-for-sensitive-actions
 
   # Legacy Ship id kept for compatibility; this is the second researcher.
@@ -68,10 +68,10 @@ ships:
     display_name: Researcher - Z
     role: researcher
     engine: opencode
-    model: opencode/glm-5.3-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/researcher.md
     workspace_policy: read-only
-    permissions: [project.read, research.report, diff.inspect, worker.message]
+    permissions: [ project.read, research.report, diff.inspect, worker.message ]
     approval_mode: ask-for-sensitive-actions
 
   # Legacy Ship id kept for compatibility; this is the first coder.
@@ -79,36 +79,36 @@ ships:
     display_name: Coder - X
     role: coder
     engine: opencode
-    model: opencode/glm-5.3-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report, worker.message]
+    permissions: [ project.read, project.write, tests.run, diff.inspect, verification.report, worker.message ]
 
   # Every Ship owns its own model; changing one never rewrites another.
   coder-z:
     display_name: Coder - Z
     role: coder
     engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/worker.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, project.write, tests.run, diff.inspect, verification.report, worker.message]
+    permissions: [ project.read, project.write, tests.run, diff.inspect, verification.report, worker.message ]
 
   qa:
     display_name: QA
     role: tester
     engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/qa.md
     workspace_policy: isolated-task-checkout
-    permissions: [project.read, tests.run, diff.inspect, verification.report, verification.run, worker.message]
+    permissions: [ project.read, tests.run, diff.inspect, verification.report, verification.run, worker.message ]
 
   reviewer:
     display_name: Reviewer
     role: reviewer
     engine: opencode
-    model: opencode/deepseek-v4.1-flash-free
+    model: opencode/nemotron-3.5-super-vl-free
     instructions_file: .pluton/roles/reviewer.md
     workspace_policy: read-only
-    permissions: [project.read, diff.inspect, tests.run, review.report, worker.message]
+    permissions: [ project.read, diff.inspect, tests.run, review.report, worker.message ]
     approval_mode: ask-for-sensitive-actions

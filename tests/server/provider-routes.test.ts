@@ -1,9 +1,11 @@
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bootstrapStore } from '../../src/bootstrap.ts'
 import { loadConfig } from '../../src/config/load.ts'
+import { saveProvider, writeProviderCredential } from '../../src/providers/store.ts'
+import { providerConfigSchema } from '../../src/providers/types.ts'
 import { startAppServer, type AppServerInstance } from '../../src/server/server.ts'
 
 const tmpDirs: string[] = []
@@ -191,6 +193,68 @@ describe('Provider REST API routes', () => {
       expect(badIdRes.status).toBe(400)
       const data = (await badIdRes.json()) as { ok: boolean; error: string }
       expect(data.ok).toBe(false)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('lists imported provider models with a composite id even when the provider is offline', async () => {
+    const { rootDir, fetchApi, cleanup } = await setupServer()
+    try {
+      saveProvider(
+        rootDir,
+        providerConfigSchema.parse({
+          id: '9router',
+          engine: 'openai-compatible',
+          display_name: '9Router',
+          base_url: 'http://127.0.0.1:49123/v1',
+          models: ['ag/gemini-3.8-flash-high', 'ag/claude-opus-4-6-thinking'],
+        }),
+      )
+      writeProviderCredential(rootDir, '9router', 'catalog-test-key')
+
+      const res = await fetchApi('/api/models')
+      expect(res.status).toBe(200)
+      const data = (await res.json()) as {
+        ok: boolean
+        models: Record<string, Array<Record<string, unknown>>>
+      }
+      expect(data.ok).toBe(true)
+      const models = data.models['openai-compatible'] ?? []
+      const gemini = models.find((m) => m['id'] === '9router/ag/gemini-3.8-flash-high')
+      expect(gemini).toMatchObject({
+        id: '9router/ag/gemini-3.8-flash-high',
+        provider: '9router',
+        engine: 'openai-compatible',
+        available: false,
+      })
+      expect(String(gemini?.['reason'])).toContain('ECONNREFUSED')
+      expect(JSON.stringify(data)).not.toContain('catalog-test-key')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('reloads pluton.yaml when the file changes while the server is running', async () => {
+    const { rootDir, fetchApi, cleanup } = await setupServer()
+    try {
+      const first = await fetchApi('/api/workspace')
+      const firstData = (await first.json()) as {
+        workspace: { ships: Array<{ id: string; model: string }> }
+      }
+      expect(firstData.workspace.ships.find((s) => s.id === 'supervisor')?.model).toBe('mock/test')
+
+      const changed = TEST_CONFIG.replace('model: mock/test', 'model: mock/changed')
+      const configPath = join(rootDir, 'pluton.yaml')
+      writeFileSync(configPath, changed, 'utf8')
+      const future = new Date(Date.now() + 5_000)
+      utimesSync(configPath, future, future)
+
+      const second = await fetchApi('/api/workspace')
+      const secondData = (await second.json()) as {
+        workspace: { ships: Array<{ id: string; model: string }> }
+      }
+      expect(secondData.workspace.ships.find((s) => s.id === 'supervisor')?.model).toBe('mock/changed')
     } finally {
       await cleanup()
     }

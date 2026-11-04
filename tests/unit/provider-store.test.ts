@@ -207,6 +207,20 @@ describe('provider config validation', () => {
   it('does not allow a credential to be placed in the provider id', () => {
     expect(() => providerConfigSchema.parse(provider('sk-test-key-value'))).toThrow()
   })
+
+  it('allows provider ids that start with a digit, such as 9router', () => {
+    const parsed = providerConfigSchema.parse(provider('9router'))
+    expect(parsed.id).toBe('9router')
+    saveProvider(root, parsed)
+    expect(getProvider(root, '9router')?.id).toBe('9router')
+  })
+
+  it('carries an optional imported model catalogue', () => {
+    const parsed = providerConfigSchema.parse(
+      provider('9router', { models: ['ag/model-a', 'ag/model-b'] }),
+    )
+    expect(parsed.models).toEqual(['ag/model-a', 'ag/model-b'])
+  })
 })
 
 // A credential file can be replaced by the operator; chmod is only a

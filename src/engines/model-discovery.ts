@@ -17,6 +17,8 @@ import { getEngineAdapter, listEngineKinds, type EngineCreateOptions } from './r
 export interface ModelDiscoveryEngine {
   /** Stable engine adapter kind (part of the registry's composite identity). */
   engineKind: string
+  /** Explicit provider identifier when this probe targets a specific provider. */
+  providerId?: string
   adapter: EngineAdapter
 }
 
@@ -43,6 +45,7 @@ export interface ModelDiscoveryOptions {
 /** Outcome for one adapter probe. */
 export interface EngineDiscoveryResult {
   engineKind: string
+  providerId?: string
   /** False when the adapter threw or its result could not be applied. */
   ok: boolean
   /** Number of valid models reported by the adapter this pass. */
@@ -69,6 +72,7 @@ export interface ModelDiscoveryReport {
 
 interface EngineProbe {
   engineKind: string
+  providerId?: string
   ok: boolean
   models: EngineModel[]
   invalidCount: number
@@ -125,13 +129,14 @@ export class ModelDiscoveryService {
   private timer: unknown = null
 
   constructor(options: ModelDiscoveryOptions) {
-    const byKind = new Map<string, EngineAdapter>()
+    const byKey = new Map<string, ModelDiscoveryEngine>()
     for (const engine of options.engines) {
       if (typeof engine.engineKind !== 'string' || engine.engineKind.length === 0) continue
       if (typeof engine.adapter?.listModels !== 'function') continue
-      byKind.set(engine.engineKind, engine.adapter)
+      const key = engine.providerId ? `${engine.engineKind}:${engine.providerId}` : engine.engineKind
+      byKey.set(key, engine)
     }
-    this.engines = [...byKind].map(([engineKind, adapter]) => ({ engineKind, adapter }))
+    this.engines = [...byKey.values()]
     this.registry = options.registry ?? new ModelRegistry({ now: options.now })
     this.healthMonitor = options.healthMonitor ?? null
     this.intervalMs = options.refreshIntervalMs ?? 0
@@ -141,7 +146,7 @@ export class ModelDiscoveryService {
 
   /** Adapter kinds this service will probe, in registration order. */
   get engineKinds(): readonly string[] {
-    return Object.freeze(this.engines.map((engine) => engine.engineKind))
+    return Object.freeze([...new Set(this.engines.map((engine) => engine.engineKind))])
   }
 
   /** True while a refresh is in flight. */
@@ -183,6 +188,7 @@ export class ModelDiscoveryService {
       const { models, invalidCount } = validModels(listed)
       return {
         engineKind: engine.engineKind,
+        ...(engine.providerId !== undefined ? { providerId: engine.providerId } : {}),
         ok: true,
         models,
         invalidCount,
@@ -192,6 +198,7 @@ export class ModelDiscoveryService {
     } catch (error) {
       return {
         engineKind: engine.engineKind,
+        ...(engine.providerId !== undefined ? { providerId: engine.providerId } : {}),
         ok: false,
         models: [],
         invalidCount: 0,
@@ -215,7 +222,12 @@ export class ModelDiscoveryService {
       let applied: ModelRegistryChange[] = []
       if (ok) {
         try {
-          applied = this.registry.replaceEngineModels(probe.engineKind, probe.models, probe.finishedAt)
+          applied = this.registry.replaceEngineModels(
+            probe.engineKind,
+            probe.models,
+            probe.finishedAt,
+            probe.providerId,
+          )
           if (this.healthMonitor !== null) {
             for (const model of probe.models) {
               const currentHealth = this.healthMonitor.getModelHealth(probe.engineKind, model.id)
@@ -235,6 +247,7 @@ export class ModelDiscoveryService {
       }
       results.push({
         engineKind: probe.engineKind,
+        ...(probe.providerId !== undefined ? { providerId: probe.providerId } : {}),
         ok,
         modelCount: probe.models.length,
         invalidCount: probe.invalidCount,

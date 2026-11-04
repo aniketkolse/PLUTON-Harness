@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs'
-import { bootstrapStore } from '../bootstrap.ts'
+import { existsSync, statSync } from 'node:fs'
+import { bootstrapStore, shipSpecs } from '../bootstrap.ts'
 import { loadConfig, type LoadedConfig } from '../config/load.ts'
 import { NotFoundError } from '../domain/errors.ts'
 import { isTerminalRunState } from '../domain/state.ts'
@@ -20,6 +20,16 @@ export interface ProjectContextItem {
   store: Store
   broadcaster: ServerEventBroadcaster
   logWatcher: ServerLogWatcher
+  /** Last observed mtime of `pluton.yaml`; used to reload edited configs. */
+  configMtimeMs: number
+}
+
+function configMtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
 }
 
 export interface ProjectSummaryItem extends ProjectRegistryEntry {
@@ -68,6 +78,7 @@ export class ProjectContextPool {
       store: options.initialStore,
       broadcaster,
       logWatcher,
+      configMtimeMs: configMtime(options.initialLoaded.configPath),
     })
   }
 
@@ -136,10 +147,40 @@ export class ProjectContextPool {
       store,
       broadcaster,
       logWatcher,
+      configMtimeMs: configMtime(foundEntry.configPath),
     }
 
     this.items.set(foundEntry.id, item)
     return item
+  }
+
+  /**
+   * Reload every cached project whose `pluton.yaml` changed on disk and sync
+   * its Ship rows. Returns true when at least one project was reloaded.
+   *
+   * The config file is the operator's source of truth for Ship identity
+   * (engine, model, provider); an edit must reach the running server without a
+   * restart. Ships removed from the file are disabled, never deleted.
+   */
+  refreshStaleConfigs(): boolean {
+    let reloaded = false
+    for (const item of this.items.values()) {
+      const mtime = configMtime(item.configPath)
+      if (mtime === item.configMtimeMs) continue
+      try {
+        const loaded = loadConfig(item.rootDir)
+        item.loaded = loaded
+        item.name = loaded.config.project.name
+        item.store.syncShips(item.id, shipSpecs(loaded))
+        item.configMtimeMs = mtime
+        reloaded = true
+      } catch {
+        // A half-written or invalid file must not take the server down: keep
+        // serving the last known-good configuration and retry next request.
+        item.configMtimeMs = mtime
+      }
+    }
+    return reloaded
   }
 
   listProjects(): ProjectSummaryItem[] {
