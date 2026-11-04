@@ -260,6 +260,15 @@ describe('PlutonToolBridge — identity and permissions', () => {
       'run.stop',
       'ship.message',
       'ship.inbox',
+      'spec.read',
+      'spec.write',
+      'file.claim',
+      'file.release',
+      'team.broadcast',
+      'file.write',
+      'file.edit',
+      'file.search',
+      'command.exec',
     ])
     const worker = makeBridge(fx, 'worker-a')
     expect(worker.listTools().map((t) => t.name)).toEqual(WORKER_TOOLS)

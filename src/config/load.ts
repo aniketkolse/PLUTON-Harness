@@ -110,5 +110,6 @@ export function engineHomesDir(rootDir: string): string {
 }
 
 export function workspaceDir(rootDir: string): string {
+  // If any ship explicitly uses isolated-task-checkout, workspaces dir still relevant; otherwise use project root
   return join(rootDir, PLUTON_DIR, 'workspaces')
 }

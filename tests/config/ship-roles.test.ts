@@ -53,9 +53,9 @@ describe('Ship Workers Role Registry', () => {
 
   it('verifies default workspace policies and default permissions for each role', () => {
     expect(ROLE_DEFAULT_WORKSPACE_POLICIES['supervisor']).toBe('coordinator-read-only')
-    expect(ROLE_DEFAULT_WORKSPACE_POLICIES['tester']).toBe('isolated-task-checkout')
+    expect(ROLE_DEFAULT_WORKSPACE_POLICIES['tester']).toBe('direct-write')
     expect(ROLE_DEFAULT_WORKSPACE_POLICIES['researcher']).toBe('read-only')
-    expect(ROLE_DEFAULT_WORKSPACE_POLICIES['coder']).toBe('isolated-task-checkout')
+    expect(ROLE_DEFAULT_WORKSPACE_POLICIES['coder']).toBe('direct-write')
     expect(ROLE_DEFAULT_WORKSPACE_POLICIES['reviewer']).toBe('read-only')
 
     expect(ROLE_DEFAULT_PERMISSIONS['supervisor']).toBeDefined()

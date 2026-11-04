@@ -311,3 +311,126 @@ describe('WorkerMessageBus', () => {
     expect(terminalRun.error?.code).toBe('request_conflict')
   })
 })
+
+describe('Team collaboration artifacts', () => {
+  it('publishes a versioned spec, reads it back and records durable events', async () => {
+    const w = makeWorld()
+    const r1 = w.bridge('r1', w.t1.id)
+
+    const created = await r1.call('spec.write', {
+      title: 'API contract',
+      body: 'GET /api/items returns { items }',
+      path: 'docs/api.md',
+    })
+    expect(created.ok).toBe(true)
+    const firstSpec = (created.data as { spec: { id: string; version: number; title: string } }).spec
+    expect(firstSpec.version).toBe(1)
+
+    const updated = await r1.call('spec.write', {
+      specId: firstSpec.id,
+      title: 'API contract',
+      body: 'GET /api/items returns { items, total }',
+      path: 'docs/api.md',
+    })
+    expect(updated.ok).toBe(true)
+    const secondSpec = (updated.data as { spec: { version: number } }).spec
+    expect(secondSpec.version).toBe(2)
+
+    const read = await w.bridge('r2', w.t2.id).call('spec.read', { specId: firstSpec.id })
+    expect(read.ok).toBe(true)
+    const specs = (read.data as { specs: { id: string; version: number; body: string }[] }).specs
+    expect(specs).toHaveLength(1)
+    expect(specs[0]!.version).toBe(2)
+    expect(specs[0]!.body).toContain('total')
+
+    const events = w.store
+      .listEvents(w.runId, { limit: 100 })
+      .filter((e) => e.type.startsWith('worker.spec.'))
+    expect(events.map((e) => e.type).sort()).toEqual(['worker.spec.created', 'worker.spec.updated'])
+  })
+
+  it('claims a file, records the claim durably and releases it', async () => {
+    const w = makeWorld()
+    const r1 = w.bridge('r1', w.t1.id)
+
+    const claim = await r1.call('file.claim', { path: 'src/api.ts', intent: 'implementing the items endpoint' })
+    expect(claim.ok).toBe(true)
+    const claimRecord = (claim.data as { claim: { id: string; path: string } }).claim
+    expect(claimRecord.path).toBe('src/api.ts')
+
+    const released = await r1.call('file.release', { claimId: claimRecord.id })
+    expect(released.ok).toBe(true)
+
+    const events = w.store
+      .listEvents(w.runId, { limit: 100 })
+      .filter((e) => e.type.startsWith('worker.file.'))
+    expect(events.map((e) => e.type).sort()).toEqual(['worker.file.claim', 'worker.file.release'])
+  })
+
+  it('refuses to release a claim owned by another Ship', async () => {
+    const w = makeWorld()
+    const r1 = w.bridge('r1', w.t1.id)
+    const r2 = w.bridge('r2', w.t2.id)
+
+    const claim = await r1.call('file.claim', { path: 'src/app.ts', intent: 'editing entry' })
+    const claimId = (claim.data as { claim: { id: string } }).claim.id
+
+    const stolen = await r2.call('file.release', { claimId })
+    expect(stolen.ok).toBe(false)
+    expect(stolen.error?.code).toBe('validation_failed')
+  })
+
+  it('broadcasts an announcement to every other active Ship in the run', async () => {
+    const w = makeWorld()
+    const r1 = w.bridge('r1', w.t1.id)
+    const r2 = w.bridge('r2', w.t2.id)
+
+    const sent = await r1.call('team.broadcast', {
+      body: 'Switching to the new schema now',
+      kind: 'announcement',
+    })
+    expect(sent.ok).toBe(true)
+    expect((sent.data as { count: number }).count).toBe(1)
+
+    const inbox = await r2.call('ship.inbox', {})
+    const bodies = (inbox.data as { messages: { body: string; kind: string }[] }).messages.map(
+      (m) => ({ body: m.body, kind: m.kind }),
+    )
+    expect(bodies).toContainEqual({ body: 'Switching to the new schema now', kind: 'announcement' })
+  })
+
+  it('live-publishes artifact events without duplicating the durable record', async () => {
+    const w = makeWorld()
+    const artifacts: { type: string; taskId: string | null; shipId: string | null; payload: unknown }[] = []
+    const liveBus = new WorkerMessageBus({
+      store: w.store,
+      projectId: w.projectId,
+      runId: w.runId,
+      wakeups: w.wakeups,
+      onArtifact: (artifact) => artifacts.push(artifact),
+    })
+    const bridge = new PlutonToolBridge({
+      store: w.store,
+      projectId: w.projectId,
+      rootDir: w.dir,
+      runId: w.runId,
+      callerShipId: 'r1',
+      callerTaskId: w.t1.id,
+      limits: LIMITS,
+      wakeups: w.wakeups,
+      messageBus: liveBus,
+    })
+
+    const result = await bridge.call('spec.write', {
+      title: 'Result contract',
+      body: 'task.get_result returns { summary, artifacts }',
+      path: 'docs/contract.md',
+    })
+    expect(result.ok).toBe(true)
+    expect(artifacts).toHaveLength(1)
+    expect(artifacts[0]!.type).toBe('worker.spec.created')
+    expect(artifacts[0]!.taskId).toBe(w.t1.id)
+    expect(artifacts[0]!.shipId).toBe('r1')
+    expect((artifacts[0]!.payload as { shipName?: string }).shipName).toBe('Researcher X')
+  })
+})

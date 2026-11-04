@@ -422,8 +422,15 @@ export function evaluateEnginePermission(
     .join('\n')
   const mutating = isMutatingRequest(kind, state.commands, state.paths, `${title} ${description}`)
 
-  if ((context.isManager === true || context.workspacePolicy !== 'isolated-task-checkout') && mutating) {
-    addSignal(context.isManager === true ? 'session:manager' : `workspace:${context.workspacePolicy}`)
+  if (
+    (context.isManager === true ||
+      (context.workspacePolicy !== 'isolated-task-checkout' &&
+        context.workspacePolicy !== 'direct-write')) &&
+    mutating
+  ) {
+    addSignal(
+      context.isManager === true ? 'session:manager' : `workspace:${context.workspacePolicy}`,
+    )
     return {
       outcome: 'deny',
       risk: 'high',

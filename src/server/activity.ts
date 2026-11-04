@@ -53,6 +53,16 @@ function messageVerb(kind: string): string {
       return 'handed off work'
     case 'instruction':
       return 'sent an instruction'
+    case 'idea':
+      return 'floated an idea'
+    case 'progress':
+      return 'gave a progress update'
+    case 'announcement':
+      return 'announced to the team'
+    case 'discussion':
+      return 'discussed with the team'
+    case 'request':
+      return 'made a request'
     default:
       return 'sent a message'
   }
@@ -205,6 +215,36 @@ export class ActivityMapper {
         // The actor label already names the sender; repeating it in the text
         // would show every identity twice in one row.
         return item('worker', sender, `→ ${recipient}: ${messageVerb(kind)}`, 'message', body)
+      }
+      case 'worker.spec.created':
+      case 'worker.spec.updated': {
+        const label = this.label(taskId, data)
+        const title = str(data['title']) ?? 'spec'
+        const version = typeof data['version'] === 'number' ? data['version'] : 1
+        const isNew = event.type === 'worker.spec.created'
+        return item(
+          'worker',
+          label,
+          `${isNew ? 'published' : 'updated'} spec “${clip(title, MAX_TEXT)}” (v${version})`,
+          'info',
+        )
+      }
+      case 'worker.file.claim': {
+        const label = this.label(taskId, data)
+        const path = str(data['path']) ?? 'a file'
+        const intent = str(data['intent'])
+        return item(
+          'worker',
+          label,
+          `claimed ${clip(path, MAX_TEXT)}`,
+          'info',
+          intent !== null ? clip(intent, MAX_DETAIL) : null,
+        )
+      }
+      case 'worker.file.release': {
+        const label = this.label(taskId, data)
+        const path = str(data['path']) ?? 'a file'
+        return item('worker', label, `released ${clip(path, MAX_TEXT)}`, 'info')
       }
       case 'task.awaiting_verification': {
         const label = this.label(taskId, data)

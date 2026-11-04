@@ -287,6 +287,11 @@ export class PlutonToolBridge implements McpToolHost {
       'project.read',
       'ship.message',
       'ship.inbox',
+      'spec.read',
+      'spec.write',
+      'file.claim',
+      'file.release',
+      'team.broadcast',
       'approval.request',
       'review.report',
       'ship.propose_create',
@@ -297,6 +302,9 @@ export class PlutonToolBridge implements McpToolHost {
     // Scope-management tools: only relevant when the task has a write scope
     const scopeTools = new Set(['scope.declare', 'scope.release'])
 
+    // Direct-write tools: always allowed; lease manager enforces conflicts
+    const directWriteTools = new Set(['file.write', 'file.edit', 'command.exec', 'file.search'])
+
     const result: McpToolInfo[] = []
     for (const tool of availableTools) {
       // Never include tools the caller lacks permission for
@@ -305,6 +313,12 @@ export class PlutonToolBridge implements McpToolHost {
 
       // Always-available tools are always included
       if (alwaysAvailable.has(tool.name)) {
+        result.push(tool)
+        continue
+      }
+
+      // Direct-write tools bypass scope filtering
+      if (directWriteTools.has(tool.name)) {
         result.push(tool)
         continue
       }

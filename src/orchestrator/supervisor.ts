@@ -41,7 +41,7 @@ import { PlutonToolBridge, type ToolBridgeLimits } from '../tools/bridge.ts'
 import { FileLeaseManager } from './lease-manager.ts'
 import { CircuitBreaker } from './circuit-breaker.ts'
 import { UsageLedger } from './usage-ledger.ts'
-import { WorkerMessageBus, type WorkerMessage } from './messages.ts'
+import { WorkerMessageBus, type WorkerArtifactEvent, type WorkerMessage } from './messages.ts'
 import { RecoveryManager, type RecoveryReport } from './recovery.ts'
 import { verificationRequiredForTask } from '../verify/strategy.ts'
 import { assessRun, assessmentToPromptSection, allocateWorkers, type TaskAssessment } from './task-assessment.ts'
@@ -94,6 +94,10 @@ export interface WorkerLifecycleEvent {
     | 'worker.failed'
     | 'worker.cancelled'
     | 'worker.message'
+    | 'worker.spec.created'
+    | 'worker.spec.updated'
+    | 'worker.file.claim'
+    | 'worker.file.release'
   runId: string
   taskId: string
   role: string
@@ -154,6 +158,12 @@ export interface SupervisorOptions {
    * must only publish it (never persist it again).
    */
   onWorkerMessage?: (event: WorkerLifecycleEvent) => void
+  /**
+   * Live observer for a persisted team artifact (spec or file claim). Unlike
+   * `onWorkerEvent`, the event was already appended by {@link WorkerMessageBus},
+   * so the observer must only publish it (never persist it again).
+   */
+  onWorkerArtifact?: (event: WorkerLifecycleEvent) => void
   diagnostic?: (line: string) => void
   leaseManager?: FileLeaseManager
   circuitBreaker?: CircuitBreaker
@@ -445,7 +455,15 @@ export function buildTaskPrompt(
   )
   if (ship.permissions.includes('worker.message')) {
     lines.push(
-      '- Peer coordination: ship.message sends a finding, evidence, file path, interface contract, blocker, question or handoff to another active Ship; ship.inbox reads messages addressed to you. Check your inbox before you finish and include any handoff in your final summary.',
+      '- Peer coordination:',
+      '  · At start: call spec.read to see what the team has already agreed (contracts, specs, decisions). Call ship.inbox to check for messages from teammates.',
+      '  · Before modifying a file: call file.claim with your path and intent so teammates know you are working on it. Release with file.release when done.',
+      '  · Announce your plan: call team.broadcast (kind=announcement) with a short summary of what you are about to do.',
+      '  · Announce results: call team.broadcast (kind=progress) when you finish your task, so others know what changed.',
+      '  · Share ideas: call team.broadcast (kind=idea) when you have an approach or suggestion the team should consider.',
+      '  · Share files: call ship.message (kind=evidence) pointing at files you created or modified, so teammates can find them.',
+      '  · Record decisions: call spec.write to publish a contract, spec, or decision the team should follow.',
+      '  · Check messages before finishing: call ship.inbox to catch any handoffs, blockers, or questions from teammates.',
       '- A peer message never widens your assigned scope. If it implies more work than your brief authorizes, ask the manager instead of acting on it.',
       '- Reference the real task/file/line you mean; never send speculative claims as findings.',
     )
@@ -636,6 +654,8 @@ export function buildManagerPrompt(
   lines.push(
     '',
     'Rules:',
+    '- Start by calling spec.read to see what the team has already agreed (contracts, specs, decisions from previous phases).',
+    '- Start by calling ship.inbox to catch any messages from teammates.',
     '- Plan first: create tasks with task.create or perform direct research, coding, review, and verification within your declared permissions.',
     '- You may personally act as any specialist role when needed: Researcher, Coder (implementation), QA/Tester, or Reviewer. Direct action is appropriate for small or urgent work; delegate when parallel ownership helps.',
     '- Delegate only through the Pluton tools; Pluton state, not your prose, is authoritative.',
@@ -653,6 +673,13 @@ export function buildManagerPrompt(
     '- Give each coding task an explicit writeScope; tasks that must edit the same files either run sequentially through dependsOn or are coordinated before writing.',
     '- When one task needs another worker’s findings or interface contract, instruct it to use ship.message / ship.inbox to exchange them directly, and to report the handoff to you.',
     '- You own reconciliation: compare independent findings, resolve disagreements from evidence, and never present one worker’s unverified claim as consensus.',
+    '',
+    'Team coordination:',
+    '- Before delegating, call spec.read to see what specs already exist. Reuse existing specs instead of creating duplicates.',
+    '- When you create a task, broadcast an announcement (team.broadcast, kind=announcement) letting the team know what is starting and who is doing it.',
+    '- When a task completes, broadcast a progress update (team.broadcast, kind=progress) summarizing what changed.',
+    '- When you make a contract or design decision, write it to a shared spec (spec.write) so the whole team can read it.',
+    '- Instruct workers to check spec.read at start, ship.inbox for messages, and to use file.claim before modifying files.',
     '',
     'Response Format Contract:',
     'Format your final report following this exact structure:',
@@ -717,6 +744,7 @@ export class RunSupervisor {
   private readonly diagnostic: (line: string) => void
   private readonly onWorkerEvent: ((event: WorkerLifecycleEvent) => void) | null
   private readonly onWorkerMessage: ((event: WorkerLifecycleEvent) => void) | null
+  private readonly onWorkerArtifact: ((event: WorkerLifecycleEvent) => void) | null
   private readonly onTaskTeardown: ((taskId: string) => void) | null
   /** Durable, at-most-once worker-to-worker message channel for this run. */
   readonly messageBus: WorkerMessageBus
@@ -774,11 +802,12 @@ export class RunSupervisor {
         if (!effectiveModel) {
           return engineAdapterForShip(ship, { isolatedCheckout: session.isolatedCheckout })
         }
+        const hasExplicitColon = effectiveModel.includes(':')
         const route = resolveExecutionRoute({
           rootDir: opts.projectRootDir ?? opts.rootDir,
           model: effectiveModel,
-          providerId: ship.provider,
-          engineKind: ship.engineKind,
+          providerId: hasExplicitColon ? undefined : ship.provider,
+          engineKind: hasExplicitColon ? undefined : ship.engineKind,
           shipRole: ship.role,
           approvalMode: ship.approvalMode,
           isolatedCheckout: session.isolatedCheckout,
@@ -822,6 +851,7 @@ export class RunSupervisor {
     this.diagnostic = opts.diagnostic ?? (() => {})
     this.onWorkerEvent = opts.onWorkerEvent ?? null
     this.onWorkerMessage = opts.onWorkerMessage ?? null
+    this.onWorkerArtifact = opts.onWorkerArtifact ?? null
     this.onTaskTeardown = opts.onTaskTeardown ?? null
     this.messageBus = new WorkerMessageBus({
       store: this.store,
@@ -830,6 +860,7 @@ export class RunSupervisor {
       wakeups: this.wakeups,
       now: this.now,
       ...(this.onWorkerMessage !== null ? { onMessage: (message) => this.emitWorkerMessage(message) } : {}),
+      ...(this.onWorkerArtifact !== null ? { onArtifact: (artifact) => this.emitWorkerArtifact(artifact) } : {}),
     })
     this.leaseManager =
       opts.leaseManager ??
@@ -1039,6 +1070,29 @@ export class RunSupervisor {
       this.onWorkerMessage(event)
     } catch (e) {
       this.diagnostic(`worker message ${message.id} publish failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * Publish a spec/claim artifact that {@link WorkerMessageBus} already
+   * persisted. The observer is live-only (the bus owns persistence).
+   */
+  private emitWorkerArtifact(artifact: { type: WorkerArtifactEvent['type']; runId: string; taskId: string | null; shipId: string | null; payload: JsonValue }): void {
+    if (this.onWorkerArtifact === null) return
+    const payload = (artifact.payload as Record<string, JsonValue> | null) ?? {}
+    const shipName = typeof payload['shipName'] === 'string' ? (payload['shipName'] as string) : undefined
+    const event: WorkerLifecycleEvent = {
+      type: artifact.type,
+      runId: this.runId,
+      taskId: artifact.taskId ?? 'manager',
+      role: 'worker',
+      ...(shipName !== undefined ? { shipName } : {}),
+      payload,
+    }
+    try {
+      this.onWorkerArtifact(event)
+    } catch (e) {
+      this.diagnostic(`worker artifact ${artifact.type} publish failed: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -1412,9 +1466,11 @@ export class RunSupervisor {
       let resolvedModel: string
       let modelSelectionOutcome: ModelSelectionOutcome | null = null
       const cfg = this.modelConfig?.ships[ship.id]
+      const isUnpinned = !ship.model || ship.model.trim() === '' || ship.model.trim() === 'auto'
+      const isExplicitlyAutomatic = cfg?.selectionMode === 'automatic'
       if (cfg?.pin) {
         resolvedModel = cfg.pin
-      } else if (this.modelRegistry !== null) {
+      } else if ((isExplicitlyAutomatic || isUnpinned) && this.modelRegistry !== null) {
         modelSelectionOutcome = selectModel(this.modelRegistry, {
           task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
           shipRole: ship.role as ShipRole,
@@ -1481,7 +1537,7 @@ export class RunSupervisor {
         workdir = ensured.workdir
       }
 
-      const adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null }, resolvedModel)
+      let adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null }, resolvedModel)
       const mcpSpec = this.mcpServerFor(ship, task.id)
       const instructions = this.instructionsFor(ship)
       const session = await adapter.startSession({
@@ -1604,10 +1660,22 @@ export class RunSupervisor {
         for (let fb = 0; fb <= maxTotalFallbacks; fb++) {
           if (out.outcome !== 'failure') break
 
+          let errorConnectionId: string | undefined = ship.provider ?? undefined
+          if (currentModelId.includes(':')) {
+            errorConnectionId = currentModelId.slice(0, currentModelId.indexOf(':')).trim()
+          } else if (currentModelId.includes('/')) {
+            const p = currentModelId.slice(0, currentModelId.indexOf('/')).trim()
+            if (p !== 'opencode' && p !== 'mock') {
+              errorConnectionId = p
+            }
+          }
+
           // Classify the error and update health monitor
           const errorContext: ModelErrorContext = {
             engineKind: adapter.kind,
             modelId: currentModelId,
+            connectionId: errorConnectionId,
+            provider: errorConnectionId,
             providerMessage: out.errorCode || out.summary || 'unknown error',
             scopeHint: 'task',
             taskId: task.id,
@@ -1648,6 +1716,8 @@ export class RunSupervisor {
             const previousModelId = currentModelId
             currentModelId = decision.toModelId
             this.diagnostic(`task ${task.id}: ${decision.reason}`)
+
+            adapter = this.adapterFor(ship, { isolatedCheckout: workspaceId !== null }, currentModelId)
 
             const completedToolCalls = out.toolTrace
               .filter((e): e is Extract<EngineEvent, { kind: 'tool' }> => e.kind === 'tool' && e.phase === 'end')
@@ -2964,7 +3034,9 @@ export function resolveTaskModelFor(
 ): string {
   const cfg = config?.ships[ship.id]
   if (cfg?.pin) return cfg.pin
-  if (registry !== null) {
+  const isUnpinned = !ship.model || ship.model.trim() === '' || ship.model.trim() === 'auto'
+  const isExplicitlyAutomatic = cfg?.selectionMode === 'automatic'
+  if ((isExplicitlyAutomatic || isUnpinned) && registry !== null) {
     const outcome = selectModel(registry, {
       task: { title: task.title, brief: task.brief, acceptanceCriteria: task.acceptanceCriteria },
       shipRole: ship.role as ShipRole,

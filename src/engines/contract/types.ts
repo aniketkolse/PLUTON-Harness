@@ -31,6 +31,26 @@ export interface EngineDiscovery {
   fix: string
 }
 
+export interface CompositeModelKey {
+  /** Connection id (or engineKind if unassociated). */
+  connectionId: string
+  /** Exact opaque model id as reported by the adapter. */
+  modelId: string
+}
+
+export interface ModelCapabilityDeclaration {
+  /** Whether these capabilities have been verified by test/probe or are operator-declared. */
+  verified: boolean
+  /** Whether the model supports tool / function calling. */
+  toolCalling: boolean
+  /** Context window size in tokens, when known. */
+  contextWindow?: number
+  /** Whether the model is suited for coding tasks. */
+  coding: boolean
+  /** Whether the model is suited for reasoning tasks. */
+  reasoning: boolean
+}
+
 export interface EngineModel {
   /** Exact provider-qualified id as reported by the engine (never normalized). */
   id: string
@@ -41,6 +61,10 @@ export interface EngineModel {
   /** Opaque provider identity as reported by the adapter, when known.
    * Never inferred from the model id or label. */
   provider?: string
+  /** Explicit connection id when this model is tied to a specific provider connection. */
+  connectionId?: string
+  /** User-declared or verified capability declaration. */
+  capabilityDeclaration?: ModelCapabilityDeclaration
   /** Capability metadata reported by the provider or discovered at runtime.
    * All fields optional: missing metadata is treated as unknown, never fabricated. */
   capabilities?: ModelCapabilities

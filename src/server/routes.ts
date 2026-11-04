@@ -38,7 +38,20 @@ import {
   providerValidate,
 } from '../cli/commands/provider.ts'
 import { editShip } from '../cli/commands/ship.ts'
-import { getProvider, hasProviderCredential, listProviders } from '../providers/store.ts'
+import {
+  getConnection,
+  getProvider,
+  hasProviderCredential,
+  listConnections,
+  listManualModels,
+  listProviders,
+  removeConnection,
+  removeConnectionCredential,
+  saveConnection,
+  saveManualModel,
+  writeConnectionCredential,
+} from '../providers/store.ts'
+import type { ConnectionConfig, ManualModelEntry } from '../providers/types.ts'
 import { importOpenCodeProviders } from '../providers/opencode-import.ts'
 import { safeResolvePath, protectedWorkspaceSegment } from './security.ts'
 import { buildRunActivity } from './activity.ts'
@@ -1441,6 +1454,28 @@ export class ApiRouter {
           }
         }
 
+        const manual = rootDir ? listManualModels(rootDir) : []
+        if (manual.length > 0) {
+          if (!modelsByEngine['openai-compatible']) {
+            modelsByEngine['openai-compatible'] = []
+          }
+          const existing = modelsByEngine['openai-compatible'] as Array<Record<string, unknown>>
+          for (const m of manual) {
+            const compositeId = `${m.connectionId}:${m.modelId}`
+            if (!existing.some((e) => e['id'] === compositeId || e['id'] === m.modelId)) {
+              existing.push({
+                id: compositeId,
+                label: m.displayName ?? m.modelId,
+                available: true,
+                source: 'manual',
+                provider: m.connectionId,
+                engine: 'openai-compatible',
+                capabilities: m.capabilities,
+              })
+            }
+          }
+        }
+
         if (this.customModels.length > 0) {
           modelsByEngine['custom'] = this.customModels.map((m) => ({ ...m, available: true }))
         }
@@ -1523,11 +1558,19 @@ export class ApiRouter {
 
         try {
           const isCustom = this.customModels.some((m) => m.id === requested)
+          const manualModels = listManualModels(rootDir)
+          const isManual = manualModels.some(
+            (m) =>
+              m.modelId === requested ||
+              m.modelId === (targetRoute?.providerModelId ?? requested) ||
+              `${m.connectionId}:${m.modelId}` === requested ||
+              `${m.connectionId}/${m.modelId}` === requested,
+          )
           const adapter = getEngineAdapter(targetEngine, {
             rootDir,
             providerId: targetProvider,
           })
-          if (!isCustom && adapter.capabilities().modelList) {
+          if (!isCustom && !isManual && adapter.capabilities().modelList) {
             const available = await adapter.listModels()
             const checkModelId = targetRoute?.providerModelId ?? requested
             const known = available.some(
@@ -1536,7 +1579,8 @@ export class ApiRouter {
                 m.id === checkModelId ||
                 m.label === requested ||
                 m.label === checkModelId ||
-                (targetProvider !== undefined && `${targetProvider}/${m.id}` === requested),
+                (targetProvider !== undefined && `${targetProvider}/${m.id}` === requested) ||
+                (targetProvider !== undefined && `${targetProvider}:${m.id}` === requested),
             )
             if (!known && available.length > 0) {
               this.sendJson(res, 400, {
@@ -1591,6 +1635,12 @@ export class ApiRouter {
           model: requested,
           provider: targetProvider ?? null,
           engine: targetEngine,
+          ship: {
+            id: ship.id,
+            model: requested,
+            engine: targetEngine,
+            provider: targetProvider ?? null,
+          },
           engineSessionRestarted: restarted,
         })
         return true
@@ -1774,6 +1824,158 @@ export class ApiRouter {
           ok: true,
           model: { id: modelName, name: modelName, desc: 'Custom registered AI model' },
         })
+        return true
+      }
+
+      // 25b. Connection Management (Multi-Connection Support)
+      if (pathname === '/api/connections' && method === 'GET') {
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const connections = listConnections(rootDir).map((c) => ({
+          ...c,
+          hasCredential: hasProviderCredential(rootDir, c.id),
+        }))
+        this.sendJson(res, 200, { ok: true, connections })
+        return true
+      }
+
+      if (pathname === '/api/connections' && method === 'POST') {
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const payload = await this.readJsonBody<{
+          id?: string
+          providerId?: string
+          displayName?: string
+          baseUrl?: string
+          protocol?: 'openai-compatible' | 'anthropic' | 'google' | 'custom'
+          authStyle?: 'bearer' | 'header'
+          authHeader?: string
+          authPrefix?: string
+          modelsPath?: string
+          chatPath?: string
+          models?: string[]
+          customHeaders?: Record<string, string>
+          headers?: Record<string, string>
+          timeoutMs?: number
+          apiKey?: string
+        }>(req)
+
+        if (!payload || typeof payload !== 'object') {
+          throw new ValidationError('expected JSON object body')
+        }
+        if (!payload.id || typeof payload.id !== 'string') {
+          throw new ValidationError('missing or invalid connection id')
+        }
+        if (!payload.baseUrl || typeof payload.baseUrl !== 'string') {
+          throw new ValidationError('missing or invalid baseUrl')
+        }
+
+        const connConfig: ConnectionConfig = {
+          id: payload.id.trim(),
+          providerId: payload.providerId?.trim() || payload.id.trim(),
+          displayName: payload.displayName?.trim() || payload.id.trim(),
+          baseUrl: payload.baseUrl.trim(),
+          protocol: payload.protocol ?? 'openai-compatible',
+          auth: {
+            style: payload.authStyle ?? 'bearer',
+            ...(payload.authHeader ? { header: payload.authHeader } : {}),
+            ...(payload.authPrefix ? { prefix: payload.authPrefix } : {}),
+          },
+          ...(payload.modelsPath ? { modelsPath: payload.modelsPath } : {}),
+          ...(payload.chatPath ? { chatPath: payload.chatPath } : {}),
+          ...(payload.models ? { models: payload.models } : {}),
+          ...(payload.customHeaders || payload.headers ? { customHeaders: payload.customHeaders ?? payload.headers } : {}),
+          ...(payload.timeoutMs ? { timeoutMs: payload.timeoutMs } : {}),
+        }
+
+        saveConnection(rootDir, connConfig)
+
+        if (payload.apiKey && typeof payload.apiKey === 'string') {
+          writeConnectionCredential(rootDir, connConfig.id, payload.apiKey)
+        }
+
+        this.sendJson(res, 200, {
+          ok: true,
+          connection: {
+            ...connConfig,
+            hasCredential: Boolean(payload.apiKey || hasProviderCredential(rootDir, connConfig.id)),
+          },
+        })
+        return true
+      }
+
+      const connectionValidateMatch = pathname.match(/^\/api\/connections\/([^/]+)\/validate$/)
+      if (connectionValidateMatch && method === 'POST') {
+        const connectionId = decodeURIComponent(connectionValidateMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const report = await providerValidate(rootDir, connectionId)
+        this.sendJson(res, 200, { ok: true, report })
+        return true
+      }
+
+      const connectionModelsMatch = pathname.match(/^\/api\/connections\/([^/]+)\/models$/)
+      if (connectionModelsMatch && method === 'POST') {
+        const connectionId = decodeURIComponent(connectionModelsMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const conn = getConnection(rootDir, connectionId)
+        if (!conn) {
+          throw new NotFoundError('connection', connectionId)
+        }
+        const payload = await this.readJsonBody<{
+          modelId?: string
+          displayName?: string
+          capabilities?: {
+            toolCalling?: boolean
+            contextWindow?: number
+            coding?: boolean
+            reasoning?: boolean
+          }
+        }>(req)
+        if (!payload?.modelId || typeof payload.modelId !== 'string') {
+          throw new ValidationError('missing or invalid modelId')
+        }
+        const entry: ManualModelEntry = {
+          connectionId,
+          modelId: payload.modelId.trim(),
+          displayName: payload.displayName?.trim(),
+          capabilities: payload.capabilities,
+          registeredAt: new Date().toISOString(),
+        }
+        saveManualModel(rootDir, entry)
+        this.sendJson(res, 200, { ok: true, model: entry })
+        return true
+      }
+
+      if (connectionModelsMatch && method === 'GET') {
+        const connectionId = decodeURIComponent(connectionModelsMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const models = listManualModels(rootDir, connectionId)
+        this.sendJson(res, 200, { ok: true, models })
+        return true
+      }
+
+      const connectionItemMatch = pathname.match(/^\/api\/connections\/([^/]+)$/)
+      if (connectionItemMatch && method === 'GET') {
+        const connectionId = decodeURIComponent(connectionItemMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const conn = getConnection(rootDir, connectionId)
+        if (!conn) {
+          throw new NotFoundError('connection', connectionId)
+        }
+        this.sendJson(res, 200, {
+          ok: true,
+          connection: {
+            ...conn,
+            hasCredential: hasProviderCredential(rootDir, connectionId),
+          },
+        })
+        return true
+      }
+
+      if (connectionItemMatch && method === 'DELETE') {
+        const connectionId = decodeURIComponent(connectionItemMatch[1]!)
+        const rootDir = this.ctx.loaded?.rootDir ?? process.cwd()
+        const removed = removeConnection(rootDir, connectionId)
+        removeConnectionCredential(rootDir, connectionId)
+        this.sendJson(res, 200, { ok: true, removed })
         return true
       }
 
@@ -2020,6 +2222,12 @@ export class ApiRouter {
       onWorkerMessage: (event) => {
         // The bus already appended the durable `worker.message` event: publish
         // the live frame without persisting a duplicate.
+        broadcaster.broadcastWorkerEvent(event, store, projectId, {
+          persist: false,
+        })
+      },
+      onWorkerArtifact: (event) => {
+        // The bus already appended the durable artifact event: publish live only.
         broadcaster.broadcastWorkerEvent(event, store, projectId, {
           persist: false,
         })

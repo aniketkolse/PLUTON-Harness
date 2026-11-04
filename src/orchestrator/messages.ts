@@ -19,6 +19,52 @@ import type { WakeupRegistry } from './wakeups.ts'
  * cancellation/failure cannot leave a worker blocked.
  */
 
+export interface SharedSpec {
+  /** Stable id (`spec_…`) — never derived from a display name. */
+  id: string
+  /** Durable event seq: total order and the activity-feed key. */
+  seq: number
+  runId: string
+  title: string
+  body: string
+  /** Absolute workspace-relative path where the spec lives. */
+  path: string
+  /** Ship that last updated this spec. */
+  updatedByShipId: string | null
+  /** Ship that created this spec. */
+  createdByShipId: string | null
+  createdAt: number
+  updatedAt: number
+  version: number
+}
+
+export interface SharedSpecUpdateInput {
+  title: string
+  body: string
+  path: string
+  updatedByShipId: string | null
+}
+
+export interface GetSharedSpecInput {
+  title?: string
+  path?: string
+  query?: string
+  limit?: number
+}
+
+export interface FileClaim {
+  id: string
+  runId: string
+  shipId: string
+  taskId: string | null
+  /** Workspace-relative path. */
+  path: string
+  /** The exact content or intent the ship is working on. */
+  intent: string
+  claimedAt: number
+  releasedAt: number | null
+}
+
 export const WORKER_MESSAGE_KINDS = [
   'finding',
   'evidence',
@@ -27,6 +73,11 @@ export const WORKER_MESSAGE_KINDS = [
   'question',
   'handoff',
   'instruction',
+  'idea',
+  'progress',
+  'announcement',
+  'discussion',
+  'request',
 ] as const
 
 export type WorkerMessageKind = (typeof WORKER_MESSAGE_KINDS)[number]
@@ -38,6 +89,10 @@ export const MAX_INBOX_LIMIT = 50
 
 const MESSAGE_EVENT = 'worker.message'
 const DELIVERED_EVENT = 'worker.message.delivered'
+export const SPEC_EVENT = 'worker.spec.updated'
+export const SPEC_CREATED_EVENT = 'worker.spec.created'
+export const CLAIM_EVENT = 'worker.file.claim'
+export const RELEASE_EVENT = 'worker.file.release'
 
 export interface WorkerMessage {
   /** Stable id (`msg_…`) — never derived from a display name. */
@@ -76,6 +131,14 @@ export interface InboxInput {
   signal?: AbortSignal
 }
 
+export interface WorkerArtifactEvent {
+  type: 'worker.spec.created' | 'worker.spec.updated' | 'worker.file.claim' | 'worker.file.release'
+  runId: string
+  taskId: string | null
+  shipId: string | null
+  payload: JsonValue
+}
+
 export interface WorkerMessageBusOptions {
   store: Store
   projectId: string
@@ -84,6 +147,8 @@ export interface WorkerMessageBusOptions {
   now?: () => number
   /** Live observer for a just-persisted message. Never persisted again here. */
   onMessage?: (message: WorkerMessage) => void
+  /** Live observer for a just-persisted spec/claim artifact. Never persists again here. */
+  onArtifact?: (event: WorkerArtifactEvent) => void
   maxMessagesPerRun?: number
   maxBodyChars?: number
 }
@@ -138,6 +203,7 @@ export class WorkerMessageBus {
   private readonly wakeups: WakeupRegistry
   private readonly now: () => number
   private readonly onMessage: ((message: WorkerMessage) => void) | null
+  private readonly onArtifact: ((event: WorkerArtifactEvent) => void) | null
   private readonly maxMessagesPerRun: number
   private readonly maxBodyChars: number
   /** Every retained message, in send order. */
@@ -156,6 +222,7 @@ export class WorkerMessageBus {
     this.wakeups = opts.wakeups
     this.now = opts.now ?? Date.now
     this.onMessage = opts.onMessage ?? null
+    this.onArtifact = opts.onArtifact ?? null
     this.maxMessagesPerRun = opts.maxMessagesPerRun ?? MAX_MESSAGES_PER_RUN
     this.maxBodyChars = opts.maxBodyChars ?? MAX_MESSAGE_BODY_CHARS
     this.rebuild()
@@ -472,5 +539,261 @@ export class WorkerMessageBus {
   /** Expose one message by id (message detail view), or null. */
   get(messageId: string): WorkerMessage | null {
     return this.byId.get(messageId) ?? null
+  }
+
+  // -- Shared specs ----------------------------------------------------
+
+  private specFromEvent(event: {
+    seq: number
+    runId: string | null
+    payload: JsonValue
+  }): SharedSpec | null {
+    const payload = objectOf(event.payload)
+    if (payload === null) return null
+    const id = stringOf(payload['specId'])
+    const title = stringOf(payload['title'])
+    const body = stringOf(payload['body'])
+    const path = stringOf(payload['path'])
+    if (id === null || title === null || body === null || path === null) return null
+    const versionRaw = payload['version']
+    return {
+      id,
+      seq: event.seq,
+      runId: event.runId ?? '',
+      title,
+      body,
+      path,
+      updatedByShipId: stringOf(payload['updatedByShipId']),
+      createdByShipId: stringOf(payload['createdByShipId']),
+      createdAt: typeof payload['createdAt'] === 'number' ? payload['createdAt'] : Date.now(),
+      updatedAt: typeof payload['updatedAt'] === 'number' ? payload['updatedAt'] : Date.now(),
+      version: typeof versionRaw === 'number' ? versionRaw : 1,
+    }
+  }
+
+  /** List all shared specs for this run, newest first. */
+  listSpecs(limit = 50): SharedSpec[] {
+    this.refresh()
+    const events = this.store.listEvents(this.runId, { limit: this.maxMessagesPerRun })
+    const specs = new Map<string, SharedSpec>()
+    for (const event of [...events].reverse()) {
+      if (event.type !== SPEC_EVENT && event.type !== SPEC_CREATED_EVENT) continue
+      const spec = this.specFromEvent(event)
+      if (spec === null) continue
+      const existing = specs.get(spec.id)
+      if (existing === undefined || event.seq > existing.seq) {
+        specs.set(spec.id, spec)
+      }
+    }
+    return [...specs.values()]
+      .sort((a, b) => b.seq - a.seq)
+      .slice(0, limit)
+  }
+
+  /** Get a specific spec by ID. */
+  getSpec(specId: string): SharedSpec | null {
+    for (const spec of this.listSpecs(this.maxMessagesPerRun)) {
+      if (spec.id === specId) return spec
+    }
+    return null
+  }
+
+  /** Create or update a shared spec. */
+  upsertSpec(input: {
+    title: string
+    body: string
+    path: string
+    updatedByShipId: string | null
+    createdByShipId?: string | null
+    specId?: string
+    taskId?: string | null
+    shipName?: string | null
+  }): SharedSpec {
+    this.assertLive()
+    const now = this.now()
+    const id = input.specId ?? newId('spec')
+    const createdByShipId = input.createdByShipId ?? input.updatedByShipId ?? null
+    const events = this.store.listEvents(this.runId, { limit: this.maxMessagesPerRun })
+    let version = 1
+    for (const event of [...events].reverse()) {
+      if (event.type !== SPEC_EVENT && event.type !== SPEC_CREATED_EVENT) continue
+      const existing = this.specFromEvent(event)
+      if (existing !== null && existing.id === id) {
+        version = existing.version + 1
+        break
+      }
+    }
+    const type = version === 1 ? SPEC_CREATED_EVENT : SPEC_EVENT
+    const record = this.store.appendEvent({
+      projectId: this.projectId,
+      runId: this.runId,
+      ...(input.taskId !== undefined && input.taskId !== null ? { taskId: input.taskId } : {}),
+      type,
+      maxChars: 16_000,
+      payload: {
+        specId: id,
+        title: input.title,
+        body: input.body,
+        path: input.path,
+        version,
+        createdByShipId,
+        updatedByShipId: input.updatedByShipId,
+        ...(input.shipName !== undefined ? { shipName: input.shipName } : {}),
+        createdAt: now,
+        updatedAt: now,
+      },
+    })
+    const persisted = this.specFromEvent(record)
+    if (persisted === null) throw new ValidationError('spec payload was rejected')
+    this.emitArtifact({
+      type: version === 1 ? 'worker.spec.created' : 'worker.spec.updated',
+      runId: this.runId,
+      taskId: input.taskId ?? null,
+      shipId: input.updatedByShipId,
+      payload: {
+        specId: persisted.id,
+        title: persisted.title,
+        path: persisted.path,
+        version: persisted.version,
+        ...(input.shipName !== undefined ? { shipName: input.shipName } : {}),
+      },
+    })
+    return persisted
+  }
+
+  // -- File claims -----------------------------------------------------
+
+  private letterFromEvent(event: {
+    seq: number
+    runId: string | null
+    payload: JsonValue
+  }): FileClaim | null {
+    const payload = objectOf(event.payload)
+    if (payload === null) return null
+    const id = stringOf(payload['claimId'])
+    const path = stringOf(payload['path'])
+    const intent = stringOf(payload['intent'])
+    const shipId = stringOf(payload['shipId'])
+    if (id === null || path === null || intent === null || shipId === null) return null
+    return {
+      id,
+      runId: event.runId ?? '',
+      shipId,
+      taskId: stringOf(payload['taskId']),
+      path,
+      intent,
+      claimedAt: typeof payload['claimedAt'] === 'number' ? payload['claimedAt'] : Date.now(),
+      releasedAt: typeof payload['releasedAt'] === 'number' ? payload['releasedAt'] : null,
+    }
+  }
+
+  /** List active file claims for this run. */
+  listClaims(): FileClaim[] {
+    const events = this.store.listEvents(this.runId, { limit: this.maxMessagesPerRun })
+    const claims = new Map<string, FileClaim>()
+    const released = new Set<string>()
+    for (const event of [...events].reverse()) {
+      if (event.type === RELEASE_EVENT) {
+        const payload = objectOf(event.payload)
+        const claimId = payload?.['claimId']
+        if (typeof claimId === 'string') released.add(claimId)
+        continue
+      }
+      if (event.type !== CLAIM_EVENT) continue
+      const claim = this.letterFromEvent(event)
+      if (claim === null) continue
+      if (!released.has(claim.id)) {
+        claims.set(claim.id, claim)
+      }
+    }
+    return [...claims.values()].sort((a, b) => b.claimedAt - a.claimedAt)
+  }
+
+  /** Claim a file for editing by a ship. */
+  claimFile(input: {
+    shipId: string
+    taskId?: string | null
+    path: string
+    intent: string
+    shipName?: string | null
+  }): FileClaim {
+    this.assertLive()
+    const now = this.now()
+    const id = newId('claim')
+    const record = this.store.appendEvent({
+      projectId: this.projectId,
+      runId: this.runId,
+      ...(input.taskId !== undefined && input.taskId !== null ? { taskId: input.taskId } : {}),
+      type: CLAIM_EVENT,
+      maxChars: 8_000,
+      payload: {
+        claimId: id,
+        shipId: input.shipId,
+        taskId: input.taskId ?? null,
+        path: input.path,
+        intent: input.intent,
+        ...(input.shipName !== undefined ? { shipName: input.shipName } : {}),
+        claimedAt: now,
+        releasedAt: null,
+      },
+    })
+    const persisted = this.letterFromEvent(record)
+    if (persisted === null) throw new ValidationError('claim payload was rejected')
+    this.emitArtifact({
+      type: 'worker.file.claim',
+      runId: this.runId,
+      taskId: input.taskId ?? null,
+      shipId: input.shipId,
+      payload: {
+        claimId: persisted.id,
+        path: persisted.path,
+        intent: persisted.intent,
+        ...(input.shipName !== undefined ? { shipName: input.shipName } : {}),
+      },
+    })
+    return persisted
+  }
+
+  /** Release a file claim. */
+  releaseClaim(
+    claimId: string,
+    context?: { taskId?: string | null; shipId?: string | null; shipName?: string | null; path?: string | null },
+  ): void {
+    this.assertLive()
+    const now = this.now()
+    this.store.appendEvent({
+      projectId: this.projectId,
+      runId: this.runId,
+      ...(context?.taskId !== undefined && context.taskId !== null ? { taskId: context.taskId } : {}),
+      type: RELEASE_EVENT,
+      maxChars: 2_000,
+      payload: {
+        claimId,
+        releasedAt: now,
+        shipId: context?.shipId ?? null,
+        path: context?.path ?? null,
+      },
+    })
+    this.emitArtifact({
+      type: 'worker.file.release',
+      runId: this.runId,
+      taskId: context?.taskId ?? null,
+      shipId: context?.shipId ?? null,
+      payload: {
+        claimId,
+        path: context?.path ?? null,
+        ...(context?.shipName !== undefined ? { shipName: context.shipName } : {}),
+      },
+    })
+  }
+
+  /** A live artifact observer failure must never break the run. */
+  private emitArtifact(event: WorkerArtifactEvent): void {
+    if (this.onArtifact === null) return
+    try {
+      this.onArtifact(event)
+    } catch {
+      // best-effort live publish only
+    }
   }
 }

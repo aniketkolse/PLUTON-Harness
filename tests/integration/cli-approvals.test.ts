@@ -349,7 +349,7 @@ describe('decideApproval — approved muse.create proposals are applied', () => 
       role: 'coder',
       engine: 'mock',
       model: 'mock/model-a',
-      workspace_policy: 'isolated-task-checkout',
+      workspace_policy: 'direct-write',
     })
     const museRow = fx.store.getMuse('db-expert')
     expect(museRow?.enabled).toBe(true)

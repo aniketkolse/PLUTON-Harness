@@ -1,17 +1,17 @@
 import { isDeepStrictEqual } from 'node:util'
-import type { EngineModel, ModelAvailability } from './contract/types.ts'
+import type { EngineModel, ModelAvailability, ModelCapabilityDeclaration } from './contract/types.ts'
 
 /**
- * Runtime inventory of discovered models (PLUTON 3.2, Phase 2).
+ * Runtime inventory of discovered models (PLUTON 3.2, Phase 2; PLUTON 6.0 Multi-Connection).
  *
- * Identity is composite: `(engineKind, modelId)`. Two adapters may legitimately
- * expose the same opaque model id, so neither part alone is a key. Model ids
- * are stored exactly as the adapter reports them and are never parsed to infer
- * provider, capabilities, cost, or latency.
+ * Identity is composite: `(connectionId ?? engineKind, modelId)`. Multiple
+ * connections or adapters may legitimately expose the same opaque model id,
+ * so neither part alone is a key. Model ids are stored exactly as the adapter
+ * reports them and are never parsed to infer provider, capabilities, cost, or latency.
  *
  * Refresh semantics:
- * - A successful refresh replaces an adapter's inventory and removes entries
- *   the adapter no longer reports (reported as `removed` changes).
+ * - A successful refresh replaces a connection/adapter's inventory and removes entries
+ *   the probe no longer reports (reported as `removed` changes).
  * - A failed refresh never reaches the registry; the previous inventory is
  *   retained by the discovery service.
  * - Results older than the newest observation for an adapter are ignored, so a
@@ -24,12 +24,18 @@ export interface ModelRegistryKey {
   engineKind: string
   /** Exact opaque model id as reported by the adapter. */
   modelId: string
+  /** Explicit connection id when associated with a connection. */
+  connectionId?: string
 }
 
 /** A discovered model plus registry bookkeeping. */
 export interface ModelRegistryEntry extends EngineModel {
   /** Engine adapter kind that reported this model (part of the composite identity). */
   engineKind: string
+  /** Explicit connection id when associated with a connection. */
+  connectionId?: string
+  /** Capability declaration when declared or verified. */
+  capabilityDeclaration?: ModelCapabilityDeclaration
   /** Last availability observation supplied by the adapter, when known. */
   availability?: ModelAvailability
   /** First observation of this `(engineKind, id)` pair. */
@@ -44,6 +50,7 @@ export type ModelRegistryChangeType = 'added' | 'updated' | 'removed'
 export interface ModelRegistryChange {
   type: ModelRegistryChangeType
   engineKind: string
+  connectionId?: string
   modelId: string
   /** Entry after the change; null for `removed`. */
   entry: ModelRegistryEntry | null
@@ -63,6 +70,8 @@ const MODEL_FIELDS = [
   'provider',
   'label',
   'source',
+  'connectionId',
+  'capabilityDeclaration',
   'capabilities',
   'contextWindow',
   'toolCalling',
@@ -115,10 +124,14 @@ function isValidModel(model: unknown): model is EngineModel {
   return typeof id === 'string' && id.length > 0
 }
 
+function makeCompositeKey(scope: string, modelId: string): string {
+  return `${scope}\0${modelId}`
+}
+
 export class ModelRegistry {
   private readonly clock: () => number
-  /** engineKind -> modelId -> frozen entry */
-  private readonly byEngine = new Map<string, Map<string, ModelRegistryEntry>>()
+  /** compositeKey -> frozen entry */
+  private readonly entries = new Map<string, ModelRegistryEntry>()
 
   constructor(options: ModelRegistryOptions = {}) {
     this.clock = options.now ?? Date.now
@@ -128,19 +141,55 @@ export class ModelRegistry {
     return new Date(this.clock()).toISOString()
   }
 
-  /** Total number of discovered `(engineKind, modelId)` entries. */
+  /** Total number of discovered models. */
   get size(): number {
-    let total = 0
-    for (const models of this.byEngine.values()) total += models.size
-    return total
+    return this.entries.size
   }
 
   /**
-   * Look up one model by adapter and opaque id. Returns null when that exact
-   * pair was never discovered (the same id may still exist under another engine).
+   * Look up one model by adapter/connection and opaque id.
    */
-  get(engineKind: string, modelId: string): ModelRegistryEntry | null {
-    return this.byEngine.get(engineKind)?.get(modelId) ?? null
+  get(engineKindOrConnection: string, modelId: string): ModelRegistryEntry | null {
+    const direct = this.entries.get(makeCompositeKey(engineKindOrConnection, modelId))
+    if (direct !== undefined) return direct
+
+    for (const entry of this.entries.values()) {
+      if (
+        (entry.engineKind === engineKindOrConnection ||
+          entry.connectionId === engineKindOrConnection ||
+          entry.provider === engineKindOrConnection) &&
+        entry.id === modelId
+      ) {
+        return entry
+      }
+    }
+    return null
+  }
+
+  /**
+   * Look up one model specifically by connection id.
+   */
+  getByConnection(connectionId: string, modelId: string): ModelRegistryEntry | null {
+    const direct = this.entries.get(makeCompositeKey(connectionId, modelId))
+    if (direct !== undefined && direct.connectionId === connectionId) return direct
+
+    for (const entry of this.entries.values()) {
+      if (entry.connectionId === connectionId && entry.id === modelId) {
+        return entry
+      }
+    }
+    return null
+  }
+
+  /**
+   * Entries for one connection, sorted by opaque id.
+   */
+  listByConnection(connectionId: string): readonly ModelRegistryEntry[] {
+    const matches: ModelRegistryEntry[] = []
+    for (const entry of this.entries.values()) {
+      if (entry.connectionId === connectionId) matches.push(entry)
+    }
+    return Object.freeze(matches.sort(compareEntries))
   }
 
   /**
@@ -149,23 +198,29 @@ export class ModelRegistry {
    */
   findById(modelId: string): readonly ModelRegistryEntry[] {
     const matches: ModelRegistryEntry[] = []
-    for (const models of this.byEngine.values()) {
-      const entry = models.get(modelId)
-      if (entry !== undefined) matches.push(entry)
+    for (const entry of this.entries.values()) {
+      if (entry.id === modelId) matches.push(entry)
     }
     return Object.freeze(matches.sort(compareEntries))
   }
 
-  /** Entries for one adapter, sorted by opaque id; all entries when omitted. */
-  list(engineKind?: string): readonly ModelRegistryEntry[] {
-    const entries: ModelRegistryEntry[] = []
-    if (engineKind === undefined) {
-      for (const models of this.byEngine.values()) entries.push(...models.values())
+  /** Entries for one adapter or connection, sorted by opaque id; all entries when omitted. */
+  list(engineKindOrConnection?: string): readonly ModelRegistryEntry[] {
+    const matches: ModelRegistryEntry[] = []
+    if (engineKindOrConnection === undefined) {
+      matches.push(...this.entries.values())
     } else {
-      const models = this.byEngine.get(engineKind)
-      if (models !== undefined) entries.push(...models.values())
+      for (const entry of this.entries.values()) {
+        if (
+          entry.engineKind === engineKindOrConnection ||
+          entry.connectionId === engineKindOrConnection ||
+          entry.provider === engineKindOrConnection
+        ) {
+          matches.push(entry)
+        }
+      }
     }
-    return Object.freeze(entries.sort(compareEntries))
+    return Object.freeze(matches.sort(compareEntries))
   }
 
   /** Immutable snapshot of the whole inventory in deterministic order. */
@@ -174,7 +229,7 @@ export class ModelRegistry {
   }
 
   /**
-   * Apply one adapter's complete, successful model list. Models omitted from a
+   * Apply one adapter/connection's complete, successful model list. Models omitted from a
    * successful result are removed. Entries are frozen before storage.
    *
    * A result whose observation time predates the newest stored observation is
@@ -185,30 +240,33 @@ export class ModelRegistry {
     models: readonly EngineModel[],
     observedAt = this.nowIso(),
     providerScope?: string,
+    connectionId?: string,
   ): ModelRegistryChange[] {
     if (engineKind.length === 0) return []
-    const existing = this.byEngine.get(engineKind)
+    const targetScope = connectionId ?? providerScope ?? engineKind
 
-    if (existing !== undefined) {
-      let newest: string | null = null
-      for (const entry of existing.values()) {
-        if (providerScope !== undefined && entry.provider !== providerScope) continue
-        if (newest === null || entry.lastRefreshedAt > newest) newest = entry.lastRefreshedAt
-      }
-      if (newest !== null && observedAt < newest) return []
+    // Scope check: look for newest observation in this specific scope
+    let newest: string | null = null
+    for (const entry of this.entries.values()) {
+      const entryScope = entry.connectionId ?? entry.provider ?? entry.engineKind
+      if (entryScope !== targetScope) continue
+      if (newest === null || entry.lastRefreshedAt > newest) newest = entry.lastRefreshedAt
     }
+    if (newest !== null && observedAt < newest) return []
 
-    const target = existing ?? new Map<string, ModelRegistryEntry>()
     const changes: ModelRegistryChange[] = []
     const seen = new Set<string>()
 
     for (const model of models) {
       if (!isValidModel(model) || seen.has(model.id)) continue
       seen.add(model.id)
-      const previous = target.get(model.id)
+
+      const key = makeCompositeKey(targetScope, model.id)
+      const previous = this.entries.get(key)
       const next = freezeEntry({
         ...cloneValue(model),
         engineKind,
+        connectionId: model.connectionId ?? connectionId ?? (providerScope ? targetScope : undefined),
         ...(model.provider ? { provider: model.provider } : providerScope ? { provider: providerScope } : {}),
         availability:
           previous?.availability ??
@@ -216,12 +274,13 @@ export class ModelRegistry {
         discoveredAt: previous?.discoveredAt ?? observedAt,
         lastRefreshedAt: observedAt,
       })
-      target.set(model.id, next)
+      this.entries.set(key, next)
 
       if (previous === undefined) {
         changes.push({
           type: 'added',
           engineKind,
+          connectionId: next.connectionId,
           modelId: model.id,
           entry: next,
           previous: null,
@@ -235,6 +294,7 @@ export class ModelRegistry {
         changes.push({
           type: 'updated',
           engineKind,
+          connectionId: next.connectionId,
           modelId: model.id,
           entry: next,
           previous,
@@ -243,22 +303,24 @@ export class ModelRegistry {
       }
     }
 
-    for (const [modelId, previous] of target) {
-      if (providerScope !== undefined && previous.provider !== providerScope) continue
-      if (seen.has(modelId)) continue
-      target.delete(modelId)
+    // Remove models in this scope that were not in the updated list
+    for (const [key, previous] of Array.from(this.entries.entries())) {
+      const entryScope = previous.connectionId ?? previous.provider ?? previous.engineKind
+      if (entryScope !== targetScope) continue
+      if (seen.has(previous.id)) continue
+
+      this.entries.delete(key)
       changes.push({
         type: 'removed',
         engineKind,
-        modelId,
+        connectionId: previous.connectionId,
+        modelId: previous.id,
         entry: null,
         previous,
         changedFields: [],
       })
     }
 
-    if (target.size === 0) this.byEngine.delete(engineKind)
-    else this.byEngine.set(engineKind, target)
     return changes
   }
 
@@ -270,15 +332,18 @@ export class ModelRegistry {
     engineKind: string,
     model: EngineModel,
     observedAt = this.nowIso(),
+    connectionId?: string,
   ): ModelRegistryChange | null {
     if (engineKind.length === 0 || !isValidModel(model)) return null
-    const target = this.byEngine.get(engineKind)
-    const previous = target?.get(model.id)
+    const targetScope = model.connectionId ?? connectionId ?? model.provider ?? engineKind
+    const key = makeCompositeKey(targetScope, model.id)
+    const previous = this.entries.get(key)
     if (previous !== undefined && observedAt < previous.lastRefreshedAt) return null
 
     const next = freezeEntry({
       ...cloneValue(model),
       engineKind,
+      connectionId: model.connectionId ?? connectionId,
       availability:
         previous?.availability ??
         (model.availability !== undefined ? cloneValue(model.availability) : undefined),
@@ -286,12 +351,13 @@ export class ModelRegistry {
       lastRefreshedAt: observedAt,
     })
 
+    this.entries.set(key, next)
+
     if (previous === undefined) {
-      if (target === undefined) this.byEngine.set(engineKind, new Map([[model.id, next]]))
-      else target.set(model.id, next)
       return {
         type: 'added',
         engineKind,
+        connectionId: next.connectionId,
         modelId: model.id,
         entry: next,
         previous: null,
@@ -299,12 +365,12 @@ export class ModelRegistry {
       }
     }
 
-    target?.set(model.id, next)
     const fields = changedFields(previous, next)
     if (fields.length === 0) return null
     return {
       type: 'updated',
       engineKind,
+      connectionId: next.connectionId,
       modelId: model.id,
       entry: next,
       previous,
@@ -313,25 +379,69 @@ export class ModelRegistry {
   }
 
   /**
+   * Register a manual model with user-declared capabilities.
+   */
+  registerManualModel(
+    connectionId: string,
+    model: EngineModel,
+    caps: ModelCapabilityDeclaration,
+    observedAt = this.nowIso(),
+  ): ModelRegistryChange | null {
+    const fullModel: EngineModel = {
+      ...model,
+      connectionId,
+      capabilityDeclaration: caps,
+      toolCalling: caps.toolCalling,
+      contextWindow: caps.contextWindow,
+      codingCapable: caps.coding,
+      reasoningCapable: caps.reasoning,
+    }
+    return this.upsertModel(
+      model.provider ?? 'openai-compatible',
+      fullModel,
+      observedAt,
+      connectionId,
+    )
+  }
+
+  /**
    * Store an availability observation for an already-discovered model.
    * Availability for an unknown model is ignored (the registry never invents
    * inventory from a health probe). Returns null when unchanged or unknown.
    */
   setAvailability(
-    engineKind: string,
+    engineKindOrConnection: string,
     modelId: string,
     availability: ModelAvailability,
   ): ModelRegistryChange | null {
-    const target = this.byEngine.get(engineKind)
-    const previous = target?.get(modelId)
-    if (target === undefined || previous === undefined) return null
+    let targetKey: string | null = null
+    const directKey = makeCompositeKey(engineKindOrConnection, modelId)
+    if (this.entries.has(directKey)) {
+      targetKey = directKey
+    } else {
+      for (const [key, entry] of this.entries.entries()) {
+        if (
+          (entry.engineKind === engineKindOrConnection ||
+            entry.connectionId === engineKindOrConnection ||
+            entry.provider === engineKindOrConnection) &&
+          entry.id === modelId
+        ) {
+          targetKey = key
+          break
+        }
+      }
+    }
+
+    if (targetKey === null) return null
+    const previous = this.entries.get(targetKey)!
     if (isDeepStrictEqual(previous.availability, availability)) return null
 
     const next = freezeEntry({ ...previous, availability: freezeValue(cloneValue(availability)) })
-    target.set(modelId, next)
+    this.entries.set(targetKey, next)
     return {
       type: 'updated',
-      engineKind,
+      engineKind: previous.engineKind,
+      connectionId: previous.connectionId,
       modelId,
       entry: next,
       previous,
@@ -340,15 +450,32 @@ export class ModelRegistry {
   }
 
   /** Remove one model explicitly (adapter removal is normally handled by replace). */
-  removeModel(engineKind: string, modelId: string): ModelRegistryChange | null {
-    const target = this.byEngine.get(engineKind)
-    const previous = target?.get(modelId)
-    if (target === undefined || previous === undefined) return null
-    target.delete(modelId)
-    if (target.size === 0) this.byEngine.delete(engineKind)
+  removeModel(engineKindOrConnection: string, modelId: string): ModelRegistryChange | null {
+    let targetKey: string | null = null
+    const directKey = makeCompositeKey(engineKindOrConnection, modelId)
+    if (this.entries.has(directKey)) {
+      targetKey = directKey
+    } else {
+      for (const [key, entry] of this.entries.entries()) {
+        if (
+          (entry.engineKind === engineKindOrConnection ||
+            entry.connectionId === engineKindOrConnection ||
+            entry.provider === engineKindOrConnection) &&
+          entry.id === modelId
+        ) {
+          targetKey = key
+          break
+        }
+      }
+    }
+
+    if (targetKey === null) return null
+    const previous = this.entries.get(targetKey)!
+    this.entries.delete(targetKey)
     return {
       type: 'removed',
-      engineKind,
+      engineKind: previous.engineKind,
+      connectionId: previous.connectionId,
       modelId,
       entry: null,
       previous,
@@ -358,6 +485,9 @@ export class ModelRegistry {
 }
 
 function compareEntries(a: ModelRegistryEntry, b: ModelRegistryEntry): number {
+  const connA = a.connectionId ?? ''
+  const connB = b.connectionId ?? ''
+  if (connA !== connB) return connA.localeCompare(connB)
   if (a.engineKind !== b.engineKind) return a.engineKind.localeCompare(b.engineKind)
   return a.id.localeCompare(b.id)
 }

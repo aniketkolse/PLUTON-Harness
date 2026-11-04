@@ -1,5 +1,6 @@
-import { open, readdir, realpath, stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { open, readdir, readFile, writeFile, mkdir, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, dirname, join } from 'node:path'
+import { spawn } from 'node:child_process'
 import { ConflictError, ExternalToolError, InternalError, NotFoundError, PolicyDeniedError, StateTransitionError, ValidationError, WorkspaceError } from '../domain/errors.ts'
 import { applyTaskVerificationVerdict } from '../verify/runner.ts'
 import type { JsonValue, ShipRecord, RunRecord, TaskRecord, WorkspaceRecord } from '../domain/models.ts'
@@ -244,6 +245,37 @@ function refusedRelativePath(rel: string): string | null {
     if (REFUSED_SEGMENTS.has(segment.toLowerCase())) return segment
   }
   return null
+}
+
+async function resolveAndValidateWritePath(
+  env: ToolEnv,
+  relPath: string,
+): Promise<{ absPath: string; relPath: string; root: string }> {
+  if (isAbsolute(relPath) || relPath.split(/[\\/]+/).includes('..')) {
+    throw new PolicyDeniedError(`path must be relative and inside the workspace (no absolute paths, no '..'): '${relPath}'`)
+  }
+  const roots = sessionReadRoots(env)
+  if (roots.length === 0) {
+    throw new PolicyDeniedError('no workspace root is available for this session')
+  }
+  const root = roots[0]!
+  const realRoot = await realpath(root).catch(() => resolve(root))
+  const targetAbs = resolve(root, relPath)
+  const relFromRoot = relative(realRoot, targetAbs)
+  if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) {
+    throw new PolicyDeniedError(`path escapes workspace root: '${relPath}'`)
+  }
+  const refused = refusedRelativePath(relFromRoot)
+  if (refused !== null) {
+    throw new PolicyDeniedError(`'${relFromRoot}' is inside a refused area ('${refused}') and cannot be modified`)
+  }
+  if (env.leaseManager && env.callerTaskId) {
+    const conflict = env.leaseManager.hasConflict(env.runId, env.callerTaskId, relFromRoot)
+    if (conflict.conflicted) {
+      throw new PolicyDeniedError(`file write blocked by lease conflict: ${conflict.reason}`)
+    }
+  }
+  return { absPath: targetAbs, relPath: relFromRoot, root: realRoot }
 }
 
 function scopeShipId(scope: JsonValue): string | null {
@@ -1202,6 +1234,327 @@ export const TOOL_HANDLERS: ToolHandlers = {
           ? 'no undelivered messages'
           : 'these messages are acknowledged and will not be delivered again',
     }
+  },
+
+  'spec.read': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['spec.read'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    let specs = env.messageBus.listSpecs(a.limit ?? 50)
+    if (a.specId !== undefined) {
+      specs = specs.filter((s) => s.id === a.specId)
+    }
+    if (a.title !== undefined) {
+      specs = specs.filter((s) => s.title.toLowerCase().includes(a.title!.toLowerCase()))
+    }
+    if (a.path !== undefined) {
+      specs = specs.filter((s) => s.path === a.path)
+    }
+    if (a.query !== undefined) {
+      const q = a.query.toLowerCase()
+      specs = specs.filter(
+        (s) =>
+          s.title.toLowerCase().includes(q) ||
+          s.body.toLowerCase().includes(q) ||
+          s.path.toLowerCase().includes(q),
+      )
+    }
+    return {
+      specs: specs.map((s) => ({
+        id: s.id,
+        title: s.title,
+        body: s.body,
+        path: s.path,
+        version: s.version,
+        createdByShipId: s.createdByShipId,
+        updatedByShipId: s.updatedByShipId,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+      })),
+      count: specs.length,
+    }
+  },
+
+  'spec.write': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['spec.write'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    const shipName = env.store.getShip(env.callerShipId)?.displayName ?? env.callerShipId
+    const spec = env.messageBus.upsertSpec({
+      title: a.title,
+      body: a.body,
+      path: a.path,
+      updatedByShipId: env.callerShipId,
+      taskId: env.callerTaskId,
+      shipName,
+      ...(a.specId !== undefined ? { specId: a.specId } : {}),
+    })
+    return { spec: JSON.parse(JSON.stringify(spec)) as JsonValue }
+  },
+
+  'file.claim': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['file.claim'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    const shipName = env.store.getShip(env.callerShipId)?.displayName ?? env.callerShipId
+    const claim = env.messageBus.claimFile({
+      shipId: env.callerShipId,
+      taskId: env.callerTaskId,
+      path: a.path,
+      intent: a.intent,
+      shipName,
+    })
+    return { claim: JSON.parse(JSON.stringify(claim)) as JsonValue }
+  },
+
+  'file.release': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['file.release'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    const claims = env.messageBus.listClaims()
+    const claim = claims.find((c) => c.id === a.claimId && c.shipId === env.callerShipId)
+    if (!claim) {
+      throw new ValidationError(`claim ${a.claimId} not found or not owned by ${env.callerShipId}`)
+    }
+    const shipName = env.store.getShip(claim.shipId)?.displayName ?? claim.shipId
+    env.messageBus.releaseClaim(a.claimId, {
+      taskId: claim.taskId,
+      shipId: claim.shipId,
+      shipName,
+      path: claim.path,
+    })
+    return { released: true, claimId: a.claimId }
+  },
+
+  'team.broadcast': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['team.broadcast'].parse(args)
+    if (!env.messageBus) {
+      throw new PolicyDeniedError('worker messaging is not available in this runtime')
+    }
+    // Find all active ships in this run by scanning events
+    const events = env.store.listEvents(env.runId, { limit: 1000 })
+    const recipients = new Set<string>()
+    for (const event of events) {
+      const payload = event.payload
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) continue
+      const rec = (payload as Record<string, unknown>)['recipientShipId']
+      if (typeof rec === 'string') recipients.add(rec)
+    }
+    // Include ships with active tasks in this run
+    for (const task of env.store.listTasks(env.runId)) {
+      if (task.assigneeShipId && task.assigneeShipId !== env.callerShipId) {
+        recipients.add(task.assigneeShipId)
+      }
+    }
+    if (recipients.size === 0) {
+      throw new ValidationError('no other active ships in this run to broadcast to')
+    }
+    const messages: WorkerMessage[] = []
+    for (const recipientId of recipients) {
+      if (recipientId === env.callerShipId) continue
+      try {
+        const msg = env.messageBus.send({
+          senderShipId: env.callerShipId,
+          senderTaskId: env.callerTaskId,
+          recipientShipId: recipientId,
+          kind: a.kind,
+          body: a.body,
+        })
+        messages.push(msg)
+      } catch {
+        // best-effort
+      }
+    }
+    return { messages: messages.map(publicMessage), count: messages.length }
+  },
+
+  'file.write': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['file.write'].parse(args)
+    const { absPath, relPath } = await resolveAndValidateWritePath(env, a.path)
+    await mkdir(dirname(absPath), { recursive: true })
+    await writeFile(absPath, a.content, 'utf8')
+    return {
+      path: relPath,
+      bytesWritten: Buffer.byteLength(a.content, 'utf8'),
+      ok: true,
+    }
+  },
+
+  'file.edit': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['file.edit'].parse(args)
+    const { absPath, relPath } = await resolveAndValidateWritePath(env, a.path)
+    let current: string
+    try {
+      current = await readFile(absPath, 'utf8')
+    } catch {
+      throw new NotFoundError('file', relPath)
+    }
+    if (!current.includes(a.oldText)) {
+      throw new ValidationError(`oldText was not found in '${relPath}'`)
+    }
+    const count = current.split(a.oldText).length - 1
+    if (count > 1) {
+      throw new ValidationError(`oldText occurred ${count} times in '${relPath}'; edit requires a unique match`)
+    }
+    const updated = current.replace(a.oldText, a.newText)
+    await writeFile(absPath, updated, 'utf8')
+    return {
+      path: relPath,
+      ok: true,
+      replacements: 1,
+    }
+  },
+
+  'file.search': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['file.search'].parse(args)
+    const roots = sessionReadRoots(env)
+    if (roots.length === 0) {
+      throw new PolicyDeniedError('no read scope is available for this session')
+    }
+    const root = roots[0]!
+    const searchRoot = a.path ? resolve(root, a.path) : root
+    const lexicalRel = relative(root, searchRoot)
+    if (lexicalRel.startsWith('..') || isAbsolute(lexicalRel)) {
+      throw new PolicyDeniedError(`path escapes workspace root: '${a.path}'`)
+    }
+
+    let regex: RegExp
+    if (a.isRegex) {
+      try {
+        regex = new RegExp(a.pattern, 'g')
+      } catch (err) {
+        throw new ValidationError(`invalid regex pattern: ${(err as Error).message}`)
+      }
+    } else {
+      const escaped = a.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      regex = new RegExp(escaped, 'g')
+    }
+
+    const matches: Array<{ path: string; line: number; text: string }> = []
+    const MAX_MATCHES = 100
+    let truncated = false
+
+    async function walk(dir: string): Promise<void> {
+      if (matches.length >= MAX_MATCHES) {
+        truncated = true
+        return
+      }
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (REFUSED_SEGMENTS.has(entry.name.toLowerCase())) continue
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walk(full)
+          if (matches.length >= MAX_MATCHES) {
+            truncated = true
+            return
+          }
+        } else if (entry.isFile()) {
+          try {
+            const st = await stat(full)
+            if (st.size > READ_FILE_CAP_BYTES) continue
+            const content = await readFile(full, 'utf8')
+            const lines = content.split('\n')
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i]!
+              regex.lastIndex = 0
+              if (regex.test(line)) {
+                matches.push({
+                  path: relative(root, full),
+                  line: i + 1,
+                  text: line.trimEnd().slice(0, 300),
+                })
+                if (matches.length >= MAX_MATCHES) {
+                  truncated = true
+                  return
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    await walk(searchRoot)
+    return {
+      matches,
+      count: matches.length,
+      truncated,
+      ok: true,
+    }
+  },
+
+  'command.exec': async (env, args): Promise<JsonValue> => {
+    const a = TOOL_SCHEMAS['command.exec'].parse(args)
+    const roots = sessionReadRoots(env)
+    if (roots.length === 0) {
+      throw new PolicyDeniedError('no workspace root is available for this session')
+    }
+    const cwd = roots[0]!
+    const timeoutMs = Math.min(a.timeoutMs ?? 30_000, 120_000)
+
+    return new Promise<JsonValue>((resolvePromise) => {
+      let stdout = ''
+      let stderr = ''
+      let timedOut = false
+      const MAX_OUTPUT = 100_000
+
+      const child = spawn(a.command, {
+        cwd,
+        shell: true,
+        windowsHide: true,
+      })
+
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill('SIGTERM')
+      }, timeoutMs)
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        if (stdout.length < MAX_OUTPUT) {
+          stdout += chunk.toString('utf8')
+          if (stdout.length > MAX_OUTPUT) stdout = stdout.slice(0, MAX_OUTPUT) + '\n[truncated]'
+        }
+      })
+
+      child.stderr?.on('data', (chunk: Buffer) => {
+        if (stderr.length < MAX_OUTPUT) {
+          stderr += chunk.toString('utf8')
+          if (stderr.length > MAX_OUTPUT) stderr = stderr.slice(0, MAX_OUTPUT) + '\n[truncated]'
+        }
+      })
+
+      child.on('error', (err) => {
+        clearTimeout(timer)
+        resolvePromise({
+          exitCode: 1,
+          stdout,
+          stderr: (stderr ? stderr + '\n' : '') + err.message,
+          ok: false,
+          timedOut,
+        })
+      })
+
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolvePromise({
+          exitCode: code ?? (timedOut ? 124 : 1),
+          stdout,
+          stderr,
+          ok: code === 0 && !timedOut,
+          timedOut,
+        })
+      })
+    })
   },
 }
 

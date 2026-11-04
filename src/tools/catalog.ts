@@ -170,6 +170,66 @@ export const TOOL_SCHEMAS = {
       limit: z.number().int().min(1).max(50).optional(),
     })
     .strict(),
+  'spec.read': z
+    .object({
+      specId: z.string().min(1).max(64).optional(),
+      title: z.string().min(1).max(300).optional(),
+      path: z.string().min(1).max(500).optional(),
+      query: z.string().min(1).max(500).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    })
+    .strict(),
+  'spec.write': z
+    .object({
+      title: z.string().min(1).max(300),
+      body: z.string().min(1).max(8_000),
+      path: z.string().min(1).max(500),
+      specId: z.string().min(1).max(64).optional(),
+    })
+    .strict(),
+  'file.claim': z
+    .object({
+      path: z.string().min(1).max(500),
+      intent: z.string().min(1).max(2_000),
+    })
+    .strict(),
+  'file.release': z
+    .object({
+      claimId: z.string().min(1).max(64),
+    })
+    .strict(),
+  'team.broadcast': z
+    .object({
+      body: z.string().min(1).max(8_000),
+      kind: z.enum(WORKER_MESSAGE_KINDS),
+    })
+    .strict(),
+  'file.write': z
+    .object({
+      path: z.string().min(1).max(500),
+      content: z.string().max(2_000_000),
+    })
+    .strict(),
+  'file.edit': z
+    .object({
+      path: z.string().min(1).max(500),
+      oldText: z.string(),
+      newText: z.string(),
+    })
+    .strict(),
+  'file.search': z
+    .object({
+      pattern: z.string().min(1).max(500),
+      isRegex: z.boolean().optional(),
+      path: z.string().min(1).max(500).optional(),
+    })
+    .strict(),
+  'command.exec': z
+    .object({
+      command: z.string().min(1).max(2000),
+      timeoutMs: z.number().int().min(100).max(120_000).optional(),
+    })
+    .strict(),
 }
 
 export type PlutonToolName = keyof typeof TOOL_SCHEMAS
@@ -291,6 +351,60 @@ export const TOOL_DEFS: Record<PlutonToolName, PlutonToolDef> = {
     mutating: false,
     description:
       'Read messages addressed to you (optionally waiting up to 60 seconds for one). Returns message id, sender Ship, task association, kind, body and timestamp, and acknowledges the returned messages so they are never delivered twice. Check the inbox before finishing so a handoff or blocker is not missed.',
+  },
+  'spec.read': {
+    permission: 'worker.message',
+    mutating: false,
+    description:
+      'Read shared team specs, contracts, and plans. Filter by spec ID, title, path, or free-text query. Returns the specs (newest first). Always call this at session start to see what the team has already agreed on.',
+  },
+  'spec.write': {
+    permission: 'worker.message',
+    mutating: true,
+    description:
+      'Publish or update a shared team spec (contract, API shape, migration plan, data model, etc.). Updates bump the version and notify the team. Specs are the persistent memory of the run — write decisions here so other Ships can read them instead of guessing.',
+  },
+  'file.claim': {
+    permission: 'worker.message',
+    mutating: true,
+    description:
+      'Claim a file or directory for editing and broadcast your intent to the team. Other Ships see the claim and avoid conflicting edits. Returns a claim ID. Release with file.release when done.',
+  },
+  'file.release': {
+    permission: 'worker.message',
+    mutating: true,
+    description:
+      'Release a file claim so other Ships may acquire the file.',
+  },
+  'team.broadcast': {
+    permission: 'worker.message',
+    mutating: true,
+    description:
+      'Send a message to every active Ship in the team. Use for announcements, ideas, progress updates, and questions that affect the whole team. Delivery is durable and appears in the run event log.',
+  },
+  'file.write': {
+    permission: 'project.write',
+    mutating: true,
+    description:
+      'Write or overwrite a file within the workspace checkout. Validated against lease declarations, refused paths, and workspace boundaries.',
+  },
+  'file.edit': {
+    permission: 'project.write',
+    mutating: true,
+    description:
+      'Perform targeted find-and-replace text editing within a file in the workspace checkout. Requires exact unique match of oldText.',
+  },
+  'file.search': {
+    permission: 'project.read',
+    mutating: false,
+    description:
+      'Search for text or regex pattern across files within the session workspace.',
+  },
+  'command.exec': {
+    permission: 'tests.run',
+    mutating: true,
+    description:
+      'Execute a bounded shell command within the task workspace directory and capture stdout, stderr, and exit code.',
   },
 }
 

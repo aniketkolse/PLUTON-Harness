@@ -19,6 +19,8 @@ export interface ModelDiscoveryEngine {
   engineKind: string
   /** Explicit provider identifier when this probe targets a specific provider. */
   providerId?: string
+  /** Explicit connection identifier when this probe targets a specific connection. */
+  connectionId?: string
   adapter: EngineAdapter
 }
 
@@ -46,6 +48,7 @@ export interface ModelDiscoveryOptions {
 export interface EngineDiscoveryResult {
   engineKind: string
   providerId?: string
+  connectionId?: string
   /** False when the adapter threw or its result could not be applied. */
   ok: boolean
   /** Number of valid models reported by the adapter this pass. */
@@ -73,6 +76,7 @@ export interface ModelDiscoveryReport {
 interface EngineProbe {
   engineKind: string
   providerId?: string
+  connectionId?: string
   ok: boolean
   models: EngineModel[]
   invalidCount: number
@@ -186,9 +190,15 @@ export class ModelDiscoveryService {
     try {
       const listed = await engine.adapter.listModels()
       const { models, invalidCount } = validModels(listed)
+      if (engine.connectionId !== undefined) {
+        for (const m of models) {
+          m.connectionId = engine.connectionId
+        }
+      }
       return {
         engineKind: engine.engineKind,
         ...(engine.providerId !== undefined ? { providerId: engine.providerId } : {}),
+        ...(engine.connectionId !== undefined ? { connectionId: engine.connectionId } : {}),
         ok: true,
         models,
         invalidCount,
@@ -199,6 +209,7 @@ export class ModelDiscoveryService {
       return {
         engineKind: engine.engineKind,
         ...(engine.providerId !== undefined ? { providerId: engine.providerId } : {}),
+        ...(engine.connectionId !== undefined ? { connectionId: engine.connectionId } : {}),
         ok: false,
         models: [],
         invalidCount: 0,
@@ -227,6 +238,7 @@ export class ModelDiscoveryService {
             probe.models,
             probe.finishedAt,
             probe.providerId,
+            probe.connectionId,
           )
           if (this.healthMonitor !== null) {
             for (const model of probe.models) {
@@ -248,6 +260,7 @@ export class ModelDiscoveryService {
       results.push({
         engineKind: probe.engineKind,
         ...(probe.providerId !== undefined ? { providerId: probe.providerId } : {}),
+        ...(probe.connectionId !== undefined ? { connectionId: probe.connectionId } : {}),
         ok,
         modelCount: probe.models.length,
         invalidCount: probe.invalidCount,

@@ -18,6 +18,7 @@ export interface ModelErrorContext {
   errorCode?: string
   toolName?: string
   provider?: string
+  connectionId?: string
   modelId?: string
   engineKind?: string
   quotaScope?: string
@@ -70,6 +71,7 @@ export interface TaskHealthState {
 export interface ModelHealthChange {
   scope: 'model' | 'provider' | 'task'
   engineKind: string
+  connectionId?: string
   modelId?: string
   providerScope?: string
   taskId?: string
@@ -295,19 +297,22 @@ export class ModelHealthMonitor {
   }
 
   private affectedModels(engineKind: string, providerScope: string): ModelRegistryEntry[] {
-    return this.registry.list(engineKind).filter((entry) => {
-      if (providerScope === engineKind) return true
-      return entry.provider === providerScope
+    return this.registry.list().filter((entry) => {
+      if (entry.connectionId && entry.connectionId === providerScope) return true
+      if (entry.provider && entry.provider === providerScope) return true
+      if (providerScope === engineKind && entry.engineKind === engineKind) return true
+      return false
     })
   }
 
   private applyModelFailure(
-    engineKind: string,
+    scopeOrEngine: string,
     modelId: string,
     classification: ModelErrorClassification,
     cooldownMs: number,
     diagnostic: string,
     changes: ModelHealthChange[],
+    connectionId?: string,
   ): void {
     const now = this.clock()
     const nowIso = this.nowIso()
@@ -320,8 +325,8 @@ export class ModelHealthMonitor {
           ? 'unavailable'
           : 'degraded'
 
-    this.modelHealth.set(this.modelKey(engineKind, modelId), {
-      engineKind,
+    this.modelHealth.set(this.modelKey(scopeOrEngine, modelId), {
+      engineKind: scopeOrEngine,
       modelId,
       state,
       lastErrorCategory: classification.category,
@@ -342,11 +347,12 @@ export class ModelHealthMonitor {
       temporarilyIneligibleUntil: cooldownUntil,
       source: 'engine',
     }
-    this.registry.setAvailability(engineKind, modelId, availability)
+    this.registry.setAvailability(scopeOrEngine, modelId, availability)
 
     changes.push({
       scope: 'model',
-      engineKind,
+      engineKind: scopeOrEngine,
+      connectionId,
       modelId,
       category: classification.category,
       action: cooldownMs > 0 ? 'cooldown-applied' : 'failure-recorded',
@@ -368,16 +374,18 @@ export class ModelHealthMonitor {
     const cooldownMs = this.cooldownMs(resolved.category)
     const nowIso = this.nowIso()
 
+    const connectionId = context.connectionId
     const engineKind = context.engineKind ?? 'unknown'
     const modelId = context.modelId
-    const providerScope = context.quotaScope ?? context.provider ?? engineKind
+    const scopeKey = connectionId ?? context.provider ?? engineKind
+    const providerScope = context.quotaScope ?? connectionId ?? context.provider ?? engineKind
     const scope = resolved.suggestedScope
 
     // Task-level: only this task is affected.
     if (scope === 'task' && context.taskId !== undefined && modelId !== undefined) {
       const cooldownUntil = cooldownMs > 0 ? new Date(this.clock() + cooldownMs).toISOString() : undefined
-      this.taskHealth.set(this.taskKey(engineKind, modelId, context.taskId), {
-        engineKind,
+      this.taskHealth.set(this.taskKey(scopeKey, modelId, context.taskId), {
+        engineKind: scopeKey,
         modelId,
         taskId: context.taskId,
         temporarilyIneligibleUntil: cooldownUntil,
@@ -386,23 +394,21 @@ export class ModelHealthMonitor {
       })
       changes.push({
         scope: 'task',
-        engineKind,
+        engineKind: scopeKey,
+        connectionId,
         modelId,
         taskId: context.taskId,
         category: resolved.category,
         action: cooldownMs > 0 ? 'cooldown-applied' : 'failure-recorded',
         at: nowIso,
       })
-      // Model-level health is still recorded lightly (degraded) without registry cooldown,
-      // so other tasks can react but the model stays eligible unless a model-level
-      // failure is also recorded. We do not mutate registry availability here.
       return { classification: resolved, changes }
     }
 
     // Model-level task scope (no taskId): single model.
     if (scope === 'task') {
       if (modelId !== undefined) {
-        this.applyModelFailure(engineKind, modelId, resolved, cooldownMs, diagnostic, changes)
+        this.applyModelFailure(scopeKey, modelId, resolved, cooldownMs, diagnostic, changes, connectionId)
       }
       return { classification: resolved, changes }
     }
@@ -420,12 +426,14 @@ export class ModelHealthMonitor {
       })
       const models = this.affectedModels(engineKind, providerScope)
       for (const entry of models) {
-        this.applyModelFailure(engineKind, entry.id, resolved, cooldownMs, diagnostic, changes)
+        const entryScope = entry.connectionId ?? entry.provider ?? entry.engineKind
+        this.applyModelFailure(entryScope, entry.id, resolved, cooldownMs, diagnostic, changes, entry.connectionId)
       }
       // If no models discovered yet, still record provider health only.
       changes.unshift({
         scope: 'provider',
         engineKind,
+        connectionId,
         providerScope,
         category: resolved.category,
         action: cooldownMs > 0 ? 'cooldown-applied' : 'failure-recorded',
@@ -451,6 +459,7 @@ export class ModelHealthMonitor {
     changes.unshift({
       scope: 'provider',
       engineKind,
+      connectionId,
       providerScope: engineKind,
       category: resolved.category,
       action: cooldownMs > 0 ? 'cooldown-applied' : 'failure-recorded',
@@ -543,21 +552,23 @@ export class ModelHealthMonitor {
     return changes
   }
 
-  getModelHealth(engineKind: string, modelId: string): ModelHealthState {
-    const existing = this.modelHealth.get(this.modelKey(engineKind, modelId))
+  getModelHealth(scopeOrEngine: string, modelId: string): ModelHealthState {
+    const existing = this.modelHealth.get(this.modelKey(scopeOrEngine, modelId))
     if (existing !== undefined) return existing
     // Fall back to registry availability if present.
-    const entry = this.registry.get(engineKind, modelId)
+    const entry =
+      this.registry.getByConnection(scopeOrEngine, modelId) ??
+      this.registry.get(scopeOrEngine, modelId)
     if (entry === null) {
-      return { engineKind, modelId, state: 'unknown' }
+      return { engineKind: scopeOrEngine, modelId, state: 'unknown' }
     }
     const avail = entry.availability
     if (avail === undefined) {
-      return { engineKind, modelId, state: 'healthy' }
+      return { engineKind: entry.engineKind, modelId, state: 'healthy' }
     }
     if (avail.available === false) {
       return {
-        engineKind,
+        engineKind: entry.engineKind,
         modelId,
         state: 'unavailable',
         lastErrorCategory: avail.category,
@@ -570,7 +581,7 @@ export class ModelHealthMonitor {
       const untilMs = Date.parse(avail.temporarilyIneligibleUntil)
       if (Number.isFinite(untilMs) && untilMs > this.clock()) {
         return {
-          engineKind,
+          engineKind: entry.engineKind,
           modelId,
           state: 'temporarily-ineligible',
           lastErrorCategory: avail.category,
@@ -579,13 +590,17 @@ export class ModelHealthMonitor {
         }
       }
     }
-    return { engineKind, modelId, state: 'healthy' }
+    return { engineKind: entry.engineKind, modelId, state: 'healthy' }
   }
 
   getProviderHealth(engineKind: string, providerScope: string): ProviderHealthState {
     const existing = this.providerHealth.get(this.providerKey(engineKind, providerScope))
     if (existing !== undefined) return existing
     return { engineKind, providerScope, healthy: true }
+  }
+
+  isProviderHealthy(engineKind: string, providerScope: string): boolean {
+    return this.getProviderHealth(engineKind, providerScope).healthy
   }
 
   getTaskHealth(engineKind: string, modelId: string, taskId: string): TaskHealthState {

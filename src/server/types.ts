@@ -257,6 +257,10 @@ export const WORKER_EVENT_TYPES = [
   'worker.failed',
   'worker.cancelled',
   'worker.message',
+  'worker.spec.created',
+  'worker.spec.updated',
+  'worker.file.claim',
+  'worker.file.release',
 ] as const
 
 export type WorkerEventType = (typeof WORKER_EVENT_TYPES)[number]

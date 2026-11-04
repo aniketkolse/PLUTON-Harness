@@ -206,6 +206,8 @@ export interface RunDeps {
   onWorkerEvent?: (event: WorkerLifecycleEvent) => void
   /** Live-only publish for an already-persisted worker message. */
   onWorkerMessage?: (event: WorkerLifecycleEvent) => void
+  /** Live-only publish for an already-persisted team artifact (spec or file claim). */
+  onWorkerArtifact?: (event: WorkerLifecycleEvent) => void
 }
 
 export interface RunSummary {
@@ -395,11 +397,12 @@ export function createRunSupervisor(args: {
           },
         })
       }
+      const hasExplicitColon = model.includes(':')
       const route = resolveExecutionRoute({
         rootDir: ctx.rootDir,
         model,
-        providerId: effectiveProvider,
-        engineKind: ship.engineKind,
+        providerId: hasExplicitColon ? undefined : effectiveProvider,
+        engineKind: hasExplicitColon ? undefined : ship.engineKind,
         shipRole: ship.role,
         approvalMode: ship.approvalMode,
         isolatedCheckout: session.isolatedCheckout,
@@ -499,6 +502,7 @@ export function createRunSupervisor(args: {
     ...(supervisorAdapterFor !== undefined ? { adapterFor: supervisorAdapterFor } : {}),
     ...(deps.onWorkerEvent !== undefined ? { onWorkerEvent: deps.onWorkerEvent } : {}),
     ...(deps.onWorkerMessage !== undefined ? { onWorkerMessage: deps.onWorkerMessage } : {}),
+    ...(deps.onWorkerArtifact !== undefined ? { onWorkerArtifact: deps.onWorkerArtifact } : {}),
     workspaceManager,
     engineEnv: () => ({}),
     modelRegistry,
@@ -959,7 +963,7 @@ export function createShip(ctx: ProjectContext, spec: CreateShipSpec): { configP
 
   const role = (spec.role as ShipConfig['role']) ?? 'custom'
   const defaultWorkspace: ShipConfig['workspace_policy'] =
-    role === 'supervisor' ? 'coordinator-read-only' : 'isolated-task-checkout'
+    role === 'supervisor' ? 'coordinator-read-only' : 'direct-write'
 
   const ship: ShipConfig = {
     display_name: spec.displayName ?? spec.id,

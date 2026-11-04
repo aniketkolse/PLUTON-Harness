@@ -135,10 +135,17 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
           <div class="pane-meta">
             <span id="filesWorkspaceLabel" class="mono truncate" title="Click to change workspace folder" style="cursor: pointer;">—</span>
             <span class="pane-tag">workspace</span>
+            <button id="btnRefreshFiles" class="btn-icon" type="button" title="Refresh file list" aria-label="Refresh file list">&#8635;</button>
           </div>
           <div class="sub-tabs" role="tablist">
             <button id="tabFiles" class="sub-tab is-active" type="button">Files</button>
             <button id="tabDiffs" class="sub-tab" type="button">Worktree Diffs</button>
+            <div style="margin-left:auto;display:flex;gap:4px;align-items:center;">
+              <label style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:4px;cursor:pointer;">
+                <input id="chkSessionScopedFiles" type="checkbox" style="margin:0;" />
+                Session checkout
+              </label>
+            </div>
           </div>
           <div class="file-search-bar">
             <svg class="file-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -188,6 +195,22 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
               <button id="btnSignInAccount" class="btn-primary w-full" type="button">Link Pluton Account</button>
             </div>
             <div id="runtimeInfo" class="kv-list"></div>
+          </div>
+
+          <!-- AI Connections & Providers -->
+          <div class="card" id="connectionSettingsCard">
+            <div class="card-head">
+              <span class="card-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                AI Connections &amp; Providers
+              </span>
+              <div class="card-head-actions">
+                <button id="btnOpenManualModel" class="btn-xs btn-secondary" type="button">+ Manual Model</button>
+                <button id="btnOpenAddConnection" class="btn-xs btn-primary" type="button">+ Add Connection</button>
+              </div>
+            </div>
+            <div class="card-sub">Multi-connection AI endpoints strictly isolated per connection ID (0600)</div>
+            <div id="connectionTable" class="provider-table"></div>
           </div>
 
           <!-- AI Providers -->
@@ -674,6 +697,88 @@ export const STATIC_ASSETS: Record<string, StaticAsset> = {
       <div class="modal-foot">
         <button id="providerKeyCancel" class="btn-secondary" type="button">Cancel</button>
         <button id="btnSaveProviderKey" class="btn-primary" type="button">Save Key</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Connection Dialog -->
+  <div id="connectionAddModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="connectionAddTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="connectionAddTitle">Add AI Connection</h3>
+        <button id="connectionAddClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <label class="field">
+        <span class="field-label">Connection ID (slug)</span>
+        <input id="connectionIdInput" type="text" placeholder="e.g. openrouter-prod, deepseek-direct" autocomplete="off" class="input-text">
+      </label>
+      <label class="field">
+        <span class="field-label">Protocol</span>
+        <select id="connectionProtocolSelect" class="select-box">
+          <option value="openai-compatible" selected>openai-compatible (Standard HTTP)</option>
+          <option value="anthropic">anthropic</option>
+          <option value="google">google</option>
+          <option value="custom">custom</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Display Name</span>
+        <input id="connectionDisplayNameInput" type="text" placeholder="e.g. OpenRouter Production" autocomplete="off" class="input-text">
+      </label>
+      <label class="field">
+        <span class="field-label">Base URL</span>
+        <input id="connectionBaseUrlInput" type="text" placeholder="https://api.openai.com/v1" autocomplete="off" class="input-text mono">
+      </label>
+      <label class="field">
+        <span class="field-label">API Key</span>
+        <input id="connectionApiKeyInput" type="password" placeholder="Stored securely in private credential file (0600)" autocomplete="off" class="input-text mono">
+      </label>
+      <div id="connectionAddStatus" class="card-status-text"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">Key is strictly isolated per connection ID; never exposed.</span>
+        <button id="connectionAddCancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="btnAddConnectionSubmit" class="btn-primary" type="button">Add Connection</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Model Dialog -->
+  <div id="manualModelModal" class="modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="manualModelTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title" id="manualModelTitle">Register Manual Model</h3>
+        <button id="manualModelClose" class="icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <label class="field">
+        <span class="field-label">Connection</span>
+        <select id="manualModelConnectionSelect" class="select-box"></select>
+      </label>
+      <label class="field">
+        <span class="field-label">Model ID</span>
+        <input id="manualModelIdInput" type="text" placeholder="e.g. claude-3-5-sonnet, gpt-4o, nemotron-4-340b" autocomplete="off" class="input-text mono">
+      </label>
+      <label class="field">
+        <span class="field-label">Display Name</span>
+        <input id="manualModelDisplayNameInput" type="text" placeholder="e.g. Claude 3.5 Sonnet" autocomplete="off" class="input-text">
+      </label>
+      <div class="field-group-title" style="margin-top:10px;font-size:12px;font-weight:600;color:var(--text-muted);">Declared Capabilities</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+        <label class="checkbox-row" style="font-size:12px;"><input id="manualCapToolCalling" type="checkbox" checked> Tool Calling</label>
+        <label class="checkbox-row" style="font-size:12px;"><input id="manualCapCoding" type="checkbox" checked> Coding Capable</label>
+        <label class="checkbox-row" style="font-size:12px;"><input id="manualCapReasoning" type="checkbox" checked> Reasoning Capable</label>
+      </div>
+      <label class="field">
+        <span class="field-label">Context Window (tokens)</span>
+        <input id="manualModelContextWindow" type="number" value="128000" class="input-text mono">
+      </label>
+      <div id="manualModelStatus" class="card-status-text"></div>
+      <div class="modal-foot">
+        <button id="manualModelCancel" class="btn-secondary" type="button">Cancel</button>
+        <button id="btnRegisterManualModel" class="btn-primary" type="button">Register Model</button>
       </div>
     </div>
   </div>
@@ -4353,6 +4458,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       await loadSessions();
       await loadModels();
       await loadProviders();
+      await loadConnections();
       await loadMcp();
       await loadApprovals();
       await loadSettings();
@@ -5468,6 +5574,264 @@ details:not([open]) > .tool-card-head .tool-chevron {
     }
   }
 
+  // ----------------------------------------------------------- connections
+  async function loadConnections() {
+    try {
+      var res = await apiFetch('/api/connections');
+      state.connections = res.connections || [];
+      renderConnections();
+    } catch (err) {
+      var node = el('connectionTable');
+      if (node) node.innerHTML = '<div class="empty-hint">Failed to load connections: ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function renderConnections() {
+    var node = el('connectionTable');
+    if (!node) return;
+    var list = state.connections || [];
+    if (list.length === 0) {
+      node.innerHTML = '<div class="empty-hint">No AI connections configured yet. Click "+ Add Connection" to connect OpenAI, Anthropic, OpenRouter, or custom endpoints.</div>';
+      return;
+    }
+    node.innerHTML = list.map(function (c) {
+      var keyBadge = c.hasCredential
+        ? '<span class="tag-mono" style="color:#86efac;border-color:rgba(34,197,94,0.3);">Key Configured</span>'
+        : '<span class="tag-mono" style="color:#fca5a5;border-color:rgba(239,68,68,0.3);">No Key</span>';
+      return '<div class="provider-card" id="conn-card-' + escapeHtml(c.id) + '">' +
+        '<div class="provider-card-head">' +
+          '<div class="provider-meta">' +
+            '<span class="provider-name">' + escapeHtml(c.displayName || c.id) + '</span>' +
+            '<span class="tag-mono">' + escapeHtml(c.id) + '</span>' +
+            '<span class="tag-mono">' + escapeHtml(c.protocol || 'openai-compatible') + '</span>' +
+            keyBadge +
+          '</div>' +
+        '</div>' +
+        '<div class="provider-url mono">' + escapeHtml(c.baseUrl) + '</div>' +
+        '<div class="provider-actions">' +
+          '<button type="button" class="btn-xs btn-secondary btn-conn-manual-model" data-connection="' + escapeHtml(c.id) + '">+ Add Model</button>' +
+          '<button type="button" class="btn-xs btn-secondary btn-conn-validate" data-connection="' + escapeHtml(c.id) + '">Test Connection</button>' +
+          '<button type="button" class="btn-xs btn-secondary btn-conn-delete" data-connection="' + escapeHtml(c.id) + '" style="color:#fca5a5;">Delete</button>' +
+        '</div>' +
+        '<div class="provider-status-msg is-hidden" id="conn-status-' + escapeHtml(c.id) + '"></div>' +
+      '</div>';
+    }).join('');
+
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-conn-manual-model'), function (btn) {
+      btn.addEventListener('click', function () {
+        openManualModelModal(btn.getAttribute('data-connection'));
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-conn-validate'), function (btn) {
+      btn.addEventListener('click', function () {
+        validateConnection(btn.getAttribute('data-connection'));
+      });
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.btn-conn-delete'), function (btn) {
+      btn.addEventListener('click', function () {
+        deleteConnection(btn.getAttribute('data-connection'));
+      });
+    });
+  }
+
+  function openAddConnectionModal() {
+    var modal = el('connectionAddModal');
+    if (!modal) return;
+    var status = el('connectionAddStatus');
+    if (status) { status.textContent = ''; status.className = 'card-status-text'; }
+    var idInput = el('connectionIdInput');
+    if (idInput) idInput.value = '';
+    var nameInput = el('connectionDisplayNameInput');
+    if (nameInput) nameInput.value = '';
+    var urlInput = el('connectionBaseUrlInput');
+    if (urlInput) urlInput.value = '';
+    var keyInput = el('connectionApiKeyInput');
+    if (keyInput) keyInput.value = '';
+    modal.classList.remove('is-hidden');
+    if (idInput) idInput.focus();
+  }
+
+  function closeAddConnectionModal() {
+    var modal = el('connectionAddModal');
+    if (modal) modal.classList.add('is-hidden');
+  }
+
+  async function submitAddConnection() {
+    var idInput = el('connectionIdInput');
+    var protoSelect = el('connectionProtocolSelect');
+    var nameInput = el('connectionDisplayNameInput');
+    var urlInput = el('connectionBaseUrlInput');
+    var keyInput = el('connectionApiKeyInput');
+    var status = el('connectionAddStatus');
+
+    var id = idInput && idInput.value ? idInput.value.trim().toLowerCase() : '';
+    var protocol = protoSelect ? protoSelect.value : 'openai-compatible';
+    var displayName = nameInput && nameInput.value ? nameInput.value.trim() : '';
+    var baseUrl = urlInput && urlInput.value ? urlInput.value.trim() : '';
+    var apiKey = keyInput && keyInput.value ? keyInput.value.trim() : '';
+
+    if (!id) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Connection ID is required.'; }
+      return;
+    }
+    if (!baseUrl) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Base URL is required.'; }
+      return;
+    }
+
+    if (status) { status.className = 'card-status-text'; status.textContent = 'Adding connection...'; }
+
+    try {
+      var payload = {
+        id: id,
+        protocol: protocol,
+        baseUrl: baseUrl,
+        displayName: displayName || id
+      };
+      if (apiKey) payload.apiKey = apiKey;
+
+      var res = await apiFetch('/api/connections', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (res && res.ok) {
+        toast('Connection added: ' + id);
+        closeAddConnectionModal();
+        await loadConnections();
+        await loadProviders();
+        await loadModels();
+      }
+    } catch (err) {
+      if (status) {
+        status.className = 'card-status-text is-error';
+        status.textContent = 'Failed to add connection: ' + err.message;
+      }
+    }
+  }
+
+  async function validateConnection(connectionId) {
+    var statusEl = el('conn-status-' + connectionId);
+    if (statusEl) {
+      statusEl.classList.remove('is-hidden');
+      statusEl.className = 'provider-status-msg mono';
+      statusEl.textContent = 'Testing connection...';
+    }
+    try {
+      var res = await apiFetch('/api/connections/' + encodeURIComponent(connectionId) + '/validate', {
+        method: 'POST'
+      });
+      if (statusEl && res && res.report) {
+        var r = res.report;
+        var passed = r.liveCheck === 'passed';
+        statusEl.className = 'provider-status-msg mono ' + (passed ? 'is-success' : 'is-error');
+        statusEl.textContent = (passed ? '✓ Connection verified: ' : '✗ Verification failed: ') + (r.detail || r.liveCheck);
+      }
+    } catch (err) {
+      if (statusEl) {
+        statusEl.className = 'provider-status-msg mono is-error';
+        statusEl.textContent = '✗ Error: ' + err.message;
+      }
+    }
+  }
+
+  async function deleteConnection(connectionId) {
+    var confirmed = await showPlutonConfirm(
+      'Delete Connection',
+      'Remove connection "' + connectionId + '" and its stored credentials?'
+    );
+    if (!confirmed) return;
+    try {
+      await apiFetch('/api/connections/' + encodeURIComponent(connectionId), {
+        method: 'DELETE'
+      });
+      toast('Connection removed: ' + connectionId);
+      await loadConnections();
+      await loadProviders();
+      await loadModels();
+    } catch (err) {
+      toast('Failed to remove connection: ' + err.message, true);
+    }
+  }
+
+  function openManualModelModal(defaultConnectionId) {
+    var modal = el('manualModelModal');
+    if (!modal) return;
+    var status = el('manualModelStatus');
+    if (status) { status.textContent = ''; status.className = 'card-status-text'; }
+    var select = el('manualModelConnectionSelect');
+    if (select) {
+      var conns = state.connections || [];
+      select.innerHTML = conns.map(function (c) {
+        return '<option value="' + escapeHtml(c.id) + '"' + (c.id === defaultConnectionId ? ' selected' : '') + '>' + escapeHtml(c.displayName || c.id) + ' (' + escapeHtml(c.id) + ')</option>';
+      }).join('');
+    }
+    var idInput = el('manualModelIdInput');
+    if (idInput) idInput.value = '';
+    var nameInput = el('manualModelDisplayNameInput');
+    if (nameInput) nameInput.value = '';
+    modal.classList.remove('is-hidden');
+    if (idInput) idInput.focus();
+  }
+
+  function closeManualModelModal() {
+    var modal = el('manualModelModal');
+    if (modal) modal.classList.add('is-hidden');
+  }
+
+  async function submitManualModel() {
+    var select = el('manualModelConnectionSelect');
+    var idInput = el('manualModelIdInput');
+    var nameInput = el('manualModelDisplayNameInput');
+    var toolCap = el('manualCapToolCalling');
+    var codeCap = el('manualCapCoding');
+    var reasonCap = el('manualCapReasoning');
+    var ctxInput = el('manualModelContextWindow');
+    var status = el('manualModelStatus');
+
+    var connectionId = select ? select.value : '';
+    var modelId = idInput && idInput.value ? idInput.value.trim() : '';
+    var displayName = nameInput && nameInput.value ? nameInput.value.trim() : '';
+
+    if (!connectionId) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Please select a connection.'; }
+      return;
+    }
+    if (!modelId) {
+      if (status) { status.className = 'card-status-text is-error'; status.textContent = 'Model ID is required.'; }
+      return;
+    }
+
+    if (status) { status.className = 'card-status-text'; status.textContent = 'Registering model...'; }
+
+    try {
+      var payload = {
+        modelId: modelId,
+        displayName: displayName || modelId,
+        capabilities: {
+          toolCalling: toolCap ? toolCap.checked : true,
+          coding: codeCap ? codeCap.checked : true,
+          reasoning: reasonCap ? reasonCap.checked : true,
+          contextWindow: ctxInput && ctxInput.value ? parseInt(ctxInput.value, 10) : 128000
+        }
+      };
+
+      var res = await apiFetch('/api/connections/' + encodeURIComponent(connectionId) + '/models', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (res && res.ok) {
+        toast('Manual model registered: ' + modelId);
+        closeManualModelModal();
+        await loadModels();
+      }
+    } catch (err) {
+      if (status) {
+        status.className = 'card-status-text is-error';
+        status.textContent = 'Failed to register model: ' + err.message;
+      }
+    }
+  }
+
   function adjustTextareaHeight(input) {
     if (!input) return;
     input.style.height = 'auto';
@@ -6364,7 +6728,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
       list.innerHTML = '<div class="empty-hint">Loading files\\u2026</div>';
     }
     try {
-      var res = state.activeSessionId
+      var useSessionScope = el('chkSessionScopedFiles') && el('chkSessionScopedFiles').checked;
+      var res = (useSessionScope && state.activeSessionId)
         ? await apiFetch('/api/files?sessionId=' + encodeURIComponent(state.activeSessionId))
         : await apiFetch('/api/files');
       var entries = res.entries || [];
@@ -6393,6 +6758,15 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   // ------------------------------------------------------- main-area viewer
   var MAX_HIGHLIGHT_CHARS = 200000;
+
+  function startFilesPolling() {
+    if (state._filesPollTimer) return;
+    state._filesPollTimer = setInterval(function () {
+      if (!document.hidden && state.sidebarTab === 'files' && state.filesTabMode === 'files') {
+        loadFilesList(true);
+      }
+    }, 5000);
+  }
 
   function fileViewerIsOpen() {
     var viewer = el('fileViewer');
@@ -7545,6 +7919,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
 
   function handleWorkerEvent(ev) {
     if (!ev || !ev.taskId) return;
+    var isArtifact = ev.type === 'worker.spec.created' || ev.type === 'worker.spec.updated'
+      || ev.type === 'worker.file.claim' || ev.type === 'worker.file.release';
+    // Manager artifacts (e.g. the lead updating a shared spec) belong in the
+    // activity feed, not a synthetic "manager" worker card.
+    if (ev.taskId === 'manager' && isArtifact) return;
     var worker = state.workers[ev.taskId];
     if (!worker) {
       worker = {
@@ -7581,6 +7960,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
     } else if (ev.type === 'worker.created') {
       worker.status = 'created';
     }
+    // Specs and file claims are collaboration signals; they never change lifecycle.
 
     // Authoritative filter: the card exists only while the worker is active.
     // A terminal event removes it from the inspector, never from state.workers.
@@ -7599,6 +7979,20 @@ details:not([open]) > .tool-card-head .tool-chevron {
         var messageKind = typeof ev.payload.kind === 'string' ? ev.payload.kind : 'message';
         entryText = '\u2192 ' + senderLabel + ' \u2192 ' + recipientLabel + ' (' + messageKind + '): ' + ev.payload.body;
         entryClass = 'is-message';
+      } else if (ev.type === 'worker.spec.created' || ev.type === 'worker.spec.updated') {
+        var specTitle = typeof ev.payload.title === 'string' ? ev.payload.title : 'spec';
+        var specVersion = typeof ev.payload.version === 'number' ? ev.payload.version : null;
+        entryText = (ev.type === 'worker.spec.created' ? '\u270e published spec \u201c' : '\u21bb updated spec \u201c') +
+          specTitle + '\u201d' + (specVersion !== null ? ' (v' + specVersion + ')' : '');
+        entryClass = 'is-message';
+      } else if (ev.type === 'worker.file.claim') {
+        var claimPath = typeof ev.payload.path === 'string' ? ev.payload.path : 'file';
+        var claimIntent = typeof ev.payload.intent === 'string' ? ev.payload.intent : '';
+        entryText = '\u270e claimed ' + claimPath + (claimIntent ? ' — ' + claimIntent : '');
+        entryClass = 'is-message';
+      } else if (ev.type === 'worker.file.release') {
+        var releasePath = typeof ev.payload.path === 'string' ? ev.payload.path : 'claim';
+        entryText = '\u2713 released ' + releasePath;
       } else if (typeof ev.payload.token === 'string') {
         entryText = ev.payload.token;
         entryClass = 'is-token';
@@ -8077,6 +8471,16 @@ details:not([open]) > .tool-card-head .tool-chevron {
       closeAddProviderModal();
       return true;
     }
+    var connAddModal = el('connectionAddModal');
+    if (connAddModal && !connAddModal.classList.contains('is-hidden')) {
+      closeAddConnectionModal();
+      return true;
+    }
+    var manModal = el('manualModelModal');
+    if (manModal && !manModal.classList.contains('is-hidden')) {
+      closeManualModelModal();
+      return true;
+    }
     var provKeyModal = el('providerKeyModal');
     if (provKeyModal && !provKeyModal.classList.contains('is-hidden')) {
       closeProviderKeyModal();
@@ -8155,6 +8559,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       loadMcp();
       loadSettings();
       loadProviders();
+      loadConnections();
     }
   }
 
@@ -8462,6 +8867,8 @@ details:not([open]) > .tool-card-head .tool-chevron {
     // The workspace chip and the file-panel label are pinned to the server's
     // project directory; clicking them explains the pin (no client-side
     // selection exists, so no label may diverge from server-confirmed state).
+    startFilesPolling();
+
     var wsChip = el('workspaceChip');
     if (wsChip) wsChip.addEventListener('click', explainWorkspacePin);
     var filesWsLabel = el('filesWorkspaceLabel');
@@ -8470,6 +8877,11 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (settingsWsRoot) settingsWsRoot.addEventListener('click', explainWorkspacePin);
     var btnChangeSettingsWs = el('btnChangeSettingsWorkspace');
     if (btnChangeSettingsWs) btnChangeSettingsWs.addEventListener('click', explainWorkspacePin);
+
+    var btnRefreshFiles = el('btnRefreshFiles');
+    if (btnRefreshFiles) btnRefreshFiles.addEventListener('click', function () { loadFilesList(true); });
+    var chkSessionFiles = el('chkSessionScopedFiles');
+    if (chkSessionFiles) chkSessionFiles.addEventListener('change', function () { loadFilesList(true); });
 
     var attach = el('btnAttach');
     if (attach) attach.addEventListener('click', openAttachModal);
@@ -8612,6 +9024,25 @@ details:not([open]) > .tool-card-head .tool-chevron {
     if (provAddCancel) provAddCancel.addEventListener('click', closeAddProviderModal);
     var btnAddProvSubmit = el('btnAddProviderSubmit');
     if (btnAddProvSubmit) btnAddProvSubmit.addEventListener('click', submitAddProvider);
+
+    // Connection management bindings
+    var btnOpenAddConn = el('btnOpenAddConnection');
+    if (btnOpenAddConn) btnOpenAddConn.addEventListener('click', openAddConnectionModal);
+    var connAddClose = el('connectionAddClose');
+    if (connAddClose) connAddClose.addEventListener('click', closeAddConnectionModal);
+    var connAddCancel = el('connectionAddCancel');
+    if (connAddCancel) connAddCancel.addEventListener('click', closeAddConnectionModal);
+    var btnAddConnSubmit = el('btnAddConnectionSubmit');
+    if (btnAddConnSubmit) btnAddConnSubmit.addEventListener('click', submitAddConnection);
+
+    var btnOpenManual = el('btnOpenManualModel');
+    if (btnOpenManual) btnOpenManual.addEventListener('click', function () { openManualModelModal(); });
+    var manualClose = el('manualModelClose');
+    if (manualClose) manualClose.addEventListener('click', closeManualModelModal);
+    var manualCancel = el('manualModelCancel');
+    if (manualCancel) manualCancel.addEventListener('click', closeManualModelModal);
+    var btnRegManual = el('btnRegisterManualModel');
+    if (btnRegManual) btnRegManual.addEventListener('click', submitManualModel);
 
     var provKeyClose = el('providerKeyClose');
     if (provKeyClose) provKeyClose.addEventListener('click', closeProviderKeyModal);
@@ -8803,6 +9234,7 @@ details:not([open]) > .tool-card-head .tool-chevron {
       await loadSessions();
       await loadModels();
       await loadProviders();
+      await loadConnections();
       await loadMcp();
       await loadApprovals();
       await loadSettings();

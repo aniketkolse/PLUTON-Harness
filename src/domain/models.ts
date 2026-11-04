@@ -38,6 +38,7 @@ export type PersistentMuseRole = PersistentShipRole
 export const WORKSPACE_POLICIES = [
   'coordinator-read-only',
   'read-only',
+  'direct-write',
   'isolated-task-checkout',
 ] as const
 export type WorkspacePolicy = (typeof WORKSPACE_POLICIES)[number]
@@ -45,10 +46,10 @@ export type WorkspacePolicy = (typeof WORKSPACE_POLICIES)[number]
 export const ROLE_DEFAULT_WORKSPACE_POLICIES: Readonly<Record<ShipRole, WorkspacePolicy>> = {
   supervisor: 'coordinator-read-only',
   researcher: 'read-only',
-  coder: 'isolated-task-checkout',
-  tester: 'isolated-task-checkout',
+  coder: 'direct-write',
+  tester: 'direct-write',
   reviewer: 'read-only',
-  custom: 'isolated-task-checkout',
+  custom: 'direct-write',
 }
 
 export const APPROVAL_MODES = [

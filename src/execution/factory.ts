@@ -221,6 +221,7 @@ export function nativeSpecForShip(args: {
     mode: native.mode,
     modeByPlatform: native.mode_by_platform,
   })
+  const isDirectWrite = args.sessionKind === 'run' && ship.workspacePolicy === 'direct-write'
   const mode =
     effectiveMode === 'unconfined'
       ? 'unconfined'
@@ -230,7 +231,9 @@ export function nativeSpecForShip(args: {
           ? 'read-only'
           : args.isolatedCheckout && ship.workspacePolicy === 'isolated-task-checkout'
             ? 'workspace-write'
-            : 'read-only'
+            : isDirectWrite
+              ? 'workspace-write'
+              : 'read-only'
 
   if (network === 'restricted' && args.bridge === undefined) {
     throw new PolicyDeniedError(

@@ -110,13 +110,27 @@ export function resolveExecutionRoute(opts: ResolveExecutionRouteOptions): Resol
     throw new ValidationError('cannot resolve execution route: model id is empty')
   }
 
-  const prefix = modelPrefix(modelId)
+  const colonIndex = modelId.indexOf(':')
+  let colonPrefix: string | null = null
+  let actualModel = modelId
+  if (colonIndex !== -1) {
+    colonPrefix = modelId.slice(0, colonIndex).trim()
+    actualModel = modelId.slice(colonIndex + 1).trim()
+  }
+
+  const prefix = colonPrefix !== null ? colonPrefix : modelPrefix(modelId)
   const builtinPrefix = prefix !== '' && BUILTIN_MODEL_PREFIXES.has(prefix) ? prefix : null
   let providerById = refreshProviderMap(rootDir)
 
   let resolvedProvider: ProviderConfig | null = null
   let resolvedEngine: string | null = opts.engineKind?.trim() || null
-  let resolvedProviderId: string | null = opts.providerId?.trim() || null
+  let resolvedProviderId: string | null = opts.providerId?.trim() || colonPrefix || null
+
+  if (colonPrefix !== null && opts.providerId && opts.providerId !== colonPrefix) {
+    throw new ValidationError(
+      `model '${modelId}' specifies connection '${colonPrefix}' but connection '${opts.providerId}' was selected`,
+    )
+  }
 
   // 0. A built-in model prefix wins over an inherited provider hint. The
   // picker can switch a Ship from an external provider back to OpenCode
@@ -224,6 +238,11 @@ export function resolveExecutionRoute(opts: ResolveExecutionRouteOptions): Resol
             `or add it with \`pluton provider add ${prefix} --engine openai-compatible --base-url <url>\``,
         )
       }
+      if (resolvedEngine === null && builtinPrefix === null) {
+        throw new ValidationError(
+          `cannot resolve execution route for model '${modelId}': no provider or engine specified and model ID has no recognized connection prefix; specify providerId or format as '<connection>:${modelId}'`,
+        )
+      }
       resolvedEngine = resolvedEngine ?? 'opencode'
       // Built-in engines report themselves as their own provider identity; only
       // an explicitly configured provider counts as external.
@@ -255,10 +274,11 @@ export function resolveExecutionRoute(opts: ResolveExecutionRouteOptions): Resol
   }
 
   // The provider API receives its own model id, never the composite identity.
+  const rawProviderModelId = colonPrefix !== null ? actualModel : modelId
   const providerModelId =
-    resolvedProvider !== null && modelId.startsWith(`${resolvedProvider.id}/`)
-      ? modelId.slice(resolvedProvider.id.length + 1)
-      : modelId
+    resolvedProvider !== null && rawProviderModelId.startsWith(`${resolvedProvider.id}/`)
+      ? rawProviderModelId.slice(resolvedProvider.id.length + 1)
+      : rawProviderModelId
 
   // 5. Credentials reference and status
   let credentialsReference: string | null = null
